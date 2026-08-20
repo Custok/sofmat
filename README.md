@@ -42,7 +42,7 @@ Within ~5% of the A100s — and neither setup uses a fancy interconnect: the A10
 And **~4× a single DGX Spark** on the exact same model + speculation. The reason is bandwidth: the Spark's 128 GB *unified LPDDR5X* runs at ~273 GB/s, while each RTX 5080's GDDR7 runs at ~960 GB/s — five of them pooled over the network move weights far faster than one big unified pool. Decode here is memory-bandwidth-bound, so that gap shows up directly (the Spark held ~7.5 tok/s whether the context was near-empty or at 95k — it's the weight reads, not the KV, that bind). Its prefill is slower too: ingesting a 95k-token prompt took the Spark ~100 s.
 
 <!-- reference: the same 27B (qwen3.8-27b), same 55.59 GB, same MTP speculation — both baselines side by side: 1× DGX Spark and 2× A100 -->
-![The same 27B BF16 + MTP on both reference baselines — a single DGX Spark (top) and 2× A100 (bottom), identical 55.59 GB model](assets/cmp-a100.png)
+![The same 27B BF16 + MTP on both reference baselines — a single DGX Spark (top) and 2× A100 (bottom), identical 55.59 GB model](assets/cmp-baselines.png)
 
 ## What sofmat is (and isn't)
 
