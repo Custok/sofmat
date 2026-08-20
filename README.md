@@ -10,14 +10,14 @@ Point any OpenAI client at one endpoint; sofmat runs the model split across ever
 
 ## What it achieves today
 
-A **27B** model at **Q8** precision with a **150k-token context**, served across **two nodes of consumer GPUs** (16 GB each) over standard **10 GbE**, at **~65 tokens/s** single-stream decode — with full **8/8 needle-in-a-haystack recall** at 150k.
+A **27B** model at **Q8** precision with a **150k-token context**, served across **two nodes of consumer GPUs** (16 GB each) over standard **10 GbE**, at **up to ~70 tokens/s** single-stream decode (content-dependent) — with full **8/8 needle-in-a-haystack recall** at 150k.
 
 <!-- panel screenshot (sanitized: anonymized node labels, no infra IPs) -->
 ![sofmat live panel — 27B Q8, 150k context, 2 consumer nodes](assets/panel-q8.png)
 
-The panel also shows sofmat's **disaggregated prefill/decode**: the model runs as two roles on separate GPUs. A **decode** stage generates the answer (~61 tok/s single-stream); a separate **prefill** stage ingests the prompt. On its own each server just generates tokens (decode ~61 tok/s, the prefill server ~35 tok/s). Joined by role, they do different jobs at once: prefill *reads the prompt* at **~1,600 tokens/s** while decode *streams the answer* at **~55 tok/s** — prompt-ingestion and generation are separate metrics, not additive. Splitting the phases is what keeps them from fighting over the same GPUs: interference drops from **~5.8× slowdown** (prefill and decode co-located) to **~1.0×** (disaggregated) — near-total isolation, so one user's huge prompt never stalls another user's token stream. (Live KV hand-off between the two stages is on the roadmap; the isolation is measured today.)
+The panel also shows sofmat's **disaggregated prefill/decode**: the model runs as two roles on separate GPUs. A **prefill** stage ingests the prompt while a separate **decode** stage streams the answer — different jobs at once, on different GPUs. Prompt-ingestion and generation are separate metrics, not additive: prefill *reads the prompt* at **~1,600 tokens/s** while decode *streams the answer* at **~65 tok/s**. Splitting the phases is what keeps them from fighting over the same GPUs: interference drops from **~5.8× slowdown** (prefill and decode co-located) to **~1.0×** (disaggregated) — near-total isolation, so one user's huge prompt never stalls another user's token stream. (Live KV hand-off between the two stages is on the roadmap; the isolation is measured today.)
 
-Served straight — as a single decode instance, no disaggregation — the same Q8 sustains **~70 tok/s** at **150k** context across **2 nodes / 3 GPUs**:
+Served straight — as a single decode instance, no disaggregation — the same Q8 reaches **up to ~70 tok/s** at **150k** context across **2 nodes / 3 GPUs** (content-dependent):
 
 <!-- panel screenshot (sanitized: anonymized node labels, no infra IPs) -->
 ![sofmat live panel — 27B Q8 as a single instance, 150k context, ~70 tok/s across 2 nodes / 3 GPUs](assets/panel-q8-single.png)
