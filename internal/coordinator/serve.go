@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/hop", s.hop)
 	mux.HandleFunc("/admin/eject", s.adminEject)
 	mux.HandleFunc("/admin/load", s.adminLoad)
+	mux.HandleFunc("/config/apply", s.configApply) // one-call model swap (eject+load)
 	return mux
 }
 
@@ -163,9 +164,23 @@ func (s *Server) proxyGET(path string) http.HandlerFunc {
 
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
-	var body gateway.Body
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, gateway.Body{"error": err.Error()})
+		return
+	}
+	var body gateway.Body
+	if err := json.Unmarshal(raw, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, gateway.Body{"error": err.Error()})
+		return
+	}
+	// Streaming (SSE) can't go through gateway.Chat — it json.Unmarshals the
+	// whole reply, which chokes on the upstream's "data: {...}" event stream.
+	// Forward the raw request to the decode backend and flush chunks straight
+	// back. Gateway policy (slot/n_max) mutation on the stream path is v2; the
+	// HUD needs plain passthrough today.
+	if streamRequested(body) {
+		s.chatStream(w, r, raw)
 		return
 	}
 	h := gateway.Headers{}
@@ -178,6 +193,66 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// streamRequested reports whether the body asked for an SSE stream.
+func streamRequested(body gateway.Body) bool {
+	b, _ := body["stream"].(bool)
+	return b
+}
+
+// chatStream proxies a streaming chat request to the decode backend and copies
+// the SSE response to the client chunk-by-chunk (flushed), so clients that want
+// token streaming (e.g. a HUD) get it through the coordinator, not only direct.
+func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, raw []byte) {
+	if s.bc.DecodeEntryURL == "" {
+		writeJSON(w, http.StatusServiceUnavailable, gateway.Body{"error": "no decode backend"})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, gateway.Body{"error": "streaming unsupported by server"})
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		s.bc.DecodeEntryURL+"/v1/chat/completions", bytes.NewReader(raw))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, gateway.Body{"error": err.Error()})
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	if a := r.Header.Get("Authorization"); a != "" {
+		req.Header.Set("Authorization", a)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, gateway.Body{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "text/event-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(resp.StatusCode)
+	buf := make([]byte, 8192)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+		if rerr != nil {
+			return
+		}
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
