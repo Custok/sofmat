@@ -26,10 +26,10 @@ Same 55 GB BF16 model, same 100k context, same speculative decoding — measured
 
 | Setup | GPUs | Interconnect | Single-stream decode |
 |---|---|---|---|
-| 2× A100 | 2 × datacenter (160 GB HBM) | NVLink | ~34 tok/s |
+| 2× A100 | 2 × datacenter (160 GB HBM) | PCIe (no NVLink) | ~34 tok/s |
 | **sofmat** | **5 × consumer RTX 5080, 3 nodes (80 GB GDDR7)** | **plain 10 GbE** | **~32 tok/s** |
 
-Within ~5%. Five consumer GPUs across three machines on ordinary Ethernet keep pace with a pair of A100s on this workload — a fraction of the cost, no InfiniBand. (The A100s hold 2× the VRAM, so they pull ahead on concurrency and much larger contexts; for single-stream decode of a model this size, they're neck-and-neck.)
+Within ~5% — and neither setup uses a fancy interconnect: the A100s are on ordinary PCIe, sofmat is on plain 10 GbE Ethernet. Five consumer GPUs across three machines keep pace with a pair of A100s on this workload, at a fraction of the cost. (The A100s hold 2× the VRAM, so they pull ahead on concurrency and much larger contexts; for single-stream decode of a model this size, they're neck-and-neck.)
 
 <!-- reference: the same 27B (qwen3.8-27b), same 55.59 GB, same MTP speculation, on 2× A100 -->
 ![The same 27B model served on 2× A100 — same 55.59 GB, same MTP speculation](assets/cmp-a100.png)
