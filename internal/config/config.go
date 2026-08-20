@@ -15,6 +15,17 @@ type Config struct {
 	Nodes     []Node     `json:"nodes"`
 	Instances []Instance `json:"instances"`
 
+	// Presets are the loadable model layouts the panel offers in its Load
+	// picker: each names a model + per-node roles/topology. Real endpoints and
+	// gguf paths live only in config.local.json (gitignored).
+	Presets []Preset `json:"presets"`
+
+	// PublicURL is the coordinator's reachable API base (the single entry point
+	// that fronts every role — "Reachable at" in the panel). APIKey, when set,
+	// is the optional bearer key clients must send; empty = auth disabled.
+	PublicURL string `json:"public_url"`
+	APIKey    string `json:"api_key"`
+
 	// Model describes the model to place (solver input). Optional for plain
 	// serving; required (and validated fail-closed) by ModelSpecFrom.
 	Model Model `json:"model"`
@@ -80,6 +91,33 @@ type Stage struct {
 	Node   string `json:"node"`
 	GPUs   int    `json:"gpus"`
 	Layers [2]int `json:"layers"`
+}
+
+// Preset is a loadable model layout shown in the panel's Load picker. `Layers`
+// in Topology is a per-node layer COUNT (the pipeline share), not a range.
+type Preset struct {
+	Key       string        `json:"key"`
+	Label     string        `json:"label"`
+	ModelName string        `json:"model_name"`
+	Model     string        `json:"model"` // gguf path (local main only)
+	Quant     string        `json:"quant"`
+	Ctx       string        `json:"ctx"`
+	KV        string        `json:"kv"`
+	Main      string        `json:"main"`     // node id running the main process
+	Endpoint  string        `json:"endpoint"` // where the served API answers
+	Remote    bool          `json:"remote"`
+	Note      string        `json:"note"`
+	SizeGB    float64       `json:"size_gb"`
+	RPC       string        `json:"rpc"`
+	Args      []string      `json:"args"`
+	Topology  []PresetStage `json:"topology"`
+}
+
+// PresetStage is one node's share of a preset's pipeline (layer count + GPUs).
+type PresetStage struct {
+	Node   string `json:"node"`
+	GPUs   int    `json:"gpus"`
+	Layers int    `json:"layers"`
 }
 
 // Load reads and validates a JSON config from path.

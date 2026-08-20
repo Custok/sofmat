@@ -121,11 +121,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/eject", s.adminEject)
 	mux.HandleFunc("/api/load", s.adminLoad)
 	mux.HandleFunc("/api/apply", s.configApply)
-	mux.HandleFunc("/api/chat", s.apiStub)          // phase 2
-	mux.HandleFunc("/api/measure", s.apiStub)       // phase 2
-	mux.HandleFunc("/api/selectinstance", s.apiStub) // phase 2
-	mux.HandleFunc("/api/setconfig", s.apiStub)     // phase 2
-	mux.HandleFunc("/api/rename", s.apiStub)        // phase 2
+	mux.HandleFunc("/api/chat", s.panelChat)
+	mux.HandleFunc("/api/measure", s.panelMeasure)
+	mux.HandleFunc("/api/selectinstance", s.panelSelectInstance)
+	mux.HandleFunc("/api/setconfig", s.panelSetConfig)
+	mux.HandleFunc("/api/rename", s.panelRename)
 	mux.HandleFunc("/", s.panelPage)                // dashboard home (catch-all last)
 	return mux
 }
