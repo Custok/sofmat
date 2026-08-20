@@ -35,14 +35,14 @@ Same 55 GB BF16 model, same 100k context, same speculative decoding — measured
 |---|---|---|---|
 | 2× A100 | 2 × datacenter (160 GB HBM) | PCIe | ~34 tok/s |
 | **sofmat** | **5 × consumer RTX 5080, 3 nodes (80 GB GDDR7)** | **plain 10 GbE** | **~32 tok/s** |
-| 1× DGX Spark | 1 × integrated GPU (128 GB unified) | on-package | ~6.6 tok/s |
+| 1× DGX Spark | 1 × integrated GPU (128 GB unified) | on-package | ~7.5 tok/s |
 
 Within ~5% of the A100s — and neither setup uses a fancy interconnect: the A100s are on ordinary PCIe, sofmat is on plain 10 GbE Ethernet. Five consumer GPUs across three machines keep pace with a pair of A100s on this workload, at a fraction of the cost. (The A100s hold 2× the VRAM, so they pull ahead on concurrency and much larger contexts; for single-stream decode of a model this size, they're neck-and-neck.)
 
-And **~5× a single DGX Spark** on the exact same model + speculation. The reason is bandwidth: the Spark's 128 GB *unified LPDDR5X* runs at ~273 GB/s, while each RTX 5080's GDDR7 runs at ~960 GB/s — five of them pooled over the network move weights far faster than one big unified pool. Decode here is memory-bandwidth-bound, so that gap shows up directly (the Spark measured the same ~6.6 tok/s at low context and at 95k — it's the weight reads, not the KV, that bind). Its prefill is slower too: ingesting a 95k-token prompt took the Spark ~100 s.
+And **~4× a single DGX Spark** on the exact same model + speculation. The reason is bandwidth: the Spark's 128 GB *unified LPDDR5X* runs at ~273 GB/s, while each RTX 5080's GDDR7 runs at ~960 GB/s — five of them pooled over the network move weights far faster than one big unified pool. Decode here is memory-bandwidth-bound, so that gap shows up directly (the Spark held ~7.5 tok/s whether the context was near-empty or at 95k — it's the weight reads, not the KV, that bind). Its prefill is slower too: ingesting a 95k-token prompt took the Spark ~100 s.
 
-<!-- reference: the same 27B (qwen3.8-27b), same 55.59 GB, same MTP speculation, on 2× A100 -->
-![The same 27B model served on 2× A100 — same 55.59 GB, same MTP speculation](assets/cmp-a100.png)
+<!-- reference: the same 27B (qwen3.8-27b), same 55.59 GB, same MTP speculation — both baselines side by side: 1× DGX Spark and 2× A100 -->
+![The same 27B BF16 + MTP on both reference baselines — a single DGX Spark (top) and 2× A100 (bottom), identical 55.59 GB model](assets/cmp-a100.png)
 
 ## What sofmat is (and isn't)
 
