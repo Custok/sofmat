@@ -115,6 +115,18 @@ func (s *Server) Handler() http.Handler {
 	// soflink LAN discovery: answer the hello so a peer's subnet sweep recognizes
 	// this node as soflink (not a random open port).
 	mux.HandleFunc("/soflink/hello", discovery.HelloHandler(hostname(), "coordinator"))
+	// Embedded live panel + its API, so the binary ships its own dashboard.
+	mux.HandleFunc("/panel", s.panelPage)
+	mux.HandleFunc("/api/status", s.panelStatus)
+	mux.HandleFunc("/api/eject", s.adminEject)
+	mux.HandleFunc("/api/load", s.adminLoad)
+	mux.HandleFunc("/api/apply", s.configApply)
+	mux.HandleFunc("/api/chat", s.apiStub)          // phase 2
+	mux.HandleFunc("/api/measure", s.apiStub)       // phase 2
+	mux.HandleFunc("/api/selectinstance", s.apiStub) // phase 2
+	mux.HandleFunc("/api/setconfig", s.apiStub)     // phase 2
+	mux.HandleFunc("/api/rename", s.apiStub)        // phase 2
+	mux.HandleFunc("/", s.panelPage)                // dashboard home (catch-all last)
 	return mux
 }
 
