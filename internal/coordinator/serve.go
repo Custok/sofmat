@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/Custok/sofmat/internal/config"
+	"github.com/Custok/sofmat/internal/discovery"
 	"github.com/Custok/sofmat/internal/gateway"
 )
 
@@ -109,7 +112,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/eject", s.adminEject)
 	mux.HandleFunc("/admin/load", s.adminLoad)
 	mux.HandleFunc("/config/apply", s.configApply) // one-call model swap (eject+load)
+	// soflink LAN discovery: answer the hello so a peer's subnet sweep recognizes
+	// this node as soflink (not a random open port).
+	mux.HandleFunc("/soflink/hello", discovery.HelloHandler(hostname(), "coordinator"))
 	return mux
+}
+
+func hostname() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "sofmat"
 }
 
 // proxyReq forwards the incoming request (method+body+content-type) to base+path
@@ -174,6 +187,8 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, gateway.Body{"error": err.Error()})
 		return
 	}
+	log.Printf("chat: from=%s stream=%v tools=%v bytes=%d", r.RemoteAddr,
+		streamRequested(body), body["tools"] != nil, len(raw))
 	// Streaming (SSE) can't go through gateway.Chat — it json.Unmarshals the
 	// whole reply, which chokes on the upstream's "data: {...}" event stream.
 	// Forward the raw request to the decode backend and flush chunks straight
