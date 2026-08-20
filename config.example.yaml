@@ -1,0 +1,71 @@
+# sofmat — configuración de ejemplo (PLACEHOLDERS).
+# Copia a config.local.yaml (gitignored) y pon los datos reales de TU cluster.
+# NUNCA commitear IPs, hostnames, tokens ni rutas reales. Solo placeholders aquí.
+
+cluster:
+  # El master (coordinador). Debe ser un nodo permanente y con buena red.
+  master: node-a
+
+  # Transporte inter-host. tcp por defecto; rdma solo si la NIC soporta RoCE.
+  transport:
+    backend: tcp          # tcp | rdma
+    port: 50051
+    max_activation_mb: 8  # techo de tensor de activación por frontera (anti-DoS)
+    auth_token: ${SOFMAT_TRANSPORT_TOKEN}   # A01: handshake HMAC master↔worker; valor REAL solo en env/config.local (jamás en el repo)
+
+  # Nodos del pool. host/gpus/vram/ram describen TU hardware.
+  # model_mem_cap_gb = tope de memoria de GPU dedicada al MODELO (pesos+KV) por nodo.
+  #   Default si se omite = vram_gb. Sirve para reservar parte (p.ej. 80 de 128 en memoria unificada).
+  nodes:
+    - id: node-a
+      host: node-a.example.local   # ← placeholder; real en config.local.yaml
+      gpus: 2
+      vram_gb: 32
+      model_mem_cap_gb: 32
+      ram_gb: 96
+      role: master                 # master | worker
+      elastic: false               # true = puede entrar/salir del pool
+    - id: node-b
+      host: node-b.example.local
+      gpus: 1
+      vram_gb: 128                  # memoria unificada (nodo CPU+GPU compartida)
+      model_mem_cap_gb: 80          # tope 80 para el modelo; el resto (~48) queda como RAM
+      ram_gb: 128
+      unified_memory: true
+      mem_bandwidth_gbps: 273       # lento: se lleva pocas capas
+      role: worker
+      elastic: false
+    - id: node-c
+      host: node-c.example.local
+      gpus: 1
+      vram_gb: 16
+      model_mem_cap_gb: 16
+      ram_gb: 64
+      role: worker
+      elastic: true                 # entra en ventana
+      unstable_power: true          # puede desaparecer a mitad de forward
+    - id: node-d
+      host: node-d.example.local
+      gpus: 2
+      vram_gb: 32
+      model_mem_cap_gb: 32
+      ram_gb: 96
+      role: worker
+      elastic: true
+
+model:
+  path: /REPLACE/WITH/LOCAL/MODEL/PATH   # ruta local, va en config.local.yaml
+  dtype: auto
+  max_context: 8192            # el KV-cache se presupuesta con esto (restricción DURA)
+
+partitioner:
+  # Capacidad (que quepa) es SIEMPRE restricción DURA. 'objective' controla el desempate.
+  objective: speed             # speed (decisión de David) | capacity (= parsimonia pura)
+  min_usable_tokens_s: 15      # suelo de velocidad: añade hosts hasta alcanzarlo (o hasta maximizar); 0 = parsimonia pura
+  host_parsimony: false        # con speed, parsimonia solo como DESEMPATE entre opciones igual de rápidas
+  network_time_budget: 0.15    # rechaza mapas con etapa dominada por red (>15%)
+
+telemetry:
+  per_stage_healthcheck: true
+  trace_failures: true
+  measure_network_fraction: true   # KPI: red+espera / total por token

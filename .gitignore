@@ -1,0 +1,31 @@
+# --- Shoal: NUNCA publicar infra ni secretos ---
+config.local.yaml
+config.local.*
+*.local.yaml
+.env
+.env.*
+secrets/
+# mapeos etiqueta->host reales, perfiles con datos de la flota
+nodes.local.*
+profiles/*.local.*
+# leak-guard: denylist local con nuestros nombres reales (jamás al repo)
+leak-guard/denylist.local.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Modelos y pesos (nunca al repo)
+*.gguf
+*.safetensors
+*.bin
+models/
+
+# Logs y medidas locales (pueden llevar hostnames/IPs)
+*.log
+logs/
+bench_results/*.local.*

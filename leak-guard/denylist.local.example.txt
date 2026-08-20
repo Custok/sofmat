@@ -1,0 +1,14 @@
+# sofmat leak-guard — LOCAL denylist (EXAMPLE).
+#
+# Copy this to  leak-guard/denylist.local.txt  (git-ignored) and add the
+# SPECIFIC real names of your environment that the structural rules cannot
+# know: real hostnames, model names, avatar / product / client names, internal
+# project codenames. One term per line; matched case-insensitively as a literal.
+#
+# The real file NEVER gets committed — that is the point. Only this example,
+# with obviously-fake placeholders, lives in the public repo.
+#
+# my-real-hostname
+# my-gpu-box
+# SomeInternalModelName
+# ClientProjectCodename

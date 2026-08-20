@@ -1,0 +1,30 @@
+name: leak-guard
+
+# Blocking CI gate: fails the job (and thus the PR / push) if any tracked file
+# contains private infra or secrets. The local pre-commit hook can be skipped
+# with --no-verify; this cannot. Runs only the structural rules — the local
+# denylist is git-ignored and never reaches CI, which is correct: CI must not
+# hold our real names either.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run leak-guard scanner
+        # SOFMAT_LEAKGUARD_DENYLIST is a repository SECRET holding the private
+        # terms (collaborator handles, exotic hardware, product/client names)
+        # that must never appear in the repo. It lives in the secret, NOT in the
+        # code, so the scanner catches them in CI without publishing them. Set it
+        # in Settings > Secrets, one term per line. Without it, only the
+        # structural rules run (IPs, tokens, paths, unsafe-deserialization).
+        env:
+          SOFMAT_LEAKGUARD_DENYLIST: ${{ secrets.SOFMAT_LEAKGUARD_DENYLIST }}
+        run: python3 leak-guard/scan.py --all
+      - name: Self-test the scanner
+        run: python3 leak-guard/test_scan.py
