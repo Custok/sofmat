@@ -13,14 +13,14 @@ Point any OpenAI client at one endpoint; sofmat runs the model split across ever
 A **27B** model at **Q8** precision with a **150k-token context**, served across **two nodes of consumer GPUs** (16 GB each) over standard **10 GbE**, at **up to ~70 tokens/s** single-stream decode (content-dependent) — with full **8/8 needle-in-a-haystack recall** at 150k.
 
 <!-- panel screenshot (sanitized: anonymized node labels, no infra IPs) -->
-![sofmat live panel — 27B Q8, 150k context, 2 consumer nodes](assets/panel-q8.png)
+![sofmat live panel — 27B Q8 as a single instance, 150k context, ~70 tok/s across 2 nodes / 3 GPUs](assets/panel-q8-single.png)
+
+Served as a single decode instance, that Q8 sustains **up to ~70 tok/s** at **150k** context across **2 nodes / 3 GPUs** (content-dependent) — the run shown above.
 
 The panel also shows sofmat's **disaggregated prefill/decode**: the model runs as two roles on separate GPUs. A **prefill** stage ingests the prompt while a separate **decode** stage streams the answer — different jobs at once, on different GPUs. Prompt-ingestion and generation are separate metrics, not additive: prefill *reads the prompt* at **~1,600 tokens/s** while decode *streams the answer* at **~65 tok/s**. Splitting the phases is what keeps them from fighting over the same GPUs: interference drops from **~5.8× slowdown** (prefill and decode co-located) to **~1.0×** (disaggregated) — near-total isolation, so one user's huge prompt never stalls another user's token stream. (Live KV hand-off between the two stages is on the roadmap; the isolation is measured today.)
 
-Served straight — as a single decode instance, no disaggregation — the same Q8 reaches **up to ~70 tok/s** at **150k** context across **2 nodes / 3 GPUs** (content-dependent):
-
 <!-- panel screenshot (sanitized: anonymized node labels, no infra IPs) -->
-![sofmat live panel — 27B Q8 as a single instance, 150k context, ~70 tok/s across 2 nodes / 3 GPUs](assets/panel-q8-single.png)
+![sofmat live panel — 27B Q8 disaggregated into prefill + decode roles, 150k context](assets/panel-q8.png)
 
 And at **BF16** — full precision, maximum quality — the same **27B** runs with a **100k-token context** as a single instance spread across **three nodes / five GPUs**, still over plain **10 GbE**, at **~32 tokens/s** single-stream decode:
 
