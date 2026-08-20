@@ -1,0 +1,29 @@
+{
+  "listen": ":8080",
+  "nodes": [
+    { "id": "node-a", "endpoint": "http://node-a.local:PORT", "gpus": 2 },
+    { "id": "node-c", "endpoint": "http://node-c.local:PORT", "gpus": 1 },
+    { "id": "node-d", "endpoint": "http://node-d.local:PORT", "gpus": 2 }
+  ],
+  "instances": [
+    {
+      "key": "decode",
+      "role": "decode",
+      "endpoint": "http://node-c.local:PORT",
+      "main": "node-c",
+      "topology": [
+        { "node": "node-d", "gpus": 2, "layers": [0, 46] },
+        { "node": "node-c", "gpus": 1, "layers": [47, 64] }
+      ]
+    },
+    {
+      "key": "prefill",
+      "role": "prefill",
+      "endpoint": "http://node-a.local:PORT",
+      "main": "node-a",
+      "topology": [
+        { "node": "node-a", "gpus": 2, "layers": [0, 64] }
+      ]
+    }
+  ]
+}

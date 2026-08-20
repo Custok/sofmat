@@ -5,4 +5,4 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-python3 "${repo_root}/leak-guard/scan.py" --staged
+cd "${repo_root}" && go run ./cmd/leak-guard --staged

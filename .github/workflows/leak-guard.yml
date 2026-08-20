@@ -5,6 +5,8 @@ name: leak-guard
 # with --no-verify; this cannot. Runs only the structural rules — the local
 # denylist is git-ignored and never reaches CI, which is correct: CI must not
 # hold our real names either.
+#
+# Go port of the original Python gate (same modes, output and exit codes).
 
 on:
   push:
@@ -16,6 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
       - name: Run leak-guard scanner
         # SOFMAT_LEAKGUARD_DENYLIST is a repository SECRET holding the private
         # terms (collaborator handles, exotic hardware, product/client names)
@@ -25,6 +30,6 @@ jobs:
         # structural rules run (IPs, tokens, paths, unsafe-deserialization).
         env:
           SOFMAT_LEAKGUARD_DENYLIST: ${{ secrets.SOFMAT_LEAKGUARD_DENYLIST }}
-        run: python3 leak-guard/scan.py --all
+        run: go run ./cmd/leak-guard --all
       - name: Self-test the scanner
-        run: python3 leak-guard/test_scan.py
+        run: go test ./internal/leakguard/ -count=1

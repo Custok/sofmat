@@ -1,12 +1,13 @@
-# sofmat — llama.cpp ggml-rpc-server (CUDA) for a stage worker.
-# LM Studio ships only llama-server; the PP-RPC baseline needs rpc-server.
-# The official release has no prebuilt Linux x64 CUDA -> we build it here.
-# Runs on any worker with an NVIDIA GPU: `docker run --gpus all --network host`.
+# sofmat — llama.cpp ggml-rpc-server with CUDA, for a GPU worker node.
+# Many llama.cpp distributions ship only llama-server; the PP-RPC baseline
+# needs ggml-rpc-server, and there is no official prebuilt Linux x64 CUDA
+# binary -> build it here. Runs on any NVIDIA GPU: `docker run --gpus all`.
 FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
 
-# Compute capability of your GPU. Override at build time:
-#   --build-arg CUDA_ARCH=xx   (e.g. 86, 89, 90, 120)
-ARG CUDA_ARCH=120
+# Set to your GPU's CUDA compute capability for a smaller, faster single-arch
+# image (e.g. --build-arg CUDA_ARCH=90 / 89 / 120). Default builds all major
+# archs (portable, larger). See CMAKE_CUDA_ARCHITECTURES.
+ARG CUDA_ARCH=all-major
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git cmake build-essential libcurl4-openssl-dev ca-certificates \
@@ -15,13 +16,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp /llama.cpp
 WORKDIR /llama.cpp
 
-# GGML_RPC=ON produces the ggml-rpc-server binary (target under tools/rpc/,
-# renamed from 'rpc-server' -> 'ggml-rpc-server').
-# libggml-cuda uses the CUDA Driver API and ends up with DT_NEEDED libcuda.so.1
-# (the real driver soname). The toolkit ships only the stub libcuda.so -> we
-# create the .so.1 link and give rpath-link to the stubs to resolve the
-# transitive dependency when linking the EXECUTABLE. At runtime the real driver
-# provides it (--gpus).
+# GGML_RPC=ON produces the ggml-rpc-server target (tools/rpc/; renamed from the
+# older 'rpc-server'). libggml-cuda uses the CUDA Driver API and ends up with a
+# DT_NEEDED on libcuda.so.1 (the real driver soname). The -devel image ships
+# only the stub libcuda.so -> create the .so.1 link and give the linker an
+# rpath-link to the stubs so the EXECUTABLE link resolves the transitive
+# dependency. At runtime the real driver (via --gpus) provides the symbols.
 RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
 ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs
 RUN cmake -B build \

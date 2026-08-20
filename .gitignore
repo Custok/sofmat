@@ -29,3 +29,9 @@ models/
 *.log
 logs/
 bench_results/*.local.*
+
+# Go build artifacts
+/sofmat
+/sofmat.exe
+*.test
+*.out
