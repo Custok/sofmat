@@ -17,6 +17,11 @@ A **27B** model at **Q8** precision with a **150k-token context**, served across
 
 The panel also shows sofmat's **disaggregated prefill/decode**: the model runs as two roles on separate GPUs. A **decode** stage generates the answer (~61 tok/s single-stream); a separate **prefill** stage ingests the prompt. On its own each server just generates tokens (decode ~61 tok/s, the prefill server ~35 tok/s). Joined by role, they do different jobs at once: prefill *reads the prompt* at **~1,600 tokens/s** while decode *streams the answer* at **~55 tok/s** — prompt-ingestion and generation are separate metrics, not additive. Splitting the phases is what keeps them from fighting over the same GPUs: interference drops from **~5.8× slowdown** (prefill and decode co-located) to **~1.0×** (disaggregated) — near-total isolation, so one user's huge prompt never stalls another user's token stream. (Live KV hand-off between the two stages is on the roadmap; the isolation is measured today.)
 
+Served straight — as a single decode instance, no disaggregation — the same Q8 sustains **~62 tok/s** at **150k** context across **2 nodes / 3 GPUs**:
+
+<!-- panel screenshot (sanitized: anonymized node labels, no infra IPs) -->
+![sofmat live panel — 27B Q8 as a single instance, 150k context, ~62 tok/s across 2 nodes / 3 GPUs](assets/panel-q8-single.png)
+
 And at **BF16** — full precision, maximum quality — the same **27B** runs with a **100k-token context** as a single instance spread across **three nodes / five GPUs**, still over plain **10 GbE**, at **~32 tokens/s** single-stream decode:
 
 <!-- panel screenshot (sanitized: anonymized node labels, no infra IPs) -->
