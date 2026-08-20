@@ -15,14 +15,14 @@ A **27B** model at **Q8** precision with a **150k-token context**, served across
 <!-- panel screenshot (sanitized: anonymized node labels, no infra IPs) -->
 ![sofmat live panel — 27B Q8 as a single instance, 150k context, ~70 tok/s across 2 nodes / 3 GPUs](assets/panel-q8-single.png)
 
-Served as a single decode instance, that Q8 sustains **up to ~70 tok/s** at **150k** context across **2 nodes / 3 GPUs** (content-dependent) — the run shown above.
+**27B · Q8_0 · 29 GB of weights · 150k-token context · 2 hosts / 3 GPUs → up to ~70 tok/s** (content-dependent). Served as a single decode instance — the run shown above.
 
-The panel also shows sofmat's **disaggregated prefill/decode**: the model runs as two roles on separate GPUs. A **prefill** stage ingests the prompt while a separate **decode** stage streams the answer — different jobs at once, on different GPUs. Prompt-ingestion and generation are separate metrics, not additive: prefill *reads the prompt* at **~1,600 tokens/s** while decode *streams the answer* at **~65 tok/s**. Splitting the phases is what keeps them from fighting over the same GPUs: interference drops from **~5.8× slowdown** (prefill and decode co-located) to **~1.0×** (disaggregated) — near-total isolation, so one user's huge prompt never stalls another user's token stream. (Live KV hand-off between the two stages is on the roadmap; the isolation is measured today.)
+The panel also shows sofmat's **disaggregated prefill/decode** — the same **27B Q8 (29 GB) at 150k** split into two roles on separate GPUs: a **prefill** stage (**1 host / 2 GPUs**) ingests the prompt while a separate **decode** stage (**2 hosts / 3 GPUs**) streams the answer — different jobs at once, on different GPUs. Prompt-ingestion and generation are separate metrics, not additive: prefill *reads the prompt* at **~1,600 tokens/s** while decode *streams the answer* at **~65 tok/s**. Splitting the phases is what keeps them from fighting over the same GPUs: interference drops from **~5.8× slowdown** (prefill and decode co-located) to **~1.0×** (disaggregated) — near-total isolation, so one user's huge prompt never stalls another user's token stream. (Live KV hand-off between the two stages is on the roadmap; the isolation is measured today.)
 
 <!-- panel screenshot (sanitized: anonymized node labels, no infra IPs) -->
 ![sofmat live panel — 27B Q8 disaggregated into prefill + decode roles, 150k context](assets/panel-q8.png)
 
-And at **BF16** — full precision, maximum quality — the same **27B** runs with a **100k-token context** as a single instance spread across **three nodes / five GPUs**, still over plain **10 GbE**, at **~32 tokens/s** single-stream decode:
+**27B · BF16 · 55 GB of weights · 100k-token context · 3 hosts / 5 GPUs → ~32 tok/s.** At **BF16** — full precision, maximum quality — the same **27B** runs as a single instance spread across five GPUs on three nodes, still over plain **10 GbE**:
 
 <!-- panel screenshot (sanitized: anonymized node labels, no infra IPs) -->
 ![sofmat live panel — 27B BF16, 100k context, one instance across 3 nodes / 5 GPUs](assets/panel-bf16.png)
@@ -31,15 +31,15 @@ And at **BF16** — full precision, maximum quality — the same **27B** runs wi
 
 Same 55 GB BF16 model, same 100k context, same speculative decoding — measured head-to-head against **two datacenter A100s** and a single **DGX Spark**:
 
-| Setup | GPUs | Interconnect | Single-stream decode |
-|---|---|---|---|
-| 2× A100 | 2 × datacenter (160 GB HBM) | PCIe | ~34 tok/s |
-| **sofmat** | **5 × consumer RTX 5080, 3 nodes (80 GB GDDR7)** | **plain 10 GbE** | **~32 tok/s** |
-| 1× DGX Spark | 1 × integrated GPU (128 GB unified) | on-package | ~7.5 tok/s |
+| Setup | CUDA cores | Memory bandwidth | Interconnect | Single-stream decode |
+|---|---|---|---|---|
+| 2× A100 80GB (160 GB HBM2e) | 13,824 (6,912 ×2) | ~1.9 TB/s per GPU | PCIe | ~34 tok/s |
+| **sofmat — 5× RTX 5080 (80 GB GDDR7, 3 nodes)** | **53,760 (10,752 ×5)** | **~960 GB/s per GPU · ~4.8 TB/s pooled** | **plain 10 GbE** | **~32 tok/s** |
+| 1× DGX Spark · GB10 (128 GB LPDDR5X) | 6,144 | ~273 GB/s | on-package | ~7.5 tok/s |
 
-Within ~5% of the A100s — and neither setup uses a fancy interconnect: the A100s are on ordinary PCIe, sofmat is on plain 10 GbE Ethernet. Five consumer GPUs across three machines keep pace with a pair of A100s on this workload, at a fraction of the cost. (The A100s hold 2× the VRAM, so they pull ahead on concurrency and much larger contexts; for single-stream decode of a model this size, they're neck-and-neck.)
+Within ~5% of the A100s — and neither setup uses a fancy interconnect: the A100s are on ordinary PCIe, sofmat is on plain 10 GbE Ethernet. Five consumer GPUs across three machines keep pace with a pair of A100s on this workload, at a fraction of the cost. sofmat actually fields far more total CUDA cores (~54k vs ~14k) and higher pooled bandwidth, but single-stream decode is bound by *one GPU's* bandwidth per pipeline stage, not the totals — which is why five 5080s land *level* with two A100s rather than ahead. (The A100s also hold 2× the VRAM, so they pull ahead on concurrency and much larger contexts.)
 
-And **~4× a single DGX Spark** on the exact same model + speculation. The reason is bandwidth: the Spark's 128 GB *unified LPDDR5X* runs at ~273 GB/s, while each RTX 5080's GDDR7 runs at ~960 GB/s — five of them pooled over the network move weights far faster than one big unified pool. Decode here is memory-bandwidth-bound, so that gap shows up directly (the Spark held ~7.5 tok/s whether the context was near-empty or at 95k — it's the weight reads, not the KV, that bind). Its prefill is slower too: ingesting a 95k-token prompt took the Spark ~100 s.
+And **~4× a single DGX Spark** on the exact same model + speculation. The reason is bandwidth (see the table): five pooled RTX 5080s move weights far faster than the Spark's one *unified LPDDR5X* pool. Decode here is memory-bandwidth-bound, so that gap shows up directly — the Spark held ~7.5 tok/s whether the context was near-empty or at 95k (it's the weight reads, not the KV, that bind), and its prefill is slower too: ingesting a 95k-token prompt took it ~100 s.
 
 <!-- reference: the same 27B (qwen3.8-27b), same 55.59 GB, same MTP speculation — both baselines side by side: 1× DGX Spark and 2× A100 -->
 ![The same 27B BF16 + MTP on both reference baselines — a single DGX Spark (top) and 2× A100 (bottom), identical 55.59 GB model](assets/cmp-baselines.png)
@@ -50,12 +50,12 @@ sofmat is the **orchestration layer**, not a new inference engine — the layer 
 
 ## The techniques that get the speed
 
-Single-stream decode of a large model split across a network is **latency-bound by construction**: token *t+1* waits on *t*, and every token pays the per-hop round-trip. Going from a ~24 tok/s baseline to ~65 is a stack of orthogonal techniques, each **measured wall-clock**:
+Single-stream decode of a large model split across a network is **latency-bound by construction**: token *t+1* waits on *t*, and every token pays the per-hop round-trip. Going from a ~25 tok/s baseline to ~70 is a stack of orthogonal techniques, each **measured wall-clock**:
 
-1. **Q8_0 weight quantization** — decode is memory-bandwidth-bound, so halving the bytes-per-weight (vs BF16) roughly doubles decode speed *and* frees the VRAM the model needs to breathe. Measured, matched settings: **BF16 34 → Q8 63 tok/s**; Q8 fits 150k context where BF16 barely reaches 100k.
+1. **Q8_0 weight quantization** — decode is memory-bandwidth-bound, so halving the bytes-per-weight (vs BF16) roughly doubles decode speed *and* frees the VRAM the model needs to breathe. Measured, matched settings: **BF16 ~32 → Q8 ~70 tok/s**; Q8 fits 150k context where BF16 barely reaches 100k.
 2. **q4_0 KV-cache quantization + FlashAttention** — shrinks the key/value cache ~4×, which is what makes a **150k** context fit in the VRAM budget. Recall preserved (**8/8** at 150k).
-3. **Speculative decoding via the model's integrated MTP draft head** (`--spec-type draft-mtp`) — the model's co-trained "next-n" head proposes tokens essentially for free (no separate draft model, no tokenizer mismatch), paying the per-hop latency once per *wave* instead of once per token: **×2.5–2.8** decode (**24 → 63 tok/s**), losslessly.
-4. **Balanced tensor-split across GPUs** — layers weighted by each GPU's real load; the "main" GPU (which also holds the output head + sampler) gets a *lighter* share. A naïve even split saturated one GPU and ran **6 tok/s + OOM**; rebalancing took the same config to **34 tok/s (×5.7)**.
+3. **Speculative decoding via the model's integrated MTP draft head** (`--spec-type draft-mtp`) — the model's co-trained "next-n" head proposes tokens essentially for free (no separate draft model, no tokenizer mismatch), paying the per-hop latency once per *wave* instead of once per token: **×2.5–2.8** decode (**~25 → ~70 tok/s**), losslessly.
+4. **Balanced tensor-split across GPUs** — layers weighted by each GPU's real load; the "main" GPU (which also holds the output head + sampler) gets a *lighter* share. A naïve even split saturated one GPU and ran **6 tok/s + OOM**; rebalancing took the same config to **~32 tok/s (×5.3)**.
 5. **Pipeline parallelism across hosts × tensor parallelism within a host** — pools VRAM so a model that fits in no single node runs across several. Only the per-token activation (~10 KB) crosses the wire, so plain 10 GbE is never the bottleneck — the GPU compute is.
 6. **Continuous batching** — concurrent requests share the per-token verification compute; aggregate throughput scales with load and coexists with speculation.
 7. **Disaggregated prefill/decode** — a long prompt's prefill runs on a *separate* node from the decode, so it can't stall in-flight generation. Measured: co-located, a concurrent 27k-token prefill degraded decode **×5.79** (32 → 5.6 tok/s); disaggregated, decode was **untouched (×0.99)**. This is the pattern Azure (Splitwise), Moonshot (Mooncake) and NVIDIA (Dynamo) run in production — reproduced here on consumer hardware.
