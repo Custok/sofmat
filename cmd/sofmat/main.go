@@ -37,7 +37,7 @@ func main() {
 	case "serve":
 		serve(os.Args[2:])
 	case "version":
-		fmt.Println("sofmat dev")
+		fmt.Println("soflink", version)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
 		os.Exit(2)
@@ -49,7 +49,11 @@ func serve(args []string) {
 	cfgPath := fs.String("config", "config.local.json", "path to cluster config")
 	noBrowser := fs.Bool("no-browser", false, "do not open the panel in a browser (headless nodes)")
 	noAuth := fs.Bool("no-auth", false, "leave mutating routes (load/eject) open — skips fail-closed key")
+	noUpdate := fs.Bool("no-update", false, "skip the GitHub auto-update check on startup")
 	_ = fs.Parse(args)
+	if !*noUpdate {
+		checkAndUpdate() // self-update from GitHub Releases, then re-exec (best-effort)
+	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
