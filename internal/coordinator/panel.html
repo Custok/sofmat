@@ -386,14 +386,24 @@ function grow(){cbox.style.height='auto';cbox.style.height=Math.min(cbox.scrollH
 cbox.addEventListener('input',grow);
 async function send(){if(gen)return;var t=cbox.value.trim();if(!t)return;
   add('user',t);HIST.push({role:'user',content:t});cbox.value='';grow();
-  var bot=add('bot','','modelo');var bub=bot.querySelector('.bub');bub.textContent='… generando (respuestas largas OK)';
+  var bot=add('bot','','modelo');var bub=bot.querySelector('.bub');bub.textContent='';
   gen=true;sendbtn.textContent='…';sendbtn.disabled=true;
-  try{var r=await j('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:HIST,mode:CHATMODE})});
-    bub.textContent=r.text;HIST.push({role:'assistant',content:r.text});
-    var mt=(r.mode==='cluster')?('cluster · prefill '+r.prefill_tokps+' · decode '+r.decode_tokps):(r.tokps+' tok/s');
-    var m=document.createElement('div');m.className='mmeta';m.textContent=mt+' · '+r.tokens+' tok · '+r.secs+'s';bot.appendChild(m);
-    if(r.tokps){SPARK.push(r.tokps);if(SPARK.length>16)SPARK.shift();drawSpark();document.getElementById('tokps').textContent=r.tokps}
-  }catch(e){bub.textContent='(error: '+e+')'}
+  var t0=Date.now(),full='',toks=0,firstAt=0;
+  try{
+    var resp=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:HIST})});
+    if(!resp.ok||!resp.body)throw new Error('HTTP '+resp.status);
+    var reader=resp.body.getReader(),td=new TextDecoder(),buf='';
+    for(;;){var rd=await reader.read();if(rd.done)break;buf+=td.decode(rd.value,{stream:true});
+      var parts=buf.split('\n');buf=parts.pop();
+      for(var i=0;i<parts.length;i++){var ln=parts[i].trim();if(ln.indexOf('data:')!==0)continue;var pl=ln.slice(5).trim();if(!pl||pl==='[DONE]')continue;
+        try{var o=JSON.parse(pl);var d=o.choices&&o.choices[0]&&o.choices[0].delta&&o.choices[0].delta.content;if(d){if(!firstAt)firstAt=Date.now();full+=d;toks++;bub.textContent=full;clog.scrollTop=clog.scrollHeight}}catch(_){}
+      }
+    }
+    bub.textContent=full||'(sin contenido)';HIST.push({role:'assistant',content:full});
+    var secs=(Date.now()-(firstAt||t0))/1000,tps=secs>0?Math.round(toks/secs*10)/10:0;
+    var m=document.createElement('div');m.className='mmeta';m.textContent=tps+' tok/s · '+toks+' tok · '+((Date.now()-t0)/1000).toFixed(1)+'s';bot.appendChild(m);
+    if(tps){SPARK.push(tps);if(SPARK.length>16)SPARK.shift();drawSpark();document.getElementById('tokps').textContent=tps}
+  }catch(e){bub.textContent=full||'(error: '+e+')'}
   gen=false;sendbtn.textContent='Enviar';sendbtn.disabled=false;clog.scrollTop=clog.scrollHeight;
 }
 document.getElementById('cform').onsubmit=function(e){e.preventDefault();send()};
@@ -440,7 +450,7 @@ async function mdlLocal(){
       +'<div class=lcrow><span class=lclbl>Nodos</span><span class=lcopts>'+checks+'</span></div>'
       +'<div class=lcrow><span class=lclbl>Main</span><span class=lcopts>'+mains+'</span></div>'
       +'<div class=lcrow><span class=lclbl>Modo</span><span class=lcopts><label class=lc><input type=radio name="lc-mode-'+i+'" value=individual checked> Individual (1 nodo)</label><label class=lc><input type=radio name="lc-mode-'+i+'" value=union> Unión con roles (pipeline)</label></span></div>'
-      +'<div class=lcrow><span class=lclbl>Contexto</span><span class=lcopts><input type=number class=srch value=8192 style="width:120px" id=lcctx-'+i+'></span></div>'
+      +'<div class=lcrow><span class=lclbl>Contexto</span><span class=lcopts><input type=number class=srch value=50000 step=1000 style="width:120px" id=lcctx-'+i+'></span></div>'
       +'<div class=lcbtns><button class="btn sm ghost" data-preview="'+i+'">Ver plan</button><button class="btn sm" data-launch="'+i+'">Lanzar</button></div>'
       +'<div id=lcout-'+i+'></div></div>';
   }).join('');

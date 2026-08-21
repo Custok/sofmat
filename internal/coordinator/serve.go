@@ -137,6 +137,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/apply", s.guard(s.configApply))
 	mux.HandleFunc("/api/genkey", s.panelGenKey)
 	mux.HandleFunc("/api/chat", s.panelChat)
+	mux.HandleFunc("/api/chat/stream", s.panelChatStream)
 	mux.HandleFunc("/api/measure", s.panelMeasure)
 	mux.HandleFunc("/api/selectinstance", s.panelSelectInstance)
 	mux.HandleFunc("/api/setconfig", s.panelSetConfig)

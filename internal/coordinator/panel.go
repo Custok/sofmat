@@ -630,6 +630,62 @@ func (s *Server) panelChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// panelChatStream streams the reply token-by-token (SSE) from the SELECTED
+// instance's endpoint, so the panel shows the text growing live instead of
+// waiting for the whole completion.
+func (s *Server) panelChatStream(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Messages any `json:"messages"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	pstate.mu.Lock()
+	sel := pstate.selected
+	pstate.mu.Unlock()
+	base := s.selectedBase(sel)
+	if base == "" {
+		base = s.bc.DecodeEntryURL
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "streaming unsupported"})
+		return
+	}
+	body, _ := json.Marshal(map[string]any{
+		"messages": req.Messages, "stream": true, "max_tokens": 2048, "temperature": 0.4,
+		"chat_template_kwargs": map[string]any{"enable_thinking": false},
+	})
+	up, err := http.NewRequestWithContext(r.Context(), http.MethodPost, base+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	up.Header.Set("Content-Type", "application/json")
+	up.Header.Set("Accept", "text/event-stream")
+	resp, err := s.client.Do(up)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	buf := make([]byte, 8192)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+		if rerr != nil {
+			return
+		}
+	}
+}
+
 func (s *Server) panelMeasure(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Mode string `json:"mode"`
