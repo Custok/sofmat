@@ -294,10 +294,11 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 	)
 	var pwg sync.WaitGroup
 	pwg.Add(3)
-	go func() { defer pwg.Done(); loaded, model, quant, nctx, slots, sizeGB, modelPath = s.servedModel() }()
-	go func() { defer pwg.Done(); cn = s.aggregateNodes() }()
+	go func() { defer pwg.Done(); defer recoverProbe(); loaded, model, quant, nctx, slots, sizeGB, modelPath = s.servedModel() }()
+	go func() { defer pwg.Done(); defer recoverProbe(); cn = s.aggregateNodes() }()
 	go func() {
 		defer pwg.Done()
+		defer recoverProbe()
 		prefillUp = s.bc.PrefillURL != "" && s.getJSONFrom(s.bc.PrefillURL, "/health") != nil
 	}()
 	pwg.Wait()
@@ -664,6 +665,12 @@ func (s *Server) panelRename(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- small helpers --------------------------------------------------------
+
+// recoverProbe swallows a panic inside a background probe goroutine — a single
+// bad backend response must never crash the daemon (a goroutine panic is NOT
+// caught by net/http's per-request recovery, so it would take the whole process
+// down). Any probe that panics just yields its zero value.
+func recoverProbe() { _ = recover() }
 
 func pstr(v any) string { s, _ := v.(string); return s }
 func pnum(v any) float64 {

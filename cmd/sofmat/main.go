@@ -11,6 +11,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
@@ -18,6 +20,13 @@ import (
 	"github.com/Custok/sofmat/internal/config"
 	"github.com/Custok/sofmat/internal/coordinator"
 )
+
+// genAPIKey mints a random bearer key (Jupyter-token style).
+func genAPIKey() string {
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	return "sk-soflink-" + hex.EncodeToString(b)
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -39,11 +48,18 @@ func serve(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	cfgPath := fs.String("config", "config.local.json", "path to cluster config")
 	noBrowser := fs.Bool("no-browser", false, "do not open the panel in a browser (headless nodes)")
+	noAuth := fs.Bool("no-auth", false, "leave mutating routes (load/eject) open — skips fail-closed key")
 	_ = fs.Parse(args)
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	// Fail-closed: if no API key is configured, mint one at startup so load/eject
+	// are never open on the LAN. The key shows (and copies) in the panel.
+	if cfg.APIKey == "" && !*noAuth {
+		cfg.APIKey = genAPIKey()
+		fmt.Printf("API key generada (requerida para load/eject; visible/copiable en el panel):\n  %s\n", cfg.APIKey)
 	}
 	fmt.Printf("sofmat serve on %s\n", cfg.Listen)
 	ensureFirewall(cfg.Listen) // open the port so the LAN can reach the panel/API

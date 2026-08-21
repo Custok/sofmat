@@ -26,6 +26,11 @@ type Config struct {
 	PublicURL string `json:"public_url"`
 	APIKey    string `json:"api_key"`
 
+	// SelfID is this node's anonymous label for LAN discovery (the /soflink/hello
+	// id). When empty, a stable anonymized id is derived from the hostname —
+	// never the raw hostname on the wire.
+	SelfID string `json:"self_id"`
+
 	// Model describes the model to place (solver input). Optional for plain
 	// serving; required (and validated fail-closed) by ModelSpecFrom.
 	Model Model `json:"model"`

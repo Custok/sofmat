@@ -2,6 +2,8 @@ package coordinator
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
@@ -114,7 +116,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/config/apply", s.guard(s.configApply)) // one-call model swap (eject+load)
 	// soflink LAN discovery: answer the hello so a peer's subnet sweep recognizes
 	// this node as soflink (not a random open port).
-	mux.HandleFunc("/soflink/hello", discovery.HelloHandler(hostname(), "coordinator"))
+	mux.HandleFunc("/soflink/hello", discovery.HelloHandler(s.selfID(), "coordinator"))
 	// Embedded live panel + its API, so the binary ships its own dashboard.
 	mux.HandleFunc("/panel", s.panelPage)
 	mux.HandleFunc("/api/status", s.panelStatus)
@@ -131,11 +133,19 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-func hostname() string {
-	if h, err := os.Hostname(); err == nil && h != "" {
-		return h
+// selfID is this node's anonymous discovery id: the config's self_id if set,
+// else a stable hash of the hostname — the raw machine hostname never goes on
+// the wire.
+func (s *Server) selfID() string {
+	if s.cfg.SelfID != "" {
+		return s.cfg.SelfID
 	}
-	return "sofmat"
+	h, err := os.Hostname()
+	if err != nil || h == "" {
+		return "node-sofmat"
+	}
+	sum := sha256.Sum256([]byte(h))
+	return "node-" + hex.EncodeToString(sum[:3])
 }
 
 // proxyReq forwards the incoming request (method+body+content-type) to base+path
