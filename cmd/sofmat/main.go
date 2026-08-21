@@ -38,6 +38,7 @@ func main() {
 func serve(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	cfgPath := fs.String("config", "config.local.json", "path to cluster config")
+	noBrowser := fs.Bool("no-browser", false, "do not open the panel in a browser (headless nodes)")
 	_ = fs.Parse(args)
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -45,6 +46,10 @@ func serve(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("sofmat serve on %s\n", cfg.Listen)
+	ensureFirewall(cfg.Listen) // open the port so the LAN can reach the panel/API
+	if !*noBrowser {
+		go openPanel(cfg.Listen) // pop the dashboard like a desktop app
+	}
 	if err := coordinator.Run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
