@@ -283,8 +283,8 @@ async function tick(){
     +(s.cluster_tokps?'<div class="itab clustertk"><div class=in>Unir con Rol</div><div class=ir>medición combinada</div><div class=itk>prefill <b>'+s.cluster_tokps.prefill+'</b> · decode <b>'+s.cluster_tokps.decode+'</b></div></div>':'');
   var mt=document.getElementById('modetoggle');if(mt)mt.querySelectorAll('span').forEach(function(sp){sp.onclick=function(){CHATMODE=sp.dataset.m;mt.querySelectorAll('span').forEach(function(x){x.classList.toggle('on',x.dataset.m===CHATMODE)})}});
   var mb=document.getElementById('measurebtn');if(mb)mb.onclick=async function(){if(MEASURING)return;MEASURING=true;mb.disabled=true;mb.textContent='Midiendo…';try{var mr=await j('/api/measure',{method:'POST',headers:ah(),body:JSON.stringify({mode:CHATMODE})});if(mr){var v=(mr.tokps!=null?mr.tokps:(mr.decode!=null?mr.decode:mr.aggregate));if(v!=null){document.getElementById('tokps').textContent=v;SPARK.push(v);if(SPARK.length>16)SPARK.shift();drawSpark()}if(mr.error)alert('Medir: '+mr.error)}}catch(e){}MEASURING=false;tick()};
-  it.querySelectorAll('[data-inst]').forEach(function(b){b.onclick=function(){var k=b.dataset.inst;var up=(s.instances||[]).some(function(x){return x.key===k&&x.up});if(!up)return;CHATMODE='individual';j('/api/selectinstance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance:k})}).then(tick)}});
-  it.querySelectorAll('[data-eject]').forEach(function(b){b.onclick=function(e){e.stopPropagation();if(!confirm('¿Eject este modelo cargado?'))return;j('/api/models/eject',{method:'POST',headers:ah(),body:JSON.stringify({endpoint:b.dataset.eject})}).then(function(){setTimeout(tick,400)})}});
+  // seleccionar instancia / eject: se manejan por DELEGACIÓN en #insttabs (listener
+  // único más abajo) — así un tap sobrevive al re-render de 3s (bug en móvil).
   var st=document.getElementById('status'),stx=document.getElementById('stext');
   if(s.loading){st.className='pill warn';stx.textContent='Loading…'}
   else if(s.loaded){st.className='pill';stx.textContent='Running'}
@@ -475,5 +475,14 @@ document.getElementById('modelsmodal').onclick=function(e){if(e.target.id==='mod
 document.getElementById('mdlsearch').onclick=mdlSearch;
 document.getElementById('mdlq').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();mdlSearch()}});
 setInterval(function(){if(!document.getElementById('modelsmodal').hidden)mdlPoll()},2000);
+// Delegación de eventos en #insttabs (contenedor estable): un solo listener que
+// sobrevive a los re-render de tick(), así el tap para seleccionar instancia o
+// eject nunca se pierde en móvil (el bug de "al pinchar gemma no cambia").
+document.getElementById('insttabs').addEventListener('click',function(e){
+  var ej=e.target.closest('[data-eject]');
+  if(ej){e.stopPropagation();if(!confirm('¿Eject este modelo cargado?'))return;j('/api/models/eject',{method:'POST',headers:ah(),body:JSON.stringify({endpoint:ej.dataset.eject})}).then(function(){setTimeout(tick,400)});return}
+  var it=e.target.closest('[data-inst]');
+  if(it){var k=it.dataset.inst;var up=((LAST&&LAST.instances)||[]).some(function(x){return x.key===k&&x.up});if(!up)return;CHATMODE='individual';j('/api/selectinstance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance:k})}).then(tick)}
+});
 tick();setInterval(tick,3000);
 </script></body></html>

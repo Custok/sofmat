@@ -114,22 +114,39 @@ func loadedModels() []loadedModel {
 	return out
 }
 
-// pickFreeGPU returns the index of the GPU with the most free VRAM on a node, so
-// a load never lands on a GPU a prod model already fills. -1 if unknown.
-func (s *Server) pickFreeGPU(nodeID string) int {
+// gpuPlacement returns the freest GPU index and a --tensor-split weighted by FREE
+// VRAM (GPUs under ~2 GB free get 0 layers), so an individual model lands on the
+// GPU(s) with room and never onto one a prod model already fills (node-a's GPU0
+// with LM Studio). split is empty for single-GPU or unified-memory nodes.
+func (s *Server) gpuPlacement(nodeID string) (mainGPU int, split string) {
+	mainGPU = -1
 	base := s.agentBase(nodeID)
 	if base == "" {
-		return -1
+		return -1, ""
 	}
-	m := s.getJSONFrom(base, "/gpu")
-	best, bestFree := -1, -1.0
-	for _, g := range asMaps(m["gpus"]) {
+	gpus := asMaps(s.getJSONFrom(base, "/gpu")["gpus"])
+	if len(gpus) == 0 {
+		return -1, ""
+	}
+	parts := make([]string, len(gpus))
+	bestFree := -1.0
+	anyRoom := false
+	for i, g := range gpus {
 		free := pnum(g["total_mb"]) - pnum(g["used_mb"])
+		if free < 2000 {
+			parts[i] = "0"
+		} else {
+			parts[i] = strconv.Itoa(int(free / 1024)) // weight ≈ GB free
+			anyRoom = true
+		}
 		if free > bestFree {
-			bestFree, best = free, pint(g["idx"])
+			bestFree, mainGPU = free, pint(g["idx"])
 		}
 	}
-	return best
+	if len(gpus) > 1 && anyRoom {
+		split = strings.Join(parts, ",")
+	}
+	return
 }
 
 // Load a downloaded model with an operator-chosen placement: which node(s), which
@@ -250,8 +267,16 @@ func (s *Server) modelsLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	// land on the freest GPU of the main node so a prod-filled GPU can't OOM the
 	// load (the crash we saw when Vulkan grabbed the busy GPU0).
-	if idx := s.pickFreeGPU(req.Main); idx >= 0 && req.NGL > 0 {
-		args = append(args, "--main-gpu", strconv.Itoa(idx))
+	// Individual: place weights on the node's GPUs weighted by FREE VRAM, so the
+	// model never piles onto a GPU a prod model already fills (node-a's GPU0 with
+	// LM Studio) — a near-full GPU gets 0 layers. Union builds its cross-node split below.
+	if req.NGL > 0 && req.Mode != "union" {
+		if mg, split := s.gpuPlacement(req.Main); mg >= 0 {
+			args = append(args, "--main-gpu", strconv.Itoa(mg))
+			if split != "" {
+				args = append(args, "--tensor-split", split)
+			}
+		}
 	}
 
 	plan := map[string]any{"mode": req.Mode, "main": req.Main, "model": name}
