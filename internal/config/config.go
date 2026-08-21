@@ -38,6 +38,12 @@ type Config struct {
 	LlamaExe      string `json:"llama_exe"`
 	ModelsHostDir string `json:"models_host_dir"`
 
+	// GPUIndexReversed: the engine (e.g. a Vulkan build) enumerates GPUs in the
+	// REVERSE of nvidia-smi order, so --main-gpu / --tensor-split must be remapped.
+	// Set per node in config.local.json when confirmed (see the launch log's
+	// "VulkanN … (PCI)" lines vs nvidia-smi pci.bus_id). Default false (CUDA order).
+	GPUIndexReversed bool `json:"gpu_index_reversed"`
+
 	// Model describes the model to place (solver input). Optional for plain
 	// serving; required (and validated fail-closed) by ModelSpecFrom.
 	Model Model `json:"model"`

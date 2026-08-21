@@ -147,6 +147,15 @@ func (s *Server) gpuPlacement(nodeID string) (mainGPU int, split string) {
 			bestFree, mainGPU = free, pint(g["idx"])
 		}
 	}
+	// The engine may enumerate GPUs in the reverse of nvidia-smi order (Vulkan
+	// build on node-a): remap the placement to the engine's indices so the free
+	// GPU — not the prod-full one — actually gets the layers.
+	if s.cfg.GPUIndexReversed && len(gpus) > 1 {
+		mainGPU = len(gpus) - 1 - mainGPU
+		for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+			parts[i], parts[j] = parts[j], parts[i]
+		}
+	}
 	if len(gpus) > 1 && anyRoom {
 		split = strings.Join(parts, ",")
 	}
