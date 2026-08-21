@@ -328,7 +328,7 @@ async function tick(){
     var host=n.node==='node-a';
     var body='';
     (n.gpus||[]).forEach(function(gpu){var um=gpu.used_mb,tm=gpu.total_mb;
-      if(!tm&&n.stats){um=n.stats.ram_used_mb;tm=n.stats.ram_total_mb;} // GB10: memoria unificada → usa RAM
+      if(!tm&&n.stats){um=n.stats.ram_used_mb;tm=n.stats.ram_total_mb;} // unified-memory GPU (VRAM 0/0) → usa RAM
       var pct=tm?Math.round(um/tm*100):0;
       body+='<div class=gpu><div class=gpuh><span class=gn>GPU '+gpu.idx+'</span><span class=mono'+(pct>90?' style="color:var(--crit)"':'')+'>'+gpu.util+'%</span></div><div class=bar><i class="'+(pct>90?'warm':'')+'" style="width:'+pct+'%"></i></div><div class=gsub><span class=mono>'+gb(um)+' / '+gb(tm)+' GB</span><span class=mono>'+gpu.temp+'°C · '+gpu.power+' W</span></div></div>';});
     var foot='';

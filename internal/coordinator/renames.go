@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// Node display names ("2xRTX5080_W", "Dgx Spark") are UI-only labels the
-// operator sets with the panel's pencil. They must behave like a shared setting:
+// Node display names (a friendly per-node label the operator picks) are UI-only
+// labels set with the panel's pencil. They must behave like a shared setting:
 // renaming on ANY node's panel shows on EVERY panel, and the label survives a
 // restart. So a rename is (1) persisted to renames.local.json and (2) gossiped
 // to the other coordinators over the discovery mesh. The anonymous node id
