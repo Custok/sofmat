@@ -20,5 +20,6 @@ func Run(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	srv.startDiscovery() // self-populate the fleet from the LAN
 	return http.ListenAndServe(cfg.Listen, srv.Handler())
 }

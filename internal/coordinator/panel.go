@@ -176,15 +176,38 @@ func (s *Server) servedModel() (loaded bool, model, quant string, nctx, slots in
 
 func (s *Server) aggregateNodes() map[string]map[string]any {
 	refs := make([]gateway.NodeRef, 0, len(s.cfg.Nodes))
+	configIP := map[string]bool{}
 	for _, n := range s.cfg.Nodes {
 		refs = append(refs, gateway.NodeRef{Name: n.ID, URL: n.Agent + "/gpu"})
+		configIP[hostOf(n.Agent)] = true
 	}
-	list := gateway.AggregateNodes(refs, gateway.HTTPNodeFetcher(2500*time.Millisecond))
+	// Auto-discovered soflink nodes not already in the config (matched by IP) —
+	// the DGX and anyone else running the AppImage self-report via their own /gpu.
+	for _, p := range s.discoveredPeers() {
+		ip := hostOf(p.Addr)
+		if ip == "" || configIP[ip] {
+			continue
+		}
+		refs = append(refs, gateway.NodeRef{Name: p.ID, URL: "http://" + p.Addr + "/gpu"})
+	}
+	list := gateway.AggregateNodes(refs, gateway.HTTPNodeFetcher(1200*time.Millisecond))
 	out := map[string]map[string]any{}
 	for _, n := range list {
 		out[pstr(n["name"])] = n
 	}
 	return out
+}
+
+// hostOf pulls the bare host/IP out of a URL or host:port.
+func hostOf(u string) string {
+	u = strings.TrimPrefix(strings.TrimPrefix(u, "http://"), "https://")
+	if i := strings.IndexByte(u, '/'); i >= 0 {
+		u = u[:i]
+	}
+	if i := strings.IndexByte(u, ':'); i >= 0 {
+		u = u[:i]
+	}
+	return u
 }
 
 // ---- presets / active config / pipeline ----------------------------------
@@ -324,13 +347,26 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	nodes := make([]map[string]any, 0, len(s.cfg.Nodes))
 	order := []string{}
+	seen := map[string]bool{}
 	for _, n := range s.cfg.Nodes {
 		order = append(order, n.ID)
+		seen[n.ID] = true
 	}
+	extra := []string{} // auto-discovered soflink nodes (e.g. the DGX)
+	for name := range cn {
+		if !seen[name] {
+			extra = append(extra, name)
+		}
+	}
+	sort.Strings(extra)
+	order = append(order, extra...)
+	nodes := make([]map[string]any, 0, len(order))
 	for _, id := range order {
 		n := cn[id]
+		if n == nil {
+			n = map[string]any{}
+		}
 		up, _ := n["up"].(bool)
 		gpus := n["gpus"]
 		active := hasRange(ranges, id) && loaded

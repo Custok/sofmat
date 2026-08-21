@@ -9,8 +9,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
+	"github.com/Custok/sofmat/internal/agent"
 	"github.com/Custok/sofmat/internal/config"
 	"github.com/Custok/sofmat/internal/discovery"
 	"github.com/Custok/sofmat/internal/gateway"
@@ -24,6 +26,9 @@ type Server struct {
 	gw     *gateway.Gateway
 	bc     gateway.BackendConfig
 	client *http.Client
+
+	peerMu sync.Mutex
+	peers  []discovery.Peer // soflink nodes found on the LAN (background sweep)
 }
 
 // NewServer wires the config's instances into a gateway.
@@ -117,6 +122,9 @@ func (s *Server) Handler() http.Handler {
 	// soflink LAN discovery: answer the hello so a peer's subnet sweep recognizes
 	// this node as soflink (not a random open port).
 	mux.HandleFunc("/soflink/hello", discovery.HelloHandler(s.selfID(), "coordinator"))
+	// The daemon IS the node sensor: it serves its own GPU/host telemetry, so any
+	// soflink found on the LAN self-reports its hardware (no separate agent).
+	mux.HandleFunc("/gpu", agent.Handler(s.selfID()))
 	// Embedded live panel + its API, so the binary ships its own dashboard.
 	mux.HandleFunc("/panel", s.panelPage)
 	mux.HandleFunc("/api/status", s.panelStatus)
