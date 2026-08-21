@@ -2,7 +2,9 @@ package coordinator
 
 import (
 	"bytes"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -34,8 +36,54 @@ type panelState struct {
 	renames      map[string]string
 	selected     string
 	activeConfig string
+	apiKey       string // runtime-generated key; overrides config when set
 	tokps        map[string]float64
 	clusterTokps map[string]float64
+}
+
+// effectiveAPIKey is the key currently enforced: a runtime-generated one wins,
+// else the config's. Empty = auth disabled.
+func (s *Server) effectiveAPIKey() string {
+	pstate.mu.Lock()
+	defer pstate.mu.Unlock()
+	if pstate.apiKey != "" {
+		return pstate.apiKey
+	}
+	return s.cfg.APIKey
+}
+
+// authOK passes when auth is off, or the request carries the key as a Bearer
+// token or X-API-Key header.
+func (s *Server) authOK(r *http.Request) bool {
+	key := s.effectiveAPIKey()
+	if key == "" {
+		return true
+	}
+	return r.Header.Get("Authorization") == "Bearer "+key || r.Header.Get("X-API-Key") == key
+}
+
+// guard wraps a MUTATING handler so it requires the API key when one is set —
+// load/eject/config never happen from an unauthenticated device on the LAN.
+func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.authOK(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "API key requerida para esta acción"})
+			return
+		}
+		next(w, r)
+	}
+}
+
+// panelGenKey mints a fresh random API key, activates it immediately, and
+// returns it so the panel can show + copy it (Jupyter-token style).
+func (s *Server) panelGenKey(w http.ResponseWriter, r *http.Request) {
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	key := "sk-soflink-" + hex.EncodeToString(b)
+	pstate.mu.Lock()
+	pstate.apiKey = key
+	pstate.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "api_key": key})
 }
 
 var pstate = &panelState{
@@ -57,12 +105,18 @@ func (s *Server) panelPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(panelHTML)
 }
 
+// probeClient has a SHORT timeout: panel status probes must fail fast when a
+// backend is unreachable from this node (e.g. a remote node probing another
+// host's prefill port through a closed firewall) — otherwise /api/status hangs
+// on the 600s serving client and the whole dashboard shows blank.
+var probeClient = &http.Client{Timeout: 1000 * time.Millisecond}
+
 // getJSON GETs and decodes a path from a base URL (served-model info).
 func (s *Server) getJSONFrom(base, pth string) map[string]any {
 	if base == "" {
 		return nil
 	}
-	resp, err := s.client.Get(base + pth)
+	resp, err := probeClient.Get(base + pth)
 	if err != nil || resp == nil {
 		return nil
 	}
@@ -208,9 +262,9 @@ func (s *Server) hopMS(p *config.Preset) float64 {
 		return 0
 	}
 	var samples []float64
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 3; i++ {
 		t0 := time.Now()
-		c, err := net.DialTimeout("tcp", hostport, 800*time.Millisecond)
+		c, err := net.DialTimeout("tcp", hostport, 400*time.Millisecond)
 		if err != nil {
 			continue
 		}
@@ -227,8 +281,26 @@ func (s *Server) hopMS(p *config.Preset) float64 {
 // ---- status ---------------------------------------------------------------
 
 func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
-	loaded, model, quant, nctx, slots, sizeGB, modelPath := s.servedModel()
-	cn := s.aggregateNodes()
+	// Probe the served model, the nodes, and the prefill role CONCURRENTLY — a
+	// remote node reaching another host's closed port must not chain into a
+	// multi-second stall that blanks the whole dashboard.
+	var (
+		loaded              bool
+		model, quant, modelPath string
+		nctx, slots         int
+		sizeGB              float64
+		cn                  map[string]map[string]any
+		prefillUp           bool
+	)
+	var pwg sync.WaitGroup
+	pwg.Add(3)
+	go func() { defer pwg.Done(); loaded, model, quant, nctx, slots, sizeGB, modelPath = s.servedModel() }()
+	go func() { defer pwg.Done(); cn = s.aggregateNodes() }()
+	go func() {
+		defer pwg.Done()
+		prefillUp = s.bc.PrefillURL != "" && s.getJSONFrom(s.bc.PrefillURL, "/health") != nil
+	}()
+	pwg.Wait()
 	preset := s.activePreset(model, cn)
 	pipe := s.pipelineFrom(preset)
 
@@ -302,8 +374,7 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 	// Each carries its connection surface (endpoint, model path, API key); when
 	// roles are split, they also carry the coordinator that fronts them.
 	coordinator := s.cfg.PublicURL
-	apiKey := s.cfg.APIKey
-	prefillUp := s.bc.PrefillURL != "" && s.getJSONFrom(s.bc.PrefillURL, "/health") != nil
+	apiKey := s.effectiveAPIKey()
 	coordShown := ""
 	if loaded && prefillUp {
 		coordShown = coordinator

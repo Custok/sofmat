@@ -109,18 +109,19 @@ func (s *Server) Handler() http.Handler {
 	// load/eject through the coordinator (see nodes.go).
 	mux.HandleFunc("/nodes", s.nodes)
 	mux.HandleFunc("/hop", s.hop)
-	mux.HandleFunc("/admin/eject", s.adminEject)
-	mux.HandleFunc("/admin/load", s.adminLoad)
-	mux.HandleFunc("/config/apply", s.configApply) // one-call model swap (eject+load)
+	mux.HandleFunc("/admin/eject", s.guard(s.adminEject))
+	mux.HandleFunc("/admin/load", s.guard(s.adminLoad))
+	mux.HandleFunc("/config/apply", s.guard(s.configApply)) // one-call model swap (eject+load)
 	// soflink LAN discovery: answer the hello so a peer's subnet sweep recognizes
 	// this node as soflink (not a random open port).
 	mux.HandleFunc("/soflink/hello", discovery.HelloHandler(hostname(), "coordinator"))
 	// Embedded live panel + its API, so the binary ships its own dashboard.
 	mux.HandleFunc("/panel", s.panelPage)
 	mux.HandleFunc("/api/status", s.panelStatus)
-	mux.HandleFunc("/api/eject", s.adminEject)
-	mux.HandleFunc("/api/load", s.adminLoad)
-	mux.HandleFunc("/api/apply", s.configApply)
+	mux.HandleFunc("/api/eject", s.guard(s.adminEject))
+	mux.HandleFunc("/api/load", s.guard(s.adminLoad))
+	mux.HandleFunc("/api/apply", s.guard(s.configApply))
+	mux.HandleFunc("/api/genkey", s.panelGenKey)
 	mux.HandleFunc("/api/chat", s.panelChat)
 	mux.HandleFunc("/api/measure", s.panelMeasure)
 	mux.HandleFunc("/api/selectinstance", s.panelSelectInstance)
