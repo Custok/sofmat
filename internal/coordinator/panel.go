@@ -145,9 +145,25 @@ func (s *Server) instanceEndpoint(key string) string {
 
 // ---- served-model + node assembly ----------------------------------------
 
+// selectedBase resolves the endpoint the "served model" card should read: the
+// selected instance's own endpoint (a loaded model shows ITS model, not decode).
+func (s *Server) selectedBase(selected string) string {
+	if strings.HasPrefix(selected, "loaded:") {
+		return strings.TrimPrefix(selected, "loaded:")
+	}
+	if selected == "prefill" && s.bc.PrefillURL != "" {
+		return s.bc.PrefillURL
+	}
+	return s.bc.DecodeEntryURL
+}
+
 func (s *Server) servedModel() (loaded bool, model, quant string, nctx, slots int, sizeGB float64, modelPath string) {
-	props := s.getJSON("/props")
-	models := s.getJSON("/v1/models")
+	return s.servedModelFrom(s.bc.DecodeEntryURL)
+}
+
+func (s *Server) servedModelFrom(base string) (loaded bool, model, quant string, nctx, slots int, sizeGB float64, modelPath string) {
+	props := s.getJSONFrom(base, "/props")
+	models := s.getJSONFrom(base, "/v1/models")
 	loaded = props != nil
 	slots = 4
 	if props != nil {
@@ -169,6 +185,16 @@ func (s *Server) servedModel() (loaded bool, model, quant string, nctx, slots in
 		}
 		if quant == "" {
 			quant = pstr(props["model_ftype"])
+		}
+	}
+	// fallbacks for models whose header omits ftype/n_ctx (e.g. gemma GGUF): quant
+	// from the filename, context from the running server's generation settings.
+	if quant == "" && model != "" {
+		quant = quantOf(model)
+	}
+	if nctx == 0 && props != nil {
+		if gs, ok := props["default_generation_settings"].(map[string]any); ok {
+			nctx = pint(gs["n_ctx"])
 		}
 	}
 	return
@@ -315,6 +341,13 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 		cn                  map[string]map[string]any
 		prefillUp           bool
 	)
+	pstate.mu.Lock()
+	renames := copyStr(pstate.renames)
+	selected := pstate.selected
+	tokps := copyNum(pstate.tokps)
+	cluster := copyNum(pstate.clusterTokps)
+	pstate.mu.Unlock()
+
 	var pwg sync.WaitGroup
 	pwg.Add(3)
 	go func() { defer pwg.Done(); defer recoverProbe(); loaded, model, quant, nctx, slots, sizeGB, modelPath = s.servedModel() }()
@@ -328,12 +361,21 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 	preset := s.activePreset(model, cn)
 	pipe := s.pipelineFrom(preset)
 
-	pstate.mu.Lock()
-	renames := copyStr(pstate.renames)
-	selected := pstate.selected
-	tokps := copyNum(pstate.tokps)
-	cluster := copyNum(pstate.clusterTokps)
-	pstate.mu.Unlock()
+	// The SERVED MODEL card reflects the SELECTED instance: a selected loaded model
+	// overrides the displayed model/quant/ctx/size + a single-node pipeline —
+	// WITHOUT touching the decode instance's own labels (which keep `model`/`pipe`).
+	hLoaded, hModel, hQuant, hCtx, hSize, hPath, hPipe := loaded, model, quant, nctx, sizeGB, modelPath, pipe
+	if strings.HasPrefix(selected, "loaded:") {
+		ep := strings.TrimPrefix(selected, "loaded:")
+		var sl int
+		hLoaded, hModel, hQuant, hCtx, sl, hSize, hPath = s.servedModelFrom(ep)
+		_ = sl
+		for _, lm := range loadedModels() {
+			if lm.Endpoint == ep {
+				hPipe = map[string]any{"stages": []map[string]any{{"node": lm.Node, "layers": lm.Layers, "gpus": 1}}, "total_layers": lm.Layers}
+			}
+		}
+	}
 
 	// per-node layer ranges from the active pipeline (cumulative).
 	ranges := map[string][2]int{}
@@ -430,6 +472,18 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 	if prefillUp {
 		instances = append(instances, s.instance("prefill", "prefill · procesa el prompt", model, selected, pipe, tokps, instConn("prefill", s.bc.PrefillURL)))
 	}
+	// Models launched via the panel show as their OWN instances (served on their
+	// own endpoint), separate from the config roles — so "load a downloaded model"
+	// appears as an extra instance without touching the HUD's decode.
+	for _, lm := range loadedModels() {
+		if s.getJSONFrom(lm.Endpoint, "/health") == nil {
+			continue // only surface live loaded models (a dead/loading one is hidden)
+		}
+		conn := connInfo{endpoint: lm.Endpoint, modelPath: lm.Model, apiKey: apiKey, apiKeyEnabled: apiKey != ""}
+		// a one-stage pipeline so the card shows its host + GPU + real layer count.
+		lpipe := map[string]any{"stages": []map[string]any{{"node": lm.Node, "layers": lm.Layers, "gpus": 1}}, "total_layers": lm.Layers}
+		instances = append(instances, s.instance("loaded:"+lm.Endpoint, "descargado · "+lm.Node+" · "+lm.Mode, lm.Model, selected, lpipe, tokps, conn))
+	}
 
 	// configs for the picker + nodes modal.
 	configs := make([]map[string]any, 0, len(s.cfg.Presets))
@@ -461,10 +515,10 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 		endpointLabel = coordinator
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"loaded": loaded, "loading": false, "model": model, "quant": quant,
-		"size_gb": sizeGB, "n_ctx": nctx, "slots": slots, "context_gb": ctxGB,
-		"endpoint": endpointLabel, "model_path": modelPath, "nodes": nodes,
-		"instances": instances, "pipeline": pipe, "configs": configs, "names": renames,
+		"loaded": hLoaded, "loading": false, "model": hModel, "quant": hQuant,
+		"size_gb": hSize, "n_ctx": hCtx, "slots": slots, "context_gb": ctxGB,
+		"endpoint": endpointLabel, "model_path": hPath, "nodes": nodes,
+		"instances": instances, "pipeline": hPipe, "configs": configs, "names": renames,
 		"tokps": nz(tokps[selected]), "cluster_tokps": clusterOut,
 		"selected": selected, "active_config": activeKey(preset),
 		"coordinator": coordinator, "api_key": apiKey, "api_key_enabled": apiKey != "",
@@ -684,19 +738,16 @@ func (s *Server) panelSetConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// panelRename is the pencil: it sets a node's display label and, as the ORIGIN
+// of the change, persists it + gossips it to the other coordinators so the same
+// label shows on every panel and survives restarts (see renames.go).
 func (s *Server) panelRename(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Node string `json:"node"`
 		Name string `json:"name"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	pstate.mu.Lock()
-	if req.Name == "" {
-		delete(pstate.renames, req.Node)
-	} else {
-		pstate.renames[req.Node] = req.Name
-	}
-	pstate.mu.Unlock()
+	s.applyRename(req.Node, req.Name, true)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

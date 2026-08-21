@@ -19,7 +19,7 @@
 --accent-line:rgba(92,200,255,.30);--on-accent:#04121b;--good:#3fb950;--good-soft:rgba(63,185,80,.15);
 --warn:#e0a33e;--warn-soft:rgba(224,163,62,.16);--crit:#f0563f;--crit-soft:rgba(240,86,63,.15);
 --grid:rgba(120,160,220,.05);--shadow:0 1px 2px rgba(0,0,0,.4),0 12px 32px rgba(0,0,0,.35)}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);overflow-x:hidden;
 font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:15px;
 background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:44px 44px}
 .mono{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
@@ -130,12 +130,60 @@ background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradien
 .swt{display:inline-flex;align-items:center;background:var(--inset);border:1px solid var(--line2);border-radius:999px;padding:3px;cursor:pointer;font-size:11.5px;font-weight:600;user-select:none}
 .swt span{padding:5px 13px;border-radius:999px;color:var(--faint);transition:background .15s,color .15s}
 .swt span.on{background:var(--accent);color:var(--on-accent)}
+.srch{background:var(--inset);border:1px solid var(--line);border-radius:10px;padding:9px 13px;color:var(--fg);font:inherit;font-size:14px;outline:none}.srch:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.mdlrow{display:flex;justify-content:space-between;align-items:center;gap:12px;border:1px solid var(--line2);border-radius:11px;padding:11px 14px;margin-bottom:9px}
+.qrow{display:flex;justify-content:space-between;align-items:center;gap:12px;border:1px solid var(--line2);border-radius:11px;padding:10px 14px;margin-bottom:8px}
+.dlrow{border:1px solid var(--line2);border-radius:11px;padding:11px 14px;margin-bottom:9px}
+.qhead{font-size:12.5px;color:var(--muted);margin:14px 0 9px}
+.msub2{font-size:11.5px;color:var(--faint);margin-top:3px}
+.faint2{color:var(--faint);font-size:11px;font-family:"IBM Plex Mono",monospace;overflow-wrap:anywhere}
+.dlh{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:7px;gap:10px}
+#mdllist{max-height:260px;overflow-y:auto;margin-bottom:6px}
+.lcfg{border:1px dashed var(--line);border-radius:11px;padding:12px 14px;margin:0 0 10px;background:var(--panel2)}
+.lcrow{display:flex;gap:10px;align-items:flex-start;margin-bottom:9px}
+.lclbl{font-size:12px;color:var(--faint);min-width:70px;padding-top:5px}
+.lcopts{display:flex;flex-wrap:wrap;gap:13px;flex:1}
+.lc{display:inline-flex;align-items:center;gap:5px;font-size:13px;cursor:pointer}
+.lcbtns{display:flex;gap:8px;margin-top:2px}
+.cmdbox{display:block;background:var(--inset);border:1px solid var(--line2);border-radius:8px;padding:8px 10px;font-family:"IBM Plex Mono",monospace;font-size:11px;overflow-wrap:anywhere;margin:6px 0;white-space:pre-wrap}
+.lcplan{margin-top:10px;font-size:12px}.lcpk{font-weight:600;font-size:12.5px;margin-bottom:2px}
+.lcwarn{color:var(--warn);font-size:12px;margin-top:4px}.lcok{color:var(--good);font-size:12.5px;font-weight:600;margin-top:4px}
+.pkhdr{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);padding:9px 10px 4px}
+.pkempty{padding:7px 10px 9px;font-size:12px;color:var(--faint)}
+.iej{cursor:pointer;color:var(--faint);font-size:13px;margin-left:auto;text-decoration:none}.iej:hover{color:var(--crit)}
+/* ---- responsive: tablet + móvil ---- */
+@media(max-width:760px){
+  .picker{max-width:calc(100vw - 24px)}
+  .insttabs .itab{flex:1 1 46%;min-width:0}
+}
+@media(max-width:560px){
+  .wrap{padding:14px 12px 44px}
+  .top{gap:8px 10px}
+  .logo{font-size:18px}.sub{display:none}
+  .sp{display:none}
+  .reach{order:9;width:100%;font-size:11.5px}.reach code{word-break:break-all}
+  .btn{font-size:12px;padding:8px 12px}.tbtn{width:32px;height:32px}
+  .hero>div{padding:16px 16px}
+  .mname{font-size:22px}.big{font-size:32px}
+  .thru{flex-wrap:wrap;gap:14px 20px}.spark{margin-left:0;order:5}
+  .sec{margin:20px 2px 12px}
+  .stages{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .stagerow{min-width:max-content}
+  .modal{padding:16px 8px}.modalbox{padding:16px 15px;border-radius:14px}
+  .lcrow{flex-direction:column;gap:6px}.lclbl{min-width:0}
+  .insttabs .itab{flex:1 1 100%}
+  .chatin textarea{font-size:16px}/* evita zoom iOS */
+  .metrics{grid-template-columns:1fr 1fr 1fr}
+  .clog{max-height:300px}
+}
+.picker .faint2{color:var(--faint)}
 </style></head><body><div class=wrap>
 <header class=top>
   <span class=logo>sof<b>mat</b></span><span class=sub>panel en vivo · node-a</span><span class=sp></span>
   <span class=pill id=status><span class="dot live"></span><span id=stext>…</span></span>
   <span class=reach>API <code class=mono id=ep>:8080/v1</code></span>
   <div class=loadwrap><button class=btn id=loadbtn>+ Load Model</button><div class=picker id=picker hidden></div></div>
+  <button class="btn ghost" id=modelsbtn>⬇ Modelos</button>
   <button class="btn ghost" id=nodesbtn>⛃ Nodos</button>
   <button class="btn ghost" id=eject>⏏ Eject</button>
   <button class=tbtn id=theme title=Tema>◐</button>
@@ -144,6 +192,20 @@ background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradien
   <div class=modalh><h2>Configuración de nodos por modelo</h2><button class=mx id=nodesclose title=Cerrar>✕</button></div>
   <p class=modalsub>Cada config define qué nodos se usan, cuál hace de <b>main</b> y el reparto de capas. "Usar" fija la preferencia; el panel se adapta. Los de main local se pueden cargar desde aquí.</p>
   <div id=nodeslist></div>
+</div></div>
+<div class=modal id=modelsmodal hidden><div class=modalbox style="max-width:820px">
+  <div class=modalh><h2>Descargar modelo · unsloth</h2><button class=mx id=modelsclose title=Cerrar>✕</button></div>
+  <p class=modalsub>Catálogo <b>en vivo</b> de <b>unsloth</b> en HuggingFace — se actualiza solo, los modelos nuevos aparecen sin tocar nada. Busca, elige la <b>cuantización</b> y descárgala; al terminar aparece abajo como modelo local.</p>
+  <div style="display:flex;gap:8px;margin-bottom:6px">
+    <input id=mdlq class=srch placeholder="Buscar unsloth (qwen, llama, gemma, deepseek…)" style="flex:1">
+    <button class="btn sm" id=mdlsearch>Buscar</button>
+  </div>
+  <div id=mdllist></div>
+  <div id=mdlfiles></div>
+  <div class=sec style="margin-top:20px"><h2>Descargas</h2></div>
+  <div id=mdldl></div>
+  <div class=sec style="margin-top:14px"><h2>Modelos locales</h2></div>
+  <div id=mdllocal></div>
 </div></div>
 
 <div class=insttabs id=insttabs></div>
@@ -200,7 +262,7 @@ async function tick(){
   it.innerHTML=(s.instances||[]).map(function(i){
     var dc=i.up?(i.selected?'var(--good)':'var(--muted)'):'var(--crit)';
     return '<div class="itab'+(i.selected?' on':'')+(i.up?'':' off')+'" data-inst="'+i.key+'">'
-      +'<div class=in><span class=idot style="background:'+dc+'"></span>'+(i.model||i.name)+'</div>'
+      +'<div class=in><span class=idot style="background:'+dc+'"></span>'+(i.model||i.name)+(i.key.indexOf('loaded:')===0?' <a class=iej data-eject="'+(i.endpoint||'')+'" title="Eject este modelo">⏏</a>':'')+'</div>'
       +'<div class=ir>'+(i.func||i.role)+'</div>'
       +'<div class=imeta><span class=ipill><svg width=12 height=12 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.4><rect x=2 y=2.5 width=12 height=4 rx=1/><rect x=2 y=9.5 width=12 height=4 rx=1/><circle cx=4.6 cy=4.5 r=.75 fill=currentColor stroke=none/><circle cx=4.6 cy=11.5 r=.75 fill=currentColor stroke=none/></svg>'+(i.hosts||0)+' host'+((i.hosts==1)?'':'s')+'</span>'
       +'<span class=ipill><svg width=13 height=13 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.4><rect x=1.5 y=4 width=11 height=8 rx=1.5/><circle cx=6 cy=8 r=1.8/><path d="M12.5 6.5h2M12.5 9.5h2"/></svg>'+(i.gpus||0)+' GPU</span></div>'
@@ -222,6 +284,7 @@ async function tick(){
   var mt=document.getElementById('modetoggle');if(mt)mt.querySelectorAll('span').forEach(function(sp){sp.onclick=function(){CHATMODE=sp.dataset.m;mt.querySelectorAll('span').forEach(function(x){x.classList.toggle('on',x.dataset.m===CHATMODE)})}});
   var mb=document.getElementById('measurebtn');if(mb)mb.onclick=async function(){if(MEASURING)return;MEASURING=true;mb.disabled=true;mb.textContent='Midiendo…';try{var mr=await j('/api/measure',{method:'POST',headers:ah(),body:JSON.stringify({mode:CHATMODE})});if(mr){var v=(mr.tokps!=null?mr.tokps:(mr.decode!=null?mr.decode:mr.aggregate));if(v!=null){document.getElementById('tokps').textContent=v;SPARK.push(v);if(SPARK.length>16)SPARK.shift();drawSpark()}if(mr.error)alert('Medir: '+mr.error)}}catch(e){}MEASURING=false;tick()};
   it.querySelectorAll('[data-inst]').forEach(function(b){b.onclick=function(){var k=b.dataset.inst;var up=(s.instances||[]).some(function(x){return x.key===k&&x.up});if(!up)return;CHATMODE='individual';j('/api/selectinstance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance:k})}).then(tick)}});
+  it.querySelectorAll('[data-eject]').forEach(function(b){b.onclick=function(e){e.stopPropagation();if(!confirm('¿Eject este modelo cargado?'))return;j('/api/models/eject',{method:'POST',headers:ah(),body:JSON.stringify({endpoint:b.dataset.eject})}).then(function(){setTimeout(tick,400)})}});
   var st=document.getElementById('status'),stx=document.getElementById('stext');
   if(s.loading){st.className='pill warn';stx.textContent='Loading…'}
   else if(s.loaded){st.className='pill';stx.textContent='Running'}
@@ -264,8 +327,10 @@ async function tick(){
   s.nodes.forEach(function(n){
     var host=n.node==='node-a';
     var body='';
-    (n.gpus||[]).forEach(function(gpu){var pct=Math.round(gpu.used_mb/gpu.total_mb*100);
-      body+='<div class=gpu><div class=gpuh><span class=gn>GPU '+gpu.idx+'</span><span class=mono'+(pct>90?' style="color:var(--crit)"':'')+'>'+gpu.util+'%</span></div><div class=bar><i class="'+(pct>90?'warm':'')+'" style="width:'+pct+'%"></i></div><div class=gsub><span class=mono>'+gb(gpu.used_mb)+' / '+gb(gpu.total_mb)+' GB</span><span class=mono>'+gpu.temp+'°C · '+gpu.power+' W</span></div></div>';});
+    (n.gpus||[]).forEach(function(gpu){var um=gpu.used_mb,tm=gpu.total_mb;
+      if(!tm&&n.stats){um=n.stats.ram_used_mb;tm=n.stats.ram_total_mb;} // GB10: memoria unificada → usa RAM
+      var pct=tm?Math.round(um/tm*100):0;
+      body+='<div class=gpu><div class=gpuh><span class=gn>GPU '+gpu.idx+'</span><span class=mono'+(pct>90?' style="color:var(--crit)"':'')+'>'+gpu.util+'%</span></div><div class=bar><i class="'+(pct>90?'warm':'')+'" style="width:'+pct+'%"></i></div><div class=gsub><span class=mono>'+gb(um)+' / '+gb(tm)+' GB</span><span class=mono>'+gpu.temp+'°C · '+gpu.power+' W</span></div></div>';});
     var foot='';
     if(n.stats){var t=n.stats;
       foot+='<div class=metrics><div class=metric><div class=k>CPU</div><div class=v>'+t.cpu+'<small>%</small></div></div><div class=metric><div class=k>RAM</div><div class=v>'+Math.round(t.ram_used_mb/1024)+'<small>/'+Math.round(t.ram_total_mb/1024)+' GB</small></div></div><div class=metric><div class=k>Net ↓↑</div><div class=v>'+(t.rx!=null?(t.rx/1000).toFixed(2):'—')+'<small>/'+(t.tx!=null?(t.tx/1000).toFixed(2):'—')+' Gb/s</small></div></div></div>';}
@@ -279,11 +344,20 @@ async function tick(){
     else {sc='var(--muted)';sd='';stx='libre · disponible';}
     g.innerHTML+='<div class="panel node'+(host?' host':'')+'"><div class=nodeh><span class=nm>'+dn(n.node)+'</span><button class=edit data-node="'+n.node+'" title="Renombrar nodo">✎</button><span class=st style="color:'+sc+'"><span class="dot'+sd+'"></span>'+stx+'</span></div><div class=role>'+n.role+'</div>'+body+'</div>';
   });
-  // picker
-  var pk=document.getElementById('picker');if(pk.dataset.n!=String((s.configs||[]).length)){pk.innerHTML='';(s.configs||[]).forEach(function(c){var b=document.createElement('button');b.className='pk';b.textContent=c.label;b.onclick=function(){pk.hidden=true;doLoad(c.key)};pk.appendChild(b)});pk.dataset.n=String((s.configs||[]).length)}
+  // picker is built on demand when the Load button opens it (presets + descargados)
 }
 async function doLoad(k){var r=await j('/api/apply',{method:'POST',headers:ah(),body:JSON.stringify({config:k})});if(r&&r.error){alert('Load: '+r.error);return}setTimeout(tick,500);setTimeout(tick,4000)}
-document.getElementById('loadbtn').onclick=function(e){e.stopPropagation();var p=document.getElementById('picker');p.hidden=!p.hidden};
+document.getElementById('loadbtn').onclick=async function(e){e.stopPropagation();var p=document.getElementById('picker');
+  if(p.hidden){p.innerHTML='';var s=LAST||await j('/api/status');
+    var h1=document.createElement('div');h1.className='pkhdr';h1.textContent='Configuraciones';p.appendChild(h1);
+    (s.configs||[]).forEach(function(c){var b=document.createElement('button');b.className='pk';b.textContent=c.label;b.onclick=function(){p.hidden=true;doLoad(c.key)};p.appendChild(b)});
+    var h2=document.createElement('div');h2.className='pkhdr';h2.textContent='Modelos descargados';p.appendChild(h2);
+    var lm=await j('/api/models/local');var loc=(lm&&lm.models)||[];
+    if(loc.length){loc.forEach(function(m){var b=document.createElement('button');b.className='pk';b.innerHTML='⬇ '+m.file.replace('.gguf','')+' <span class=faint2>'+m.quant+'</span>';b.onclick=function(){p.hidden=true;openModelsAt()};p.appendChild(b)})}
+    else{var e2=document.createElement('div');e2.className='pkempty';e2.textContent='(ninguno — descarga en ⬇ Modelos)';p.appendChild(e2)}
+  }
+  p.hidden=!p.hidden};
+function openModelsAt(){document.getElementById('modelsmodal').hidden=false;mdlSearch();mdlPoll();setTimeout(function(){var el=document.getElementById('mdllocal');if(el)el.scrollIntoView({behavior:'smooth',block:'center'})},500)}
 document.addEventListener('click',function(e){var p=document.getElementById('picker');if(!p.hidden&&!p.contains(e.target)&&e.target.id!=='loadbtn')p.hidden=true});
 document.getElementById('eject').onclick=async function(){if(!confirm('¿Parar el modelo (Eject)? La API dejará de servir.'))return;var r=await j('/api/eject',{method:'POST',headers:ah()});if(r&&r.error){alert('Eject: '+r.error);return}tick()};
 document.getElementById('theme').onclick=function(){var r=document.documentElement,c=r.getAttribute('data-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches,now=c?c:(d?'dark':'light');r.setAttribute('data-theme',now==='dark'?'light':'dark')};
@@ -333,5 +407,71 @@ document.addEventListener('click',function(e){
     if(v!==null){j('/api/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({node:node,name:v.trim()})}).then(function(){tick()})}
   }
 });
+// ---- descarga de modelos (unsloth) ----
+function fmtGB(b){b=Number(b)||0;return b?(b/1073741824).toFixed(b<10737418240?2:1)+' GB':'—'}
+async function mdlSearch(){var q=document.getElementById('mdlq').value.trim();var el=document.getElementById('mdllist');el.innerHTML='<div class=modalsub>Buscando…</div>';document.getElementById('mdlfiles').innerHTML='';
+  var r=await j('/api/hf/models?q='+encodeURIComponent(q));if(!r||!r.models){el.innerHTML='<div class=modalsub>Error al listar.</div>';return}
+  if(!r.models.length){el.innerHTML='<div class=modalsub>Sin resultados.</div>';return}
+  el.innerHTML=r.models.map(function(m){return '<div class=mdlrow><div><b class=mono>'+m.id.replace('unsloth/','')+'</b>'+(m.gguf?' <span class=tag>GGUF</span>':'')+'<div class=msub2>'+(m.downloads?Number(m.downloads).toLocaleString()+' descargas':'')+'</div></div><button class="btn sm ghost" data-repo="'+m.id+'">Cuantizaciones</button></div>'}).join('');
+  el.querySelectorAll('[data-repo]').forEach(function(b){b.onclick=function(){mdlFiles(b.dataset.repo)}});
+}
+async function mdlFiles(repo){var el=document.getElementById('mdlfiles');el.innerHTML='<div class=modalsub>Cargando cuantizaciones de '+repo+'…</div>';
+  var r=await j('/api/hf/files?repo='+encodeURIComponent(repo));if(!r||!r.files){el.innerHTML='<div class=modalsub>Error.</div>';return}
+  if(!r.files.length){el.innerHTML='<div class=modalsub>Este repo no tiene ficheros .gguf.</div>';return}
+  el.innerHTML='<div class=qhead>Cuantizaciones de <b class=mono>'+repo.replace('unsloth/','')+'</b> — elige una:</div>'+r.files.map(function(f){return '<div class=qrow><span><b>'+f.quant+'</b> <span class=faint2>'+f.file+'</span></span><span style="display:flex;gap:10px;align-items:center"><span class=mono>'+fmtGB(f.size)+'</span><button class="btn sm" data-repo="'+repo+'" data-file="'+f.file+'">Descargar</button></span></div>'}).join('');
+  el.querySelectorAll('[data-file]').forEach(function(b){b.onclick=function(){mdlDownload(b.dataset.repo,b.dataset.file);b.textContent='…';b.disabled=true}});
+}
+async function mdlDownload(repo,file){await j('/api/hf/download',{method:'POST',headers:ah(),body:JSON.stringify({repo:repo,file:file})});mdlPoll()}
+async function mdlPoll(){var r=await j('/api/hf/progress');var el=document.getElementById('mdldl');
+  if(r&&r.downloads&&r.downloads.length){el.innerHTML=r.downloads.map(function(d){var pct=Number(d.pct)||0;var st=d.status==='done'?'✓ listo':d.status==='error'?('✕ '+(d.error||'error')):(pct.toFixed(1)+'% · '+fmtGB(d.done)+' / '+fmtGB(d.total));return '<div class=dlrow><div class=dlh><span class=mono>'+d.id+'</span><span class=mono>'+st+'</span></div><div class=bar><i class="'+(d.status==='error'?'warm':'')+'" style="width:'+(d.status==='done'?100:pct)+'%"></i></div></div>'}).join('');}
+  else el.innerHTML='<div class=modalsub>Sin descargas.</div>';
+  mdlLocal();
+}
+async function mdlLocal(){var r=await j('/api/models/local');var el=document.getElementById('mdllocal');
+  if(!r||!r.models||!r.models.length){el.innerHTML='<div class=modalsub>Aún no hay modelos descargados. Carpeta: <span class=faint2>'+((r&&r.dir)||'models')+'</span></div>';return}
+  var nodes=(LAST&&LAST.nodes)||[];
+  el.innerHTML=r.models.map(function(m,i){
+    var checks=nodes.map(function(n){return '<label class=lc><input type=checkbox class="lc-node" data-i="'+i+'" value="'+n.node+'"'+(n.node==='node-a'?' checked':'')+'> '+dn(n.node)+'</label>'}).join('');
+    var mains=nodes.map(function(n){return '<label class=lc><input type=radio name="lc-main-'+i+'" value="'+n.node+'"'+(n.node==='node-a'?' checked':'')+'> '+dn(n.node)+'</label>'}).join('');
+    return '<div class=qrow><span><b>'+m.quant+'</b> <span class=faint2>'+m.file+'</span></span><span style="display:flex;gap:10px;align-items:center"><span class=mono>'+fmtGB(m.size)+'</span><button class="btn sm" data-cfg="'+i+'">Cargar…</button></span></div>'
+      +'<div class=lcfg id=lcfg-'+i+' hidden data-file="'+m.file+'">'
+      +'<div class=lcrow><span class=lclbl>Nodos</span><span class=lcopts>'+checks+'</span></div>'
+      +'<div class=lcrow><span class=lclbl>Main</span><span class=lcopts>'+mains+'</span></div>'
+      +'<div class=lcrow><span class=lclbl>Modo</span><span class=lcopts><label class=lc><input type=radio name="lc-mode-'+i+'" value=individual checked> Individual (1 nodo)</label><label class=lc><input type=radio name="lc-mode-'+i+'" value=union> Unión con roles (pipeline)</label></span></div>'
+      +'<div class=lcrow><span class=lclbl>Contexto</span><span class=lcopts><input type=number class=srch value=8192 style="width:120px" id=lcctx-'+i+'></span></div>'
+      +'<div class=lcbtns><button class="btn sm ghost" data-preview="'+i+'">Ver plan</button><button class="btn sm" data-launch="'+i+'">Lanzar</button></div>'
+      +'<div id=lcout-'+i+'></div></div>';
+  }).join('');
+  el.querySelectorAll('[data-cfg]').forEach(function(b){b.onclick=function(){var f=document.getElementById('lcfg-'+b.dataset.cfg);f.hidden=!f.hidden}});
+  el.querySelectorAll('[data-preview]').forEach(function(b){b.onclick=function(){mdlDoLoad(b.dataset.preview,true)}});
+  el.querySelectorAll('[data-launch]').forEach(function(b){b.onclick=function(){mdlDoLoad(b.dataset.launch,false)}});
+}
+function mdlLoadReq(i){
+  var file=document.getElementById('lcfg-'+i).dataset.file,nodes=[];
+  document.querySelectorAll('.lc-node[data-i="'+i+'"]:checked').forEach(function(c){var g=1;((LAST&&LAST.nodes)||[]).forEach(function(n){if(n.node===c.value)g=(n.gpus||[]).length||1});nodes.push({id:c.value,gpus:g})});
+  return {file:file,nodes:nodes,
+    main:(document.querySelector('input[name="lc-main-'+i+'"]:checked')||{}).value,
+    mode:(document.querySelector('input[name="lc-mode-'+i+'"]:checked')||{}).value,
+    ctx:parseInt(document.getElementById('lcctx-'+i).value)||8192};
+}
+async function mdlDoLoad(i,preview){
+  var req=mdlLoadReq(i);req.dry_run=preview;if(!req.main){alert('Elige un nodo main');return}
+  var out=document.getElementById('lcout-'+i);out.innerHTML='<div class=modalsub>'+(preview?'Construyendo plan…':'Lanzando…')+'</div>';
+  var r=await j('/api/models/load',{method:'POST',headers:ah(),body:JSON.stringify(req)});
+  if(!r){out.innerHTML='<div class=modalsub>Error.</div>';return}
+  var cmd='llama-server '+((r.spec&&r.spec.args)?r.spec.args.join(' '):'');
+  var h='<div class=lcplan><div class=lcpk>Plan · '+(r.mode||'')+' · main '+dn(r.main||'')+'</div><code class=cmdbox>'+cmd+'</code>';
+  if(r.endpoint)h+='<div class=faint2>endpoint: '+r.endpoint+'</div>';
+  if(r.blocked)h+='<div class=lcwarn>⚠ '+r.blocked+'</div>';
+  if(r.launched)h+='<div class=lcok>✓ lanzado — pid '+((r.agent_reply||{}).pid||'?')+'</div>';
+  else if(!preview&&!r.blocked)h+='<div class=lcwarn>no lanzado'+(r.error?': '+r.error:'')+'</div>';
+  h+='</div>';out.innerHTML=h;
+}
+document.getElementById('modelsbtn').onclick=function(){document.getElementById('modelsmodal').hidden=false;mdlSearch();mdlPoll()};
+document.getElementById('modelsclose').onclick=function(){document.getElementById('modelsmodal').hidden=true};
+document.getElementById('modelsmodal').onclick=function(e){if(e.target.id==='modelsmodal')this.hidden=true};
+document.getElementById('mdlsearch').onclick=mdlSearch;
+document.getElementById('mdlq').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();mdlSearch()}});
+setInterval(function(){if(!document.getElementById('modelsmodal').hidden)mdlPoll()},2000);
 tick();setInterval(tick,3000);
 </script></body></html>

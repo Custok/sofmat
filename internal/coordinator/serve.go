@@ -122,6 +122,10 @@ func (s *Server) Handler() http.Handler {
 	// soflink LAN discovery: answer the hello so a peer's subnet sweep recognizes
 	// this node as soflink (not a random open port).
 	mux.HandleFunc("/soflink/hello", discovery.HelloHandler(s.selfID(), "coordinator"))
+	// Shared display labels: peers gossip pencil renames here (one hop, no
+	// re-propagate), and expose their current labels for startup catch-up.
+	mux.HandleFunc("/soflink/rename", s.peerRename)
+	mux.HandleFunc("/soflink/renames", s.renamesList)
 	// The daemon IS the node sensor: it serves its own GPU/host telemetry, so any
 	// soflink found on the LAN self-reports its hardware (no separate agent).
 	mux.HandleFunc("/gpu", agent.Handler(s.selfID()))
@@ -137,6 +141,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/selectinstance", s.panelSelectInstance)
 	mux.HandleFunc("/api/setconfig", s.panelSetConfig)
 	mux.HandleFunc("/api/rename", s.panelRename)
+	// Model download from HuggingFace (unsloth only): browse → pick quant →
+	// download to models dir → appears in Load. Additive; see models.go.
+	mux.HandleFunc("/api/hf/models", s.hfModels)
+	mux.HandleFunc("/api/hf/files", s.hfFiles)
+	mux.HandleFunc("/api/hf/download", s.hfDownload)
+	mux.HandleFunc("/api/hf/progress", s.hfProgress)
+	mux.HandleFunc("/api/models/local", s.localModels)
+	mux.HandleFunc("/api/models/load", s.guard(s.modelsLoad))
+	mux.HandleFunc("/api/models/eject", s.guard(s.modelsEject))
+	mux.HandleFunc("/api/models/probe", s.modelsProbe)
 	mux.HandleFunc("/", s.panelPage)                // dashboard home (catch-all last)
 	return mux
 }

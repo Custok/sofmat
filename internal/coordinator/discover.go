@@ -29,6 +29,7 @@ func (s *Server) startDiscovery() {
 				s.peers = peers
 				s.peerMu.Unlock()
 			}
+			s.reconcileRenames() // heal labels from peers (missing keys only)
 			time.Sleep(20 * time.Second)
 		}
 	}()

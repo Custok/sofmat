@@ -13,6 +13,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -93,6 +94,15 @@ func handleLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cmd := exec.Command(body.Exe, body.Args...)
+	// Run with the exe's own directory as CWD so its co-located backend DLLs and
+	// the GPU runtime resolve, and capture the child's output to a log so a crash
+	// (e.g. GPU/Vulkan init) is diagnosable — a detached child with no stdio can
+	// die silently on first write.
+	cmd.Dir = filepath.Dir(body.Exe)
+	if logf, err := os.Create(filepath.Join(filepath.Dir(os.Args[0]), "llama-launch.log")); err == nil {
+		cmd.Stdout = logf
+		cmd.Stderr = logf
+	}
 	if err := cmd.Start(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -103,6 +113,27 @@ func handleLoad(w http.ResponseWriter, r *http.Request) {
 func handleEject(w http.ResponseWriter, r *http.Request) {
 	err := exec.Command("taskkill", "/F", "/IM", llamaExe).Run()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": err == nil})
+}
+
+// handleKill stops just the llama-server LISTENING on a given port (a single
+// loaded instance), so ejecting one model doesn't take down the others.
+func handleKill(w http.ResponseWriter, r *http.Request) {
+	port := r.URL.Query().Get("port")
+	if port == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "port requerido"})
+		return
+	}
+	out, _ := exec.Command("netstat", "-ano", "-p", "tcp").Output()
+	killed := []string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 || f[3] != "LISTENING" || !strings.HasSuffix(f[1], ":"+port) {
+			continue
+		}
+		_ = exec.Command("taskkill", "/F", "/PID", f[4]).Run()
+		killed = append(killed, f[4])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": len(killed) > 0, "killed": killed})
 }
 
 func main() {
@@ -124,6 +155,7 @@ func main() {
 	})
 	mux.HandleFunc("/control/load", handleLoad)
 	mux.HandleFunc("/control/eject", handleEject)
+	mux.HandleFunc("/control/kill", handleKill)
 
 	log.Printf("sofmat node-agent (%s) on %s", nodeID, *addr)
 	log.Fatal(http.ListenAndServe(*addr, mux))

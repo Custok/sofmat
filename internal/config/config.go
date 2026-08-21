@@ -31,6 +31,13 @@ type Config struct {
 	// never the raw hostname on the wire.
 	SelfID string `json:"self_id"`
 
+	// LlamaExe is the host's llama-server binary the control agent may launch
+	// (real machine path lives only in config.local.json, gitignored). Empty =
+	// "llama-server" on PATH. ModelsHostDir is where the HOST sees downloaded
+	// GGUFs (the host-side path for the launch -m flag). Empty = the models dir.
+	LlamaExe      string `json:"llama_exe"`
+	ModelsHostDir string `json:"models_host_dir"`
+
 	// Model describes the model to place (solver input). Optional for plain
 	// serving; required (and validated fail-closed) by ModelSpecFrom.
 	Model Model `json:"model"`

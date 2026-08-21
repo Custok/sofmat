@@ -20,6 +20,7 @@ func Run(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	loadRenames()        // restore display labels persisted from a prior run
 	srv.startDiscovery() // self-populate the fleet from the LAN
 	return http.ListenAndServe(cfg.Listen, srv.Handler())
 }
