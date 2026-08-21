@@ -132,8 +132,12 @@ func (s *Server) gpuPlacement(nodeID string) (mainGPU int, split string) {
 	bestFree := -1.0
 	anyRoom := false
 	for i, g := range gpus {
-		free := pnum(g["total_mb"]) - pnum(g["used_mb"])
-		if free < 2000 {
+		total := pnum(g["total_mb"])
+		free := total - pnum(g["used_mb"])
+		// A GPU more than ~70% full (or with <2 GB free) is treated as
+		// prod-occupied and gets 0 layers, so a load never crowds the GPU a prod
+		// model already fills (node-a's GPU0 with LM Studio).
+		if free < 2000 || (total > 0 && free < total*0.30) {
 			parts[i] = "0"
 		} else {
 			parts[i] = strconv.Itoa(int(free / 1024)) // weight ≈ GB free
