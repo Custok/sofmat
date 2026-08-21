@@ -21,6 +21,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
+          cache: false
       - name: Run leak-guard scanner
         # SOFMAT_LEAKGUARD_DENYLIST is a repository SECRET holding the private
         # terms (collaborator handles, exotic hardware, product/client names)
