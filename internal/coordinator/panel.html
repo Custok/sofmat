@@ -427,7 +427,9 @@ async function mdlPoll(){var r=await j('/api/hf/progress');var el=document.getEl
   else el.innerHTML='<div class=modalsub>Sin descargas.</div>';
   mdlLocal();
 }
-async function mdlLocal(){var r=await j('/api/models/local');var el=document.getElementById('mdllocal');
+async function mdlLocal(){
+  if(document.querySelector('#mdllocal .lcfg:not([hidden])'))return; // no re-renderizar mientras un form de carga está abierto (perdería la selección)
+  var r=await j('/api/models/local');var el=document.getElementById('mdllocal');
   if(!r||!r.models||!r.models.length){el.innerHTML='<div class=modalsub>Aún no hay modelos descargados. Carpeta: <span class=faint2>'+((r&&r.dir)||'models')+'</span></div>';return}
   var nodes=(LAST&&LAST.nodes)||[];
   el.innerHTML=r.models.map(function(m,i){
