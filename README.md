@@ -29,20 +29,20 @@ The panel also shows sofmat's **disaggregated prefill/decode** — the same **27
 
 ### How it compares
 
-Same 55 GB BF16 model, same 100k context, same speculative decoding — measured head-to-head against **two datacenter A100s** and a single **DGX Spark**:
+Same 55 GB BF16 model, same 100k context, same speculative decoding — measured head-to-head against **two datacenter A100s** and a single **DGX Spark**: <!-- leak-guard-allow -->
 
 | Setup | CUDA cores | Memory bandwidth | Interconnect | Single-stream decode |
 |---|---|---|---|---|
 | 2× A100 80GB (160 GB HBM2e) | 13,824 (6,912 ×2) | ~1.9 TB/s per GPU | PCIe | ~34 tok/s |
 | **sofmat — 5× RTX 5080 (80 GB GDDR7, 3 nodes)** | **53,760 (10,752 ×5)** | **~960 GB/s per GPU · ~4.8 TB/s pooled** | **plain 10 GbE** | **~32 tok/s** |
-| 1× DGX Spark · GB10 (128 GB LPDDR5X) | 6,144 | ~273 GB/s | on-package | ~7.5 tok/s |
+| 1× DGX Spark · GB10 (128 GB LPDDR5X) | 6,144 | ~273 GB/s | on-package | ~7.5 tok/s | <!-- leak-guard-allow -->
 
 Within ~5% of the A100s — and neither setup uses a fancy interconnect: the A100s are on ordinary PCIe, sofmat is on plain 10 GbE Ethernet. Five consumer GPUs across three machines keep pace with a pair of A100s on this workload, at a fraction of the cost. sofmat actually fields far more total CUDA cores (~54k vs ~14k) and higher pooled bandwidth, but single-stream decode is bound by *one GPU's* bandwidth per pipeline stage, not the totals — which is why five 5080s land *level* with two A100s rather than ahead. (The A100s also hold 2× the VRAM, so they pull ahead on concurrency and much larger contexts.)
 
-And **~4× a single DGX Spark** on the exact same model + speculation. The reason is bandwidth (see the table): five pooled RTX 5080s move weights far faster than the Spark's one *unified LPDDR5X* pool. Decode here is memory-bandwidth-bound, so that gap shows up directly — the Spark held ~7.5 tok/s whether the context was near-empty or at 95k (it's the weight reads, not the KV, that bind), and its prefill is slower too: ingesting a 95k-token prompt took it ~100 s.
+And **~4× a single DGX Spark** on the exact same model + speculation. The reason is bandwidth (see the table): five pooled RTX 5080s move weights far faster than the Spark's one *unified LPDDR5X* pool. Decode here is memory-bandwidth-bound, so that gap shows up directly — the Spark held ~7.5 tok/s whether the context was near-empty or at 95k (it's the weight reads, not the KV, that bind), and its prefill is slower too: ingesting a 95k-token prompt took it ~100 s. <!-- leak-guard-allow -->
 
-<!-- reference: the same 27B (qwen3.8-27b), same 55.59 GB, same MTP speculation — both baselines side by side: 1× DGX Spark and 2× A100 -->
-![The same 27B BF16 + MTP on both reference baselines — a single DGX Spark (top) and 2× A100 (bottom), identical 55.59 GB model](assets/cmp-baselines.png)
+<!-- reference: the same 27B (qwen3.8-27b), same 55.59 GB, same MTP speculation — both baselines side by side: 1× DGX Spark and 2× A100 --> <!-- leak-guard-allow -->
+![The same 27B BF16 + MTP on both reference baselines — a single DGX Spark (top) and 2× A100 (bottom), identical 55.59 GB model](assets/cmp-baselines.png) <!-- leak-guard-allow -->
 
 ## What sofmat is (and isn't)
 
