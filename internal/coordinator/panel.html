@@ -335,7 +335,7 @@ async function tick(){
       body+='<div class=gpu><div class=gpuh><span class=gn>GPU '+gpu.idx+'</span><span class=mono'+(pct>90?' style="color:var(--crit)"':'')+'>'+gpu.util+'%</span></div><div class=bar><i class="'+(pct>90?'warm':'')+'" style="width:'+pct+'%"></i></div><div class=gsub><span class=mono>'+gb(um)+' / '+gb(tm)+' GB</span><span class=mono>'+gpu.temp+'°C · '+gpu.power+' W</span></div></div>';});
     var foot='';
     if(n.stats){var t=n.stats;
-      foot+='<div class=metrics><div class=metric><div class=k>CPU</div><div class=v>'+t.cpu+'<small>%</small></div></div><div class=metric><div class=k>RAM</div><div class=v>'+Math.round(t.ram_used_mb/1024)+'<small>/'+Math.round(t.ram_total_mb/1024)+' GB</small></div></div><div class=metric><div class=k>Net ↓↑</div><div class=v>'+(t.rx!=null?(t.rx/1000).toFixed(2):'—')+'<small>/'+(t.tx!=null?(t.tx/1000).toFixed(2):'—')+' Gb/s</small></div></div></div>';}
+      foot+='<div class=metrics><div class=metric><div class=k>CPU</div><div class=v>'+t.cpu+'<small>%</small></div></div><div class=metric><div class=k>RAM</div><div class=v>'+Math.round(t.ram_used_mb/1024)+'<small>/'+Math.round(t.ram_total_mb/1024)+' GB</small></div></div><div class=metric><div class=k>Net ↓↑</div><div class=v>'+fmtNetPair(t.rx,t.tx)+'</div></div></div>';}
     if(!(n.gpus||[]).length) foot+='<div class=rpcnote>'+(n.ngpu||1)+' GPU · rpc-server '+(n.up?'escuchando :50052':'sin respuesta')+'<br>VRAM/CPU en vivo cuando esté el <b>sofmat-agent</b></div>';
     if(n.stats) foot+='<div class=lrange><span>rango de capas</span><span class=mono>'+(n.range?(n.range[0]+' – '+n.range[1]):'—')+'</span></div>';
     if(foot) body+='<div class=cardfoot>'+foot+'</div>';
@@ -421,6 +421,11 @@ document.addEventListener('click',function(e){
 });
 // ---- descarga de modelos (unsloth) ----
 function fmtGB(b){b=Number(b)||0;return b?(b/1073741824).toFixed(b<10737418240?2:1)+' GB':'—'}
+// NET viene en Mbps por nodo; auto-escala a la unidad legible (kb/Mb/Gb) para no esconder trafico de pocos Mbps bajo "0.00 Gb/s".
+function fmtNetPair(rx,tx){if(rx==null&&tx==null)return '—<small>/— Gb/s</small>';rx=Number(rx)||0;tx=Number(tx)||0;var mx=Math.max(rx,tx);
+  if(mx>=1000)return (rx/1000).toFixed(2)+'<small>/'+(tx/1000).toFixed(2)+' Gb/s</small>';
+  if(mx>=1)return rx.toFixed(1)+'<small>/'+tx.toFixed(1)+' Mb/s</small>';
+  return Math.round(rx*1000)+'<small>/'+Math.round(tx*1000)+' kb/s</small>';}
 function fmtMBs(b){b=Number(b)||0;return b<=0?'':(b>=1073741824?(b/1073741824).toFixed(2)+' GB/s':(b/1048576).toFixed(1)+' MB/s')}
 function fmtETA(s){s=Math.round(Number(s)||0);if(s<=0)return '—';var h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60;return h>0?(h+'h '+m+'m'):(m>0?(m+'m '+String(x).padStart(2,'0')+'s'):(x+'s'))}
 async function mdlSearch(){var q=document.getElementById('mdlq').value.trim();var el=document.getElementById('mdllist');el.innerHTML='<div class=modalsub>Buscando…</div>';document.getElementById('mdlfiles').innerHTML='';

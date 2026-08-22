@@ -2,6 +2,13 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202608230003 (2026-08-23 00:03)
+Mejoras:
+
+- **Sensor NET de Linux robusto**: coge la interfaz con MAS trafico en /proc/net/dev (antes filtraba docker/br/veth y en hosts con mucho Docker se quedaba en 0). Arregla NET=0 en node-c/node-d.
+- Boton de update: se llama **'actualizar'** y SOLO aparece si algun nodo esta por debajo de la ultima version (desaparece cuando toda la flota esta al dia).
+
+
 ## v202608222358 (2026-08-23 00:00)
 Mejoras:
 
