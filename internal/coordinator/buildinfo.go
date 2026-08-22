@@ -99,3 +99,39 @@ func (s *Server) panelUpdateNow(w http.ResponseWriter, r *http.Request) {
 	go UpdateNow() // may os.Exit after swapping the binary and re-exec'ing into the new one
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updating": true})
 }
+
+// panelUpdateFleet triggers "actualizar ahora" on EVERY node: it POSTs /api/update
+// to each remote node's own soflink (so each self-updates from GitHub), then fires
+// the local update last. One click updates the whole fleet instead of only the
+// coordinator — the fan-out is one request per node, so it doesn't add GitHub load
+// beyond what each node would poll anyway.
+func (s *Server) panelUpdateFleet(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{}
+	var selfID string
+	for _, n := range s.cfg.Nodes {
+		base := strings.TrimRight(n.Agent, "/")
+		if base == "" {
+			continue
+		}
+		if s.isSelfHost(hostOf(base)) {
+			selfID = n.ID // do the coordinator last: its update re-execs the process
+			continue
+		}
+		resp, err := s.client.Post(base+"/api/update", "application/json", nil)
+		if err != nil {
+			out[n.ID] = "error: " + err.Error()
+			continue
+		}
+		resp.Body.Close()
+		out[n.ID] = "updating"
+	}
+	if selfID != "" {
+		out[selfID] = "updating (local)"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nodes": out})
+	// Local update last — it may os.Exit + re-exec, so fire it AFTER the response
+	// is written so the panel gets the per-node result.
+	if selfID != "" && UpdateNow != nil {
+		go func() { time.Sleep(700 * time.Millisecond); UpdateNow() }()
+	}
+}

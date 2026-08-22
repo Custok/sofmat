@@ -544,11 +544,16 @@ document.getElementById('insttabs').addEventListener('click',function(e){
 // (última en GitHub) si hay una nueva, y el checkbox de auto-update (en vivo).
 async function loadVersion(){var r=await j('/api/version');if(!r)return;var el=document.getElementById('verinfo');if(!el)return;
   var h='<span class=vercur title="versión en ejecución">v'+(r.current||'dev')+'</span>';
-  if(r.pending)h+=' <span class=verpend title="versión disponible en GitHub">↑ v'+(r.available||'')+'</span> <button class="btn sm" id=updnow>actualizar ahora</button>';
+  if(r.pending)h+=' <span class=verpend title="versión disponible en GitHub">↑ v'+(r.available||'')+'</span>';
+  h+=' <button class="btn sm" id=updfleet title="actualizar TODOS los nodos de la flota">actualizar flota</button>';
   h+=' <label class=aucheck title="auto-actualizar cada 30 min"><input type=checkbox id=aucheck'+(r.autoupdate?' checked':'')+'> auto-update</label>';
+  h+=' <span id=updmsg class=vercur></span>';
   el.innerHTML=h;
   var cb=document.getElementById('aucheck');if(cb)cb.onchange=function(){j('/api/autoupdate?on='+cb.checked,{method:'POST'})};
-  var un=document.getElementById('updnow');if(un)un.onclick=function(){un.textContent='actualizando…';un.disabled=true;j('/api/update',{method:'POST'})};}
+  var uf=document.getElementById('updfleet');if(uf)uf.onclick=async function(){uf.textContent='actualizando flota…';uf.disabled=true;
+    var rr=await j('/api/update/fleet',{method:'POST'});var m=document.getElementById('updmsg');
+    if(rr&&rr.nodes&&m){m.textContent=' → '+Object.keys(rr.nodes).map(function(k){return dn(k)+': '+rr.nodes[k]}).join(' · ');}
+    setTimeout(function(){if(uf){uf.textContent='actualizar flota';uf.disabled=false}loadVersion()},5000);};}
 loadVersion();setInterval(loadVersion,60000);
 tick();setInterval(tick,3000);
 </script></body></html>

@@ -135,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/version", s.panelVersion)
 	mux.HandleFunc("/api/autoupdate", s.panelSetAutoUpdate)
 	mux.HandleFunc("/api/update", s.panelUpdateNow)
+	mux.HandleFunc("/api/update/fleet", s.panelUpdateFleet) // one click updates every node
 	mux.HandleFunc("/api/eject", s.guard(s.adminEject))
 	mux.HandleFunc("/api/load", s.guard(s.adminLoad))
 	mux.HandleFunc("/api/apply", s.guard(s.configApply))
