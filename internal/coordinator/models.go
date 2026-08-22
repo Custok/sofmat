@@ -19,12 +19,22 @@ import (
 // up as a local model the Load picker can launch. Everything here is additive:
 // new routes, no touch to chat/status/load — so it can't break the live panel.
 
-// modelsDir is where downloaded GGUFs land: a "models" dir under the working
-// dir by default, so the host running the engine can read them by path. Override
-// with SOFMAT_MODELS.
+// modelsDir is where downloaded GGUFs land — an ABSOLUTE, cwd-independent path so
+// a user can launch the binary from anywhere (double-click, any shell) and always
+// find and keep the same models. It sits next to the executable (portable, self-
+// contained); falls back to <home>/soflink/models, then a relative dir. Override
+// with SOFMAT_MODELS. The caller MkdirAll's it, so it need not pre-exist.
 func modelsDir() string {
 	if e := os.Getenv("SOFMAT_MODELS"); e != "" {
 		return e
+	}
+	if exe, err := os.Executable(); err == nil {
+		if d := filepath.Dir(exe); d != "" && d != "." {
+			return filepath.Join(d, "models")
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, "soflink", "models")
 	}
 	return "models"
 }

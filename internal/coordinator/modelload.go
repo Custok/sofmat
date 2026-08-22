@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -180,7 +182,34 @@ func (s *Server) llamaExePath() string {
 	if s.cfg.LlamaExe != "" {
 		return s.cfg.LlamaExe
 	}
-	return "llama-server"
+	// Auto-discover so the user never has to configure it: look next to the binary
+	// and in common bundle sub-dirs, then a known local build path, then PATH.
+	name := "llama-server"
+	if runtime.GOOS == "windows" {
+		name = "llama-server.exe"
+	}
+	cands := []string{}
+	if exe, err := os.Executable(); err == nil {
+		d := filepath.Dir(exe)
+		cands = append(cands,
+			filepath.Join(d, name),
+			filepath.Join(d, "inference", name),
+			filepath.Join(d, "llama", name),
+			filepath.Join(d, "bin", name),
+		)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		cands = append(cands, filepath.Join(home, ".docker", "bin", "inference", name))
+	}
+	for _, c := range cands {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	return name
 }
 
 // hostModelsDir is where the HOST sees the downloaded models (the host-side path
@@ -229,7 +258,10 @@ func (s *Server) agentBase(id string) string {
 // (/control/load). Today that's the Windows node-agent on :50060; the DGX daemon
 // (:1357) and the Linux sensors don't launch llama-server.
 func hasControlAgent(agent string) bool {
-	return strings.HasSuffix(strings.TrimRight(agent, "/"), ":50060")
+	a := strings.TrimRight(agent, "/")
+	// :1357 = a node running the soflink daemon (control now built in); :50060 =
+	// the legacy standalone node-agent.
+	return strings.HasSuffix(a, ":50060") || strings.HasSuffix(a, ":1357")
 }
 
 // modelsLoad builds the launch spec for the chosen placement and, when it can,
@@ -322,43 +354,52 @@ func (s *Server) modelsLoad(w http.ResponseWriter, r *http.Request) {
 		plan["note"] = "los nodos worker deben ejecutar ggml-rpc-server:" + strconv.Itoa(rpcPort) + " (pendiente en los node-agent)"
 	}
 
-	spec := map[string]any{"exe": s.llamaExePath(), "args": args}
+	exe := s.llamaExePath()
+	spec := map[string]any{"exe": exe, "args": args}
 	endpoint := "http://" + hostOf(s.agentBase(req.Main)) + ":" + strconv.Itoa(req.Port)
 	plan["spec"] = spec
 	plan["endpoint"] = endpoint
 
 	agent := s.agentBase(req.Main)
-	canLaunch := hasControlAgent(agent) && req.Mode == "individual"
+	// The daemon launches on its OWN host IN-PROCESS — zero-config: the local node
+	// needs nothing in the config and no node-agent. Remote nodes launch via their
+	// control agent (their soflink daemon on :1357, or the legacy node-agent :50060).
+	local := s.isSelfHost(hostOf(agent))
+	canLaunch := (local || hasControlAgent(agent)) && req.Mode == "individual"
 	plan["can_launch"] = canLaunch
 
-	// Preview only (dry_run) or a placement we can't actuate yet (main without a
-	// control agent, or unión which needs rpc-server workers): return the plan so
-	// the panel shows exactly what WOULD run, without firing anything.
+	// Preview only (dry_run) or a placement we can't actuate yet (union which needs
+	// rpc-server workers, or a remote main with no control): return the plan so the
+	// panel shows exactly what WOULD run, without firing anything.
 	if req.DryRun || !canLaunch {
 		plan["launched"] = false
-		if !hasControlAgent(agent) {
-			plan["blocked"] = "el nodo main no expone agente de control (/control/load) — hoy solo node-a; los demás necesitan node-agent con control"
-		} else if req.Mode == "union" {
+		if req.Mode == "union" {
 			plan["blocked"] = "modo unión: los workers necesitan ggml-rpc-server:" + strconv.Itoa(rpcPort) + " (fase de fleet-load)"
+		} else if !local {
+			plan["blocked"] = "el nodo main no expone control (/control/load): que corra el binario soflink (o el node-agent)"
 		}
 		writeJSON(w, http.StatusOK, plan)
 		return
 	}
 
-	// Fire it: forward the spec to the main node's control agent, which launches
-	// the allowlisted llama-server. This serves the model on its OWN endpoint and
-	// does NOT touch the coordinator's decode/HUD.
-	body, _ := json.Marshal(spec)
-	resp, err := s.client.Post(agent+"/control/load", "application/json", bytes.NewReader(body))
-	if err != nil {
-		plan["launched"] = false
-		plan["error"] = err.Error()
-		writeJSON(w, http.StatusBadGateway, plan)
-		return
-	}
-	defer resp.Body.Close()
+	// Fire it: launch the allowlisted llama-server on the main node — in-process if
+	// that's THIS host, else via its control agent. Serves the model on its OWN
+	// endpoint; never touches the coordinator's decode/HUD.
 	var out map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if local {
+		out = launchLlama(exe, args)
+	} else {
+		body, _ := json.Marshal(spec)
+		resp, err := s.client.Post(agent+"/control/load", "application/json", bytes.NewReader(body))
+		if err != nil {
+			plan["launched"] = false
+			plan["error"] = err.Error()
+			writeJSON(w, http.StatusBadGateway, plan)
+			return
+		}
+		defer resp.Body.Close()
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+	}
 	plan["launched"] = out["ok"] == true
 	plan["agent_reply"] = out
 	if out["ok"] == true {
@@ -390,9 +431,14 @@ func (s *Server) modelsEject(w http.ResponseWriter, r *http.Request) {
 			node = m.Node
 		}
 	}
-	if agent := s.agentBase(node); agent != "" && port != "" {
-		if resp, err := s.client.Post(agent+"/control/kill?port="+port, "application/json", nil); err == nil {
-			_ = resp.Body.Close()
+	if port != "" {
+		agent := s.agentBase(node)
+		if s.isSelfHost(hostOf(agent)) || node == "" {
+			killLlamaByPort(port) // in-process on this host (no node-agent needed)
+		} else if agent != "" {
+			if resp, err := s.client.Post(agent+"/control/kill?port="+port, "application/json", nil); err == nil {
+				_ = resp.Body.Close()
+			}
 		}
 	}
 	dropLoaded(req.Endpoint)

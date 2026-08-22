@@ -153,6 +153,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/models/eject", s.guard(s.modelsEject))
 	mux.HandleFunc("/api/models/delete", s.guard(s.modelsDelete))
 	mux.HandleFunc("/api/models/probe", s.modelsProbe)
+	// Control plane merged into the daemon (no separate node-agent): launch/stop
+	// llama-server on this host. LAN-trust like the old node-agent (allowlisted).
+	mux.HandleFunc("/control/load", s.controlLoad)
+	mux.HandleFunc("/control/eject", s.controlEject)
+	mux.HandleFunc("/control/kill", s.controlKill)
 	mux.HandleFunc("/", s.panelPage)                // dashboard home (catch-all last)
 	return mux
 }
