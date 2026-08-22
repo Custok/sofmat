@@ -376,6 +376,7 @@ func (s *Server) modelsLoad(w http.ResponseWriter, r *http.Request) {
 	local := s.isSelfHost(hostOf(agent))
 	canLaunch := (local || hasControlAgent(agent)) && req.Mode == "individual"
 	plan["can_launch"] = canLaunch
+	plan["local"] = local // so the panel only trusts the pid-alive crash check on THIS host
 
 	// Preview only (dry_run) or a placement we can't actuate yet (union which needs
 	// rpc-server workers, or a remote main with no control): return the plan so the

@@ -65,3 +65,33 @@ func hostStats() (cpu, usedMB, totalMB int) {
 
 // Prime seeds the CPU-time baseline so the first read is accurate.
 func Prime() { cpuPercent() }
+
+// osNetBytes sums received/sent bytes across the real interfaces from
+// /proc/net/dev, skipping loopback and virtual (docker/bridge/veth) devices so
+// container plumbing doesn't inflate the node's LAN throughput.
+func osNetBytes() (rx, tx uint64, ok bool) {
+	b, err := os.ReadFile("/proc/net/dev")
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		i := strings.IndexByte(line, ':')
+		if i < 0 {
+			continue
+		}
+		iface := strings.TrimSpace(line[:i])
+		if iface == "lo" || strings.HasPrefix(iface, "docker") || strings.HasPrefix(iface, "br-") || strings.HasPrefix(iface, "veth") {
+			continue
+		}
+		f := strings.Fields(line[i+1:])
+		if len(f) < 16 {
+			continue
+		}
+		r, _ := strconv.ParseUint(f[0], 10, 64) // rx bytes
+		t, _ := strconv.ParseUint(f[8], 10, 64) // tx bytes
+		rx += r
+		tx += t
+		ok = true
+	}
+	return
+}

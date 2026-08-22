@@ -56,9 +56,11 @@ func GPUs() []GPU {
 // the standalone node-agent so old and new nodes look the same.
 func Payload(nodeID string) map[string]any {
 	cpu, usedMB, totalMB := hostStats()
+	rx, tx := netRate()
 	return map[string]any{
 		"node": nodeID, "gpus": GPUs(),
 		"cpu": cpu, "ram_used_mb": usedMB, "ram_total_mb": totalMB,
+		"rx": rx, "tx": tx, // node network throughput (down/up) in Mbps
 	}
 }
 

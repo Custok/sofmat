@@ -3,6 +3,9 @@
 package agent
 
 import (
+	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -62,3 +65,23 @@ func hostStats() (cpu, usedMB, totalMB int) {
 
 // Prime seeds the CPU-time baseline so the first read is accurate.
 func Prime() { hostStats() }
+
+// osNetBytes returns the machine's cumulative network bytes (received, sent)
+// from `netstat -e`, whose "Bytes" row is a stable label across locales.
+func osNetBytes() (rx, tx uint64, ok bool) {
+	out, err := exec.Command("netstat", "-e").Output()
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 3 && strings.EqualFold(f[0], "Bytes") {
+			r, e1 := strconv.ParseUint(f[1], 10, 64)
+			t, e2 := strconv.ParseUint(f[2], 10, 64)
+			if e1 == nil && e2 == nil {
+				return r, t, true
+			}
+		}
+	}
+	return 0, 0, false
+}

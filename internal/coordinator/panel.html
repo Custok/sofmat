@@ -243,7 +243,7 @@ background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradien
 <script>
 var HIST=[],SPARK=[],NM={};function dn(n){return NM[n]||n}
 var APIKEY='',LAST=null;
-document.head.insertAdjacentHTML('beforeend','<style>.cpv{cursor:pointer}.cpv:hover{opacity:1 !important}.genk{cursor:pointer;color:var(--accent);margin-left:5px;text-decoration:none;font-weight:600}</style>');
+document.head.insertAdjacentHTML('beforeend','<style>.cpv{cursor:pointer}.cpv:hover{opacity:1 !important}.genk{cursor:pointer;color:var(--accent);margin-left:5px;text-decoration:none;font-weight:600}.lccard{margin-top:10px;border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--panel2)}.lccardh{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:6px}.lccardt{font-weight:700}.lccardm{font-size:12px;color:var(--muted);font-family:ui-monospace,monospace}.lcstate{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;margin:8px 0;padding:8px 10px;border-radius:9px}.lcstate .dot{width:9px;height:9px;border-radius:50%;flex:none}.lcstate.load{color:var(--accent);background:var(--accent-soft)}.lcstate.load .dot{background:var(--accent);animation:lcpulse 1s ease-in-out infinite}.lcstate.ok{color:var(--good);background:var(--good-soft)}.lcstate.ok .dot{background:var(--good)}.lcstate.err{color:var(--crit);background:var(--crit-soft)}.lcstate.err .dot{background:var(--crit)}@keyframes lcpulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.8)}}.lcep{font-size:12px;color:var(--muted);font-family:ui-monospace,monospace;margin:2px 0;word-break:break-all}.lccardbtns{display:flex;gap:8px;margin-top:10px}</style>');
 function cp(t,el){if(!t)return;try{navigator.clipboard.writeText(t)}catch(e){}if(el){var o=el.style.color;el.style.color='var(--good)';setTimeout(function(){el.style.color=o},700)}}
 function maskKey(k){return k?(k.length>22?k.slice(0,14)+'…'+k.slice(-4):k):''}
 function ah(extra){var h=Object.assign({'Content-Type':'application/json'},extra||{});if(APIKEY)h['Authorization']='Bearer '+APIKEY;return h}
@@ -478,38 +478,52 @@ function mdlLoadReq(i){
 }
 async function mdlDoLoad(i,preview){
   var req=mdlLoadReq(i);req.dry_run=preview;if(!req.main){alert('Elige un nodo main');return}
-  var out=document.getElementById('lcout-'+i);out.innerHTML='<div class=modalsub>'+(preview?'Construyendo plan…':'Lanzando…')+'</div>';
+  var out=document.getElementById('lcout-'+i);
+  // --- Ver plan (dry_run): solo el comando, sin tarjeta ---
+  if(preview){
+    out.innerHTML='<div class=modalsub>Construyendo plan…</div>';
+    var pr=await j('/api/models/load',{method:'POST',headers:ah(),body:JSON.stringify(req)});
+    if(!pr){out.innerHTML='<div class=modalsub>Error.</div>';return}
+    var pcmd='llama-server '+((pr.spec&&pr.spec.args)?pr.spec.args.join(' '):'');
+    var ph='<div class=lcplan><div class=lcpk>Plan · '+(pr.mode||'')+' · main '+dn(pr.main||'')+'</div><code class=cmdbox>'+pcmd+'</code>';
+    if(pr.blocked)ph+='<div class=lcwarn>⚠ '+pr.blocked+'</div>';
+    ph+='</div>';out.innerHTML=ph;return;
+  }
+  // --- Lanzar: TARJETA con estado en vivo + Cerrar/Relanzar siempre visibles ---
+  var EP=null;
+  function setState(cls,txt){var s=document.getElementById('lcst-'+i);if(s){s.className='lcstate '+cls;var t=document.getElementById('lcstx-'+i);if(t)t.textContent=txt;}}
+  out.innerHTML='<div class=lccard>'
+    +'<div class=lccardh><span class=lccardt>'+dn(req.main)+'</span><span class=lccardm>'+(req.mode||'individual')+' · ctx '+fmtctx(req.ctx)+'</span></div>'
+    +'<div class="lcstate load" id=lcst-'+i+'><span class=dot></span><span id=lcstx-'+i+'>Lanzando…</span></div>'
+    +'<div class=lcep id=lcep-'+i+'></div>'
+    +'<code class=cmdbox id=lccmd-'+i+' style="display:none"></code>'
+    +'<div class=lccardbtns><button class="btn sm ghost" id=lcx-'+i+'>Cerrar</button> <button class="btn sm" id=lcr-'+i+'>Relanzar</button></div>'
+    +'</div>';
+  document.getElementById('lcx-'+i).onclick=function(){if(EP)j('/api/models/eject',{method:'POST',headers:ah(),body:JSON.stringify({endpoint:EP})});var o=document.getElementById('lcout-'+i);if(o)o.innerHTML='';setTimeout(mdlPoll,600)};
+  document.getElementById('lcr-'+i).onclick=function(){if(EP)j('/api/models/eject',{method:'POST',headers:ah(),body:JSON.stringify({endpoint:EP})});setTimeout(function(){mdlDoLoad(i,false)},EP?500:0)};
   var r=await j('/api/models/load',{method:'POST',headers:ah(),body:JSON.stringify(req)});
-  if(!r){out.innerHTML='<div class=modalsub>Error.</div>';return}
+  if(!r){setState('err','✕ error de red al lanzar');return;}
   var cmd='llama-server '+((r.spec&&r.spec.args)?r.spec.args.join(' '):'');
-  var h='<div class=lcplan><div class=lcpk>Plan · '+(r.mode||'')+' · main '+dn(r.main||'')+'</div><code class=cmdbox>'+cmd+'</code>';
-  if(r.endpoint)h+='<div class=faint2>endpoint: '+r.endpoint+'</div>';
-  if(r.blocked)h+='<div class=lcwarn>⚠ '+r.blocked+'</div>';
-  if(r.launched){h+='<div class=lcok>✓ proceso lanzado — pid '+((r.agent_reply||{}).pid||'?')+'</div>';h+='<div class=faint2 id=lcload-'+i+'>⏳ esperando a que el modelo cargue…</div>';}
-  else if(!preview&&!r.blocked)h+='<div class=lcwarn>no lanzado'+(r.error?': '+r.error:'')+'</div>';
-  h+='</div>';out.innerHTML=h;
-  if(r.launched&&r.endpoint)mdlWaitLoad(i,r.endpoint,(r.agent_reply||{}).pid);
+  var cb=document.getElementById('lccmd-'+i);if(cb){cb.textContent=cmd;cb.style.display='';}
+  if(r.endpoint){EP=r.endpoint;var ep=document.getElementById('lcep-'+i);if(ep)ep.textContent='endpoint '+r.endpoint;}
+  if(r.launched){setState('load','⏳ cargando modelo… (0s)');mdlWaitLoad(i,r.endpoint,(r.agent_reply||{}).pid,r.local===true,setState);}
+  else if(r.blocked)setState('err','⚠ '+r.blocked);
+  else setState('err','✕ no lanzado'+(r.error?': '+r.error:''));
 }
-// tras lanzar, sondea /health de la instancia hasta que el MODELO este cargado
-// (antes ponia "lanzado" en cuanto arrancaba el proceso, aunque el modelo fallara).
-async function mdlWaitLoad(i,endpoint,pid){
+// tras lanzar, sondea /health hasta que el MODELO cargue; crash rapido por pid (solo en nodo local).
+async function mdlWaitLoad(i,endpoint,pid,isLocal,setState){
   var t0=Date.now(),max=180000;
-  function fail(el,secs){el.className='lcwarn';
-    el.innerHTML='✕ el modelo no cargó ('+secs+'s) — arquitectura no soportada por llama-server o falta de VRAM. '
-      +'<button class="btn sm ghost" id=lcx-'+i+'>Cerrar</button> <button class="btn sm" id=lcr-'+i+'>Relanzar</button>';
-    var x=document.getElementById('lcx-'+i);if(x)x.onclick=function(){var o=document.getElementById('lcout-'+i);if(o)o.innerHTML=''};
-    var rl=document.getElementById('lcr-'+i);if(rl)rl.onclick=function(){mdlDoLoad(i,false)};}
   while(Date.now()-t0<max){
-    await new Promise(function(res){setTimeout(res,2500)});
-    var el=document.getElementById('lcload-'+i);if(!el)return; // re-render: abortar
+    await new Promise(function(res){setTimeout(res,2000)});
+    if(!document.getElementById('lcst-'+i))return; // tarjeta cerrada / re-render: abortar
     var secs=Math.round((Date.now()-t0)/1000);
     var p=await j('/api/models/probe?endpoint='+encodeURIComponent(endpoint));
-    if(p&&p.up){el.className='lcok';el.innerHTML='✓ modelo CARGADO y sirviendo ('+secs+'s)';mdlPoll();return;}
-    // crash rápido: si el proceso ya murió (y no sirve), no esperamos el timeout de 180s.
-    if(pid&&secs>6){var a=await j('/api/models/alive?pid='+pid);if(a&&a.alive===false){fail(el,secs);return;}}
-    el.innerHTML='⏳ cargando modelo… ('+secs+'s)';
+    if(p&&p.up){setState('ok','✓ modelo CARGADO y sirviendo ('+secs+'s)');mdlPoll();return;}
+    // crash rapido: si el proceso ya murio (y no sirve), no esperamos el timeout de 180s.
+    if(isLocal&&pid&&secs>6){var a=await j('/api/models/alive?pid='+pid);if(a&&a.alive===false){setState('err','✕ crasheó ('+secs+'s) — probablemente sin VRAM o arquitectura no soportada. Libera GPU o reduce contexto y Relanza.');return;}}
+    setState('load','⏳ cargando modelo… ('+secs+'s)');
   }
-  var e2=document.getElementById('lcload-'+i);if(e2)fail(e2,180);
+  setState('err','✕ no cargó en 180s — probablemente sin VRAM. Cierra, libera memoria de GPU y Relanza.');
 }
 document.getElementById('modelsbtn').onclick=function(){document.getElementById('modelsmodal').hidden=false;mdlSearch();mdlPoll()};
 document.getElementById('modelsclose').onclick=function(){document.getElementById('modelsmodal').hidden=true};
