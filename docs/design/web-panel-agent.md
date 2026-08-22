@@ -19,7 +19,7 @@ GET /metrics
 ```
 - Bind host/port from config (default port `50060`); the real bind address
   lives only in `config.local.yaml`.
-- **Authenticated with `common/auth`** (OWASP A01): the caller sends
+- **Authenticated with `common/auth`**: the caller sends
   `common/auth.request_headers(token)`; the agent verifies with
   `common/auth.verify_request(token, headers)`. **401 on missing/invalid auth**
   — never an open telemetry port on the LAN (a metrics feed still reveals the
