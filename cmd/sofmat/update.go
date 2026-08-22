@@ -101,6 +101,24 @@ func checkAndUpdate() {
 	}
 }
 
+// updateCheckEvery es cada cuánto re-comprueba GitHub una guardia en runtime.
+const updateCheckEvery = 30 * time.Minute
+
+// periodicUpdate re-lanza checkAndUpdate periódicamente mientras el proceso vive,
+// para que un nodo de guardia coja releases nuevas sin esperar a un reinicio
+// manual (feedback de node-b/c/d: el auto-update solo saltaba al arranque). Al
+// encontrar versión nueva, checkAndUpdate hace swap + re-exec (os.Exit) aquí.
+func periodicUpdate() {
+	if version == "dev" {
+		return
+	}
+	t := time.NewTicker(updateCheckEvery)
+	defer t.Stop()
+	for range t.C {
+		checkAndUpdate()
+	}
+}
+
 func applyUpdate(client *http.Client, url string) error {
 	self := selfPath()
 	if self == "" {

@@ -52,7 +52,8 @@ func serve(args []string) {
 	noUpdate := fs.Bool("no-update", false, "skip the GitHub auto-update check on startup")
 	_ = fs.Parse(args)
 	if !*noUpdate {
-		checkAndUpdate() // self-update from GitHub Releases, then re-exec (best-effort)
+		checkAndUpdate()    // self-update from GitHub Releases at startup, then re-exec (best-effort)
+		go periodicUpdate() // y sigue comprobando en runtime (cada 30m) para coger releases sin reiniciar
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {

@@ -483,9 +483,24 @@ async function mdlDoLoad(i,preview){
   var h='<div class=lcplan><div class=lcpk>Plan · '+(r.mode||'')+' · main '+dn(r.main||'')+'</div><code class=cmdbox>'+cmd+'</code>';
   if(r.endpoint)h+='<div class=faint2>endpoint: '+r.endpoint+'</div>';
   if(r.blocked)h+='<div class=lcwarn>⚠ '+r.blocked+'</div>';
-  if(r.launched)h+='<div class=lcok>✓ lanzado — pid '+((r.agent_reply||{}).pid||'?')+'</div>';
+  if(r.launched){h+='<div class=lcok>✓ proceso lanzado — pid '+((r.agent_reply||{}).pid||'?')+'</div>';h+='<div class=faint2 id=lcload-'+i+'>⏳ esperando a que el modelo cargue…</div>';}
   else if(!preview&&!r.blocked)h+='<div class=lcwarn>no lanzado'+(r.error?': '+r.error:'')+'</div>';
   h+='</div>';out.innerHTML=h;
+  if(r.launched&&r.endpoint)mdlWaitLoad(i,r.endpoint);
+}
+// tras lanzar, sondea /health de la instancia hasta que el MODELO este cargado
+// (antes ponia "lanzado" en cuanto arrancaba el proceso, aunque el modelo fallara).
+async function mdlWaitLoad(i,endpoint){
+  var t0=Date.now(),max=180000;
+  while(Date.now()-t0<max){
+    await new Promise(function(res){setTimeout(res,2500)});
+    var el=document.getElementById('lcload-'+i);if(!el)return; // re-render: abortar
+    var secs=Math.round((Date.now()-t0)/1000);
+    var p=await j('/api/models/probe?endpoint='+encodeURIComponent(endpoint));
+    if(p&&p.up){el.className='lcok';el.innerHTML='✓ modelo CARGADO y sirviendo ('+secs+'s)';mdlPoll();return;}
+    el.innerHTML='⏳ cargando modelo… ('+secs+'s)';
+  }
+  var e2=document.getElementById('lcload-'+i);if(e2){e2.className='lcwarn';e2.innerHTML='✕ el modelo no cargó en 180s — revisa el log del nodo (arquitectura no soportada por llama-server o falta de VRAM)';}
 }
 document.getElementById('modelsbtn').onclick=function(){document.getElementById('modelsmodal').hidden=false;mdlSearch();mdlPoll()};
 document.getElementById('modelsclose').onclick=function(){document.getElementById('modelsmodal').hidden=true};
