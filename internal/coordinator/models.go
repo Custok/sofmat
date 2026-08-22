@@ -51,6 +51,17 @@ var hfDownloadClient = &http.Client{}
 // model into one row (only the first part is loadable).
 var splitPartRe = regexp.MustCompile(`(?i)^(.*)-(\d+)-of-(\d+)\.gguf$`)
 
+// modelFolder is the per-model subdirectory a download lands in: the filename with
+// its split suffix (-00001-of-00003) and .gguf stripped, so every part of a split
+// model shares one folder and the panel treats the folder as a single model.
+func modelFolder(file string) string {
+	b := filepath.Base(file)
+	if m := splitPartRe.FindStringSubmatch(b); m != nil {
+		return m[1]
+	}
+	return strings.TrimSuffix(b, ".gguf")
+}
+
 // ---- browse ---------------------------------------------------------------
 
 // hfModels lists unsloth repos (top by downloads, optional search filter), so
@@ -197,7 +208,12 @@ func (s *Server) runDownload(job *dlJob, name string) {
 		job.Status, job.Error = "error", msg
 		dlReg.mu.Unlock()
 	}
-	if err := os.MkdirAll(modelsDir(), 0755); err != nil {
+	// Each model lands in its OWN subfolder (named for the model) so all parts of a
+	// split GGUF share one folder and the panel lists it as a single model.
+	folder := modelFolder(job.File)
+	base := filepath.Base(job.File)
+	destDir := filepath.Join(modelsDir(), folder)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
 		fail(err.Error())
 		return
 	}
@@ -216,7 +232,7 @@ func (s *Server) runDownload(job *dlJob, name string) {
 	job.Total = resp.ContentLength
 	dlReg.mu.Unlock()
 
-	part := filepath.Join(modelsDir(), name+".part")
+	part := filepath.Join(destDir, base+".part")
 	f, err := os.Create(part)
 	if err != nil {
 		fail(err.Error())
@@ -252,7 +268,7 @@ func (s *Server) runDownload(job *dlJob, name string) {
 		}
 	}
 	f.Close()
-	if err := os.Rename(part, filepath.Join(modelsDir(), name)); err != nil {
+	if err := os.Rename(part, filepath.Join(destDir, base)); err != nil {
 		fail(err.Error())
 		return
 	}
@@ -292,34 +308,46 @@ func (s *Server) hfProgress(w http.ResponseWriter, r *http.Request) {
 func (s *Server) localModels(w http.ResponseWriter, r *http.Request) {
 	dir := modelsDir()
 	ents, _ := os.ReadDir(dir)
-	// index sizes so a split model can show its TOTAL size on its first part.
-	sizeOf := map[string]int64{}
-	for _, e := range ents {
-		if info, err := e.Info(); err == nil {
-			sizeOf[e.Name()] = info.Size()
-		}
-	}
 	out := []map[string]any{}
 	for _, e := range ents {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(strings.ToLower(name), ".gguf") {
+		// Each model lives in its OWN subfolder, so a folder = one model (a split
+		// GGUF's parts collapse into a single row naturally). "file" is the loadable
+		// part as a path relative to the models dir ("<folder>/<file>.gguf").
+		if e.IsDir() {
+			if load, total := loadableGGUF(filepath.Join(dir, e.Name())); load != "" {
+				rel := e.Name() + "/" + load
+				out = append(out, map[string]any{
+					"file": rel, "size": total, "quant": quantOf(load),
+					"path": filepath.Join(dir, e.Name(), load),
+				})
+			}
 			continue
 		}
-		size := sizeOf[name]
-		// Split GGUF (…-00001-of-00002.gguf): show ONLY the first part (the loadable
-		// one — llama.cpp finds the rest by name), summing all parts' sizes; hide the
-		// other parts so a multi-file model appears as a single row.
+		// Legacy flat .gguf at the top level (downloaded before the per-folder layout):
+		// still collapse split parts into one row.
+		name := e.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".gguf") {
+			continue
+		}
 		if m := splitPartRe.FindStringSubmatch(name); m != nil {
-			if part, _ := strconv.Atoi(m[2]); part != 1 {
+			if p, _ := strconv.Atoi(m[2]); p != 1 {
 				continue
 			}
-			total := int64(0)
-			for other, sz := range sizeOf {
-				if om := splitPartRe.FindStringSubmatch(other); om != nil && om[1] == m[1] && om[3] == m[3] {
-					total += sz
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		size := info.Size()
+		if m := splitPartRe.FindStringSubmatch(name); m != nil {
+			size = 0
+			for _, e2 := range ents {
+				if om := splitPartRe.FindStringSubmatch(e2.Name()); om != nil && om[1] == m[1] && om[3] == m[3] {
+					if i2, err := e2.Info(); err == nil {
+						size += i2.Size()
+					}
 				}
 			}
-			size = total
 		}
 		out = append(out, map[string]any{
 			"file": name, "size": size, "quant": quantOf(name),
@@ -327,6 +355,34 @@ func (s *Server) localModels(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": out, "dir": dir})
+}
+
+// loadableGGUF returns the single loadable .gguf in a model folder (the first part
+// of a split, or the lone file) and the TOTAL size of all its .gguf parts. Empty
+// name if the folder holds no ready .gguf.
+func loadableGGUF(sub string) (string, int64) {
+	ents, _ := os.ReadDir(sub)
+	var load string
+	var total int64
+	for _, e := range ents {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(n), ".gguf") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		total += info.Size()
+		if m := splitPartRe.FindStringSubmatch(n); m != nil {
+			if p, _ := strconv.Atoi(m[2]); p == 1 {
+				load = n
+			}
+		} else if load == "" {
+			load = n
+		}
+	}
+	return load, total
 }
 
 // modelsDelete borra un .gguf del disco (models dir). Endurecido contra path
@@ -340,22 +396,33 @@ func (s *Server) modelsDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "file requerido"})
 		return
 	}
-	name := strings.TrimSpace(req.File)
-	if name != filepath.Base(name) || !strings.HasSuffix(strings.ToLower(name), ".gguf") {
+	name := filepath.ToSlash(strings.TrimSpace(req.File))
+	if !strings.HasSuffix(strings.ToLower(name), ".gguf") || strings.Contains(name, "..") || strings.HasPrefix(name, "/") {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "nombre inválido"})
 		return
 	}
-	path := filepath.Join(modelsDir(), name)
-	if _, err := os.Stat(path); err != nil {
+	dir := modelsDir()
+	parts := strings.Split(name, "/")
+	var target, label string
+	switch {
+	case len(parts) == 1 && parts[0] != "": // legacy flat file → delete the file
+		target, label = filepath.Join(dir, parts[0]), parts[0]
+	case len(parts) == 2 && parts[0] != "" && parts[1] != "": // folder/file → delete the whole model folder (all parts)
+		target, label = filepath.Join(dir, parts[0]), parts[0]
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "nombre inválido"})
+		return
+	}
+	if _, err := os.Stat(target); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "el modelo no existe"})
 		return
 	}
-	if err := os.Remove(path); err != nil {
+	if err := os.RemoveAll(target); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error": err.Error(),
 			"hint":  "si el modelo está cargado, haz Eject antes de borrar (el fichero está en uso)",
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": name})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": label})
 }

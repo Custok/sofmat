@@ -298,8 +298,8 @@ func (s *Server) modelsLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	modelPath := strings.TrimRight(s.hostModelsDir(), `\`) + `\` + name // host is Windows: backslash path
-	alias := strings.TrimSuffix(name, ".gguf")
+	modelPath := filepath.Join(s.hostModelsDir(), filepath.FromSlash(name)) // resolves the per-model subfolder
+	alias := strings.TrimSuffix(filepath.Base(name), ".gguf")
 
 	args := []string{
 		"-m", modelPath,
