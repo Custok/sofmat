@@ -3,6 +3,7 @@ package coordinator
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -79,11 +80,51 @@ func refreshLatest() {
 // whether auto-update is on / an update is pending.
 func (s *Server) panelVersion(w http.ResponseWriter, r *http.Request) {
 	cur, avail := Version, latestRelease()
+	// Fleet-wide: which nodes run a build older than the latest release? The panel
+	// only shows the "actualizar" button when at least one node is behind — so it
+	// disappears once the whole fleet is on the newest version.
+	behind := []string{}
+	if avail != "" {
+		type res struct{ id, ver string }
+		ch := make(chan res, len(s.cfg.Nodes))
+		var wg sync.WaitGroup
+		for _, n := range s.cfg.Nodes {
+			base := strings.TrimRight(n.Agent, "/")
+			if base == "" {
+				continue
+			}
+			wg.Add(1)
+			go func(id, base string) {
+				defer wg.Done()
+				ver := ""
+				cl := &http.Client{Timeout: 1500 * time.Millisecond}
+				if resp, err := cl.Get(base + "/api/version"); err == nil {
+					var vv struct {
+						Current string `json:"current"`
+					}
+					_ = json.NewDecoder(resp.Body).Decode(&vv)
+					resp.Body.Close()
+					ver = vv.Current
+				}
+				ch <- res{id, ver}
+			}(n.ID, base)
+		}
+		wg.Wait()
+		close(ch)
+		for r := range ch { // unreachable / unknown version → not flagged (can't update it anyway)
+			if r.ver != "" && r.ver != "dev" && r.ver < avail {
+				behind = append(behind, r.id)
+			}
+		}
+		sort.Strings(behind)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"current":    cur,
-		"available":  avail,
-		"autoupdate": AutoUpdateOn(),
-		"pending":    cur != "dev" && avail != "" && avail > cur,
+		"current":       cur,
+		"available":     avail,
+		"autoupdate":    AutoUpdateOn(),
+		"pending":       cur != "dev" && avail != "" && avail > cur,
+		"fleet_pending": len(behind) > 0,
+		"behind":        behind,
 	})
 }
 

@@ -66,21 +66,24 @@ func hostStats() (cpu, usedMB, totalMB int) {
 // Prime seeds the CPU-time baseline so the first read is accurate.
 func Prime() { cpuPercent() }
 
-// osNetBytes sums received/sent bytes across the real interfaces from
-// /proc/net/dev, skipping loopback and virtual (docker/bridge/veth) devices so
-// container plumbing doesn't inflate the node's LAN throughput.
+// osNetBytes returns the received/sent byte counters of the BUSIEST interface in
+// /proc/net/dev (loopback excluded). Picking the single interface with the most
+// traffic — instead of summing a filtered subset — is robust across hosts whose
+// primary link is named anything (eth0, enpX, a bridge, docker0…) and avoids
+// double-counting the same packets across a veth pair. Returns ok=false only if
+// /proc/net/dev is unreadable or has no non-loopback interface.
 func osNetBytes() (rx, tx uint64, ok bool) {
 	b, err := os.ReadFile("/proc/net/dev")
 	if err != nil {
 		return 0, 0, false
 	}
+	var best uint64
 	for _, line := range strings.Split(string(b), "\n") {
 		i := strings.IndexByte(line, ':')
 		if i < 0 {
 			continue
 		}
-		iface := strings.TrimSpace(line[:i])
-		if iface == "lo" || strings.HasPrefix(iface, "docker") || strings.HasPrefix(iface, "br-") || strings.HasPrefix(iface, "veth") {
+		if strings.TrimSpace(line[:i]) == "lo" {
 			continue
 		}
 		f := strings.Fields(line[i+1:])
@@ -89,9 +92,9 @@ func osNetBytes() (rx, tx uint64, ok bool) {
 		}
 		r, _ := strconv.ParseUint(f[0], 10, 64) // rx bytes
 		t, _ := strconv.ParseUint(f[8], 10, 64) // tx bytes
-		rx += r
-		tx += t
-		ok = true
+		if r+t >= best {
+			best, rx, tx, ok = r+t, r, t, true
+		}
 	}
 	return
 }

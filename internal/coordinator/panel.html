@@ -545,7 +545,7 @@ document.getElementById('insttabs').addEventListener('click',function(e){
 async function loadVersion(){var r=await j('/api/version');if(!r)return;var el=document.getElementById('verinfo');if(!el)return;
   var h='<span class=vercur title="versión en ejecución">v'+(r.current||'dev')+'</span>';
   if(r.pending)h+=' <span class=verpend title="versión disponible en GitHub">↑ v'+(r.available||'')+'</span>';
-  h+=' <button class="btn sm" id=updfleet title="actualizar TODOS los nodos de la flota">actualizar todos</button>';
+  if(r.fleet_pending){var bt=(r.behind&&r.behind.length)?('actualizar nodos por debajo: '+r.behind.map(dn).join(', ')):'actualizar toda la flota';h+=' <button class="btn sm" id=updfleet title="'+bt+'">actualizar</button>';}
   h+=' <label class=aucheck title="auto-actualizar cada 30 min"><input type=checkbox id=aucheck'+(r.autoupdate?' checked':'')+'> auto-update</label>';
   h+=' <span id=updmsg class=vercur></span>';
   el.innerHTML=h;
@@ -553,7 +553,7 @@ async function loadVersion(){var r=await j('/api/version');if(!r)return;var el=d
   var uf=document.getElementById('updfleet');if(uf)uf.onclick=async function(){uf.textContent='actualizando…';uf.disabled=true;
     var rr=await j('/api/update/fleet',{method:'POST'});var m=document.getElementById('updmsg');
     if(rr&&rr.nodes&&m){m.textContent=' → '+Object.keys(rr.nodes).map(function(k){return dn(k)+': '+rr.nodes[k]}).join(' · ');}
-    setTimeout(function(){if(uf){uf.textContent='actualizar todos';uf.disabled=false}loadVersion()},5000);};}
+    setTimeout(function(){if(uf){uf.textContent='actualizar';uf.disabled=false}loadVersion()},5000);};}
 loadVersion();setInterval(loadVersion,60000);
 tick();setInterval(tick,3000);
 </script></body></html>
