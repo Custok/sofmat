@@ -132,6 +132,8 @@ func (s *Server) Handler() http.Handler {
 	// Embedded live panel + its API, so the binary ships its own dashboard.
 	mux.HandleFunc("/panel", s.panelPage)
 	mux.HandleFunc("/api/status", s.panelStatus)
+	mux.HandleFunc("/api/version", s.panelVersion)
+	mux.HandleFunc("/api/autoupdate", s.panelSetAutoUpdate)
 	mux.HandleFunc("/api/eject", s.guard(s.adminEject))
 	mux.HandleFunc("/api/load", s.guard(s.adminLoad))
 	mux.HandleFunc("/api/apply", s.guard(s.configApply))

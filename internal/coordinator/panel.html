@@ -27,6 +27,8 @@ background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradien
 .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:4px 2px 20px}
 .logo{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:21px;letter-spacing:-.5px}.logo b{color:var(--accent)}
 .sub{font-size:12.5px;color:var(--faint)}.sp{margin-left:auto}
+.vercur{color:var(--muted);font-variant-numeric:tabular-nums}.verpend{color:var(--accent);font-weight:600}
+.aucheck{color:var(--muted);cursor:pointer;user-select:none;margin-left:4px}.aucheck input{vertical-align:-1px;margin-right:3px;cursor:pointer}
 .pill{display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;font-size:12.5px;font-weight:600;background:var(--good-soft);color:var(--good)}
 .pill.stopped{background:var(--crit-soft);color:var(--crit)}.pill.warn{background:var(--warn-soft);color:var(--warn)}
 .dot{width:8px;height:8px;border-radius:50%;background:currentColor;position:relative}
@@ -179,7 +181,7 @@ background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradien
 .picker .faint2{color:var(--faint)}
 </style></head><body><div class=wrap>
 <header class=top>
-  <span class=logo>sof<b>mat</b></span><span class=sub>panel en vivo · node-a</span><span class=sp></span>
+  <span class=logo>sof<b>mat</b></span><span class=sub id=verinfo></span><span class=sp></span>
   <span class=pill id=status><span class="dot live"></span><span id=stext>…</span></span>
   <span class=reach>API <code class=mono id=ep>:8080/v1</code></span>
   <div class=loadwrap><button class=btn id=loadbtn>+ Load Model</button><div class=picker id=picker hidden></div></div>
@@ -517,5 +519,15 @@ document.getElementById('insttabs').addEventListener('click',function(e){
   var it=e.target.closest('[data-inst]');
   if(it){var k=it.dataset.inst;var up=((LAST&&LAST.instances)||[]).some(function(x){return x.key===k&&x.up});if(!up)return;CHATMODE='individual';j('/api/selectinstance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance:k})}).then(tick)}
 });
+// Header: versión ACTUAL (formateada como fecha/hora del build), versión DISPONIBLE
+// (última en GitHub) si hay una nueva, y el checkbox de auto-update (en vivo).
+function fmtVer(v){return (v&&/^\d{12}$/.test(v))?v.replace(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/,'$1-$2-$3 $4:$5'):(v||'dev')}
+async function loadVersion(){var r=await j('/api/version');if(!r)return;var el=document.getElementById('verinfo');if(!el)return;
+  var h='<span class=vercur title="versión en ejecución">v'+fmtVer(r.current)+'</span>';
+  if(r.pending)h+=' <span class=verpend title="hay una versión más nueva en GitHub">↑ '+fmtVer(r.available)+'</span>';
+  h+=' <label class=aucheck title="auto-actualizar cada 30 min"><input type=checkbox id=aucheck'+(r.autoupdate?' checked':'')+'> auto-update</label>';
+  el.innerHTML=h;
+  var cb=document.getElementById('aucheck');if(cb)cb.onchange=function(){j('/api/autoupdate?on='+cb.checked,{method:'POST'})}}
+loadVersion();setInterval(loadVersion,60000);
 tick();setInterval(tick,3000);
 </script></body></html>

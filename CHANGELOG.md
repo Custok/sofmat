@@ -2,6 +2,13 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202608222028 (2026-08-22)
+Mejoras:
+
+- Header con VERSION: muestra la version en ejecucion (formateada como fecha/hora del build), la version DISPONIBLE en GitHub si hay una mas nueva, y un checkbox de auto-update que se puede activar/desactivar en vivo.
+- Modelos partidos (split GGUF de varios ficheros, ...-00001-of-00002) aparecen como UNA sola fila (la parte cargable) con el tamano total, en vez de una fila por parte.
+
+
 ## v202608222012 (2026-08-22)
 Mejoras (todo pensado para que el user solo ejecute el binario):
 

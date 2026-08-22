@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +45,11 @@ func modelsDir() string {
 // separate no-timeout client (multi-GB GGUFs).
 var hfListClient = &http.Client{Timeout: 15 * time.Second}
 var hfDownloadClient = &http.Client{}
+
+// splitPartRe matches a split-GGUF part ("model-00001-of-00003.gguf"): group 1 =
+// base name, 2 = this part's index, 3 = total parts. Used to collapse a multi-file
+// model into one row (only the first part is loadable).
+var splitPartRe = regexp.MustCompile(`(?i)^(.*)-(\d+)-of-(\d+)\.gguf$`)
 
 // ---- browse ---------------------------------------------------------------
 
@@ -285,18 +292,38 @@ func (s *Server) hfProgress(w http.ResponseWriter, r *http.Request) {
 func (s *Server) localModels(w http.ResponseWriter, r *http.Request) {
 	dir := modelsDir()
 	ents, _ := os.ReadDir(dir)
+	// index sizes so a split model can show its TOTAL size on its first part.
+	sizeOf := map[string]int64{}
+	for _, e := range ents {
+		if info, err := e.Info(); err == nil {
+			sizeOf[e.Name()] = info.Size()
+		}
+	}
 	out := []map[string]any{}
 	for _, e := range ents {
-		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(name), ".gguf") {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
+		size := sizeOf[name]
+		// Split GGUF (…-00001-of-00002.gguf): show ONLY the first part (the loadable
+		// one — llama.cpp finds the rest by name), summing all parts' sizes; hide the
+		// other parts so a multi-file model appears as a single row.
+		if m := splitPartRe.FindStringSubmatch(name); m != nil {
+			if part, _ := strconv.Atoi(m[2]); part != 1 {
+				continue
+			}
+			total := int64(0)
+			for other, sz := range sizeOf {
+				if om := splitPartRe.FindStringSubmatch(other); om != nil && om[1] == m[1] && om[3] == m[3] {
+					total += sz
+				}
+			}
+			size = total
 		}
 		out = append(out, map[string]any{
-			"file": e.Name(), "size": info.Size(), "quant": quantOf(e.Name()),
-			"path": filepath.Join(dir, e.Name()),
+			"file": name, "size": size, "quant": quantOf(name),
+			"path": filepath.Join(dir, name),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": out, "dir": dir})

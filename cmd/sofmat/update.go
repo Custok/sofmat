@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Custok/sofmat/internal/coordinator"
 )
 
 // version is injected at build time (-ldflags "-X main.version=YYYYMMDDHHMM").
@@ -115,7 +117,9 @@ func periodicUpdate() {
 	t := time.NewTicker(updateCheckEvery)
 	defer t.Stop()
 	for range t.C {
-		checkAndUpdate()
+		if coordinator.AutoUpdateOn() { // the header checkbox can pause auto-update live
+			checkAndUpdate()
+		}
 	}
 }
 

@@ -51,6 +51,8 @@ func serve(args []string) {
 	noAuth := fs.Bool("no-auth", false, "leave mutating routes (load/eject) open — skips fail-closed key")
 	noUpdate := fs.Bool("no-update", false, "skip the GitHub auto-update check on startup")
 	_ = fs.Parse(args)
+	coordinator.Version = version         // so the panel header shows the running build + its date
+	coordinator.SetAutoUpdate(!*noUpdate) // the header checkbox reads/toggles this
 	if !*noUpdate {
 		checkAndUpdate()    // self-update from GitHub Releases at startup, then re-exec (best-effort)
 		go periodicUpdate() // y sigue comprobando en runtime (cada 30m) para coger releases sin reiniciar
