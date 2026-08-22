@@ -13,6 +13,10 @@ import (
 // -ldflags value so the panel can show which build is running and when it updated.
 var Version = "dev"
 
+// GitHubToken, when set from config.local.json, authenticates the updater's
+// GitHub API calls (5000 req/h instead of the anonymous 60/h per shared IP).
+var GitHubToken string
+
 // autoUpdate mirrors whether the runtime auto-updater is active; the panel's
 // checkbox reads and toggles it live (the periodic updater checks AutoUpdateOn()).
 var autoUpdate atomic.Bool
@@ -49,7 +53,11 @@ func refreshLatest() {
 	}
 	defer refreshing.Store(false)
 	c := &http.Client{Timeout: 6 * time.Second}
-	resp, err := c.Get("https://api.github.com/repos/Custok/sofmat/releases/latest")
+	req, _ := http.NewRequest(http.MethodGet, "https://api.github.com/repos/Custok/sofmat/releases/latest", nil)
+	if GitHubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+GitHubToken)
+	}
+	resp, err := c.Do(req)
 	if err != nil || resp == nil {
 		return
 	}

@@ -2,6 +2,15 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202608222341 (2026-08-22 23:41)
+Mejoras:
+
+- **Token de GitHub en config** (`github_token` en config.local.json): el auto-update va AUTENTICADO (5000 req/h) en vez del anonimo (60/h por IP compartida). Asi la flota no vuelve a perder el canal de update por rate-limit.
+- Boton **'actualizar todos'**: un clic dispara el update en TODOS los nodos (fan-out desde el coordinador), no solo el local.
+- **FIX de release**: los AppImage de Linux (x86_64/aarch64) ahora se REGENERAN en cada release. Antes se subian los de una tanda vieja, y los nodos Linux/AppImage se quedaban atascados en la version anterior aunque 'actualizaran'.
+- (de v2318) Indicadores NET rx/tx por nodo, tarjeta de estado al lanzar modelos, fix de carga en subcarpeta.
+
+
 ## v202608222334 (2026-08-22 23:34)
 Mejoras:
 

@@ -65,7 +65,11 @@ func checkAndUpdate() {
 		return
 	}
 	client := &http.Client{Timeout: 8 * time.Second}
-	resp, err := client.Get(releasesAPI)
+	req, _ := http.NewRequest(http.MethodGet, releasesAPI, nil)
+	if coordinator.GitHubToken != "" { // authenticated = 5000 req/h, dodges the anonymous 60/h cap
+		req.Header.Set("Authorization", "Bearer "+coordinator.GitHubToken)
+	}
+	resp, err := client.Do(req)
 	if err != nil || resp == nil {
 		return
 	}

@@ -57,6 +57,12 @@ type Config struct {
 	// BoundaryOverheadMS is the DECLARED per-boundary overhead fallback used
 	// when no measured value exists in the profiles file.
 	BoundaryOverheadMS float64 `json:"boundary_overhead_ms"`
+
+	// GitHubToken authenticates the auto-updater's GitHub API calls. The public
+	// API is 60 req/h per IP (a shared LAN egress exhausts it fast); with a token
+	// it's 5000 req/h, so the fleet never loses its update channel. Lives ONLY in
+	// config.local.json (gitignored) — never committed. Empty = anonymous.
+	GitHubToken string `json:"github_token"`
 }
 
 // Node is one host in the pool.

@@ -51,17 +51,20 @@ func serve(args []string) {
 	noAuth := fs.Bool("no-auth", false, "leave mutating routes (load/eject) open — skips fail-closed key")
 	noUpdate := fs.Bool("no-update", false, "skip the GitHub auto-update check on startup")
 	_ = fs.Parse(args)
-	coordinator.Version = version         // so the panel header shows the running build number
-	coordinator.SetAutoUpdate(!*noUpdate) // the header checkbox reads/toggles this
-	coordinator.UpdateNow = checkAndUpdate // the header "actualizar ahora" button triggers this
-	if !*noUpdate {
-		checkAndUpdate()    // self-update from GitHub Releases at startup, then re-exec (best-effort)
-		go periodicUpdate() // y sigue comprobando en runtime (cada 30m) para coger releases sin reiniciar
-	}
+	// Load config FIRST so the updater can read the GitHub token before its very
+	// first API call — otherwise the startup check would run anonymous.
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	coordinator.Version = version             // so the panel header shows the running build number
+	coordinator.GitHubToken = cfg.GitHubToken // authenticate the updater (5000 req/h vs anonymous 60/h)
+	coordinator.SetAutoUpdate(!*noUpdate)     // the header checkbox reads/toggles this
+	coordinator.UpdateNow = checkAndUpdate    // the header "actualizar todos" button triggers this
+	if !*noUpdate {
+		checkAndUpdate()    // self-update from GitHub Releases at startup, then re-exec (best-effort)
+		go periodicUpdate() // y sigue comprobando en runtime (cada 30m) para coger releases sin reiniciar
 	}
 	// Fail-closed: if no API key is configured, mint one at startup so load/eject
 	// are never open on the LAN. The key shows (and copies) in the panel.
