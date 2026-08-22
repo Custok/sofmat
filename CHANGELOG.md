@@ -2,6 +2,14 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202608222106 (2026-08-22)
+Mejoras:
+
+- Boton 'actualizar ahora' en el header cuando hay una version nueva: dispara el auto-update inmediato (swap + re-exec) en vez de esperar al check de 30 min.
+- El header muestra el NUMERO de version (v20260822...) en vez de la fecha formateada.
+- Al lanzar un modelo: si falla al cargar salen botones Cerrar y Relanzar; y el fallo se detecta RAPIDO (el daemon rastrea el proceso y sabe si murio) en vez de esperar el timeout de 180s.
+
+
 ## v202608222043 (2026-08-22)
 Mejoras:
 

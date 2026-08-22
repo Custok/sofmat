@@ -134,6 +134,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/status", s.panelStatus)
 	mux.HandleFunc("/api/version", s.panelVersion)
 	mux.HandleFunc("/api/autoupdate", s.panelSetAutoUpdate)
+	mux.HandleFunc("/api/update", s.panelUpdateNow)
 	mux.HandleFunc("/api/eject", s.guard(s.adminEject))
 	mux.HandleFunc("/api/load", s.guard(s.adminLoad))
 	mux.HandleFunc("/api/apply", s.guard(s.configApply))
@@ -155,6 +156,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/models/eject", s.guard(s.modelsEject))
 	mux.HandleFunc("/api/models/delete", s.guard(s.modelsDelete))
 	mux.HandleFunc("/api/models/probe", s.modelsProbe)
+	mux.HandleFunc("/api/models/alive", s.controlAlive)
 	// Control plane merged into the daemon (no separate node-agent): launch/stop
 	// llama-server on this host. LAN-trust like the old node-agent (allowlisted).
 	mux.HandleFunc("/control/load", s.controlLoad)

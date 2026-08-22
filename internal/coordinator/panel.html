@@ -488,21 +488,28 @@ async function mdlDoLoad(i,preview){
   if(r.launched){h+='<div class=lcok>✓ proceso lanzado — pid '+((r.agent_reply||{}).pid||'?')+'</div>';h+='<div class=faint2 id=lcload-'+i+'>⏳ esperando a que el modelo cargue…</div>';}
   else if(!preview&&!r.blocked)h+='<div class=lcwarn>no lanzado'+(r.error?': '+r.error:'')+'</div>';
   h+='</div>';out.innerHTML=h;
-  if(r.launched&&r.endpoint)mdlWaitLoad(i,r.endpoint);
+  if(r.launched&&r.endpoint)mdlWaitLoad(i,r.endpoint,(r.agent_reply||{}).pid);
 }
 // tras lanzar, sondea /health de la instancia hasta que el MODELO este cargado
 // (antes ponia "lanzado" en cuanto arrancaba el proceso, aunque el modelo fallara).
-async function mdlWaitLoad(i,endpoint){
+async function mdlWaitLoad(i,endpoint,pid){
   var t0=Date.now(),max=180000;
+  function fail(el,secs){el.className='lcwarn';
+    el.innerHTML='✕ el modelo no cargó ('+secs+'s) — arquitectura no soportada por llama-server o falta de VRAM. '
+      +'<button class="btn sm ghost" id=lcx-'+i+'>Cerrar</button> <button class="btn sm" id=lcr-'+i+'>Relanzar</button>';
+    var x=document.getElementById('lcx-'+i);if(x)x.onclick=function(){var o=document.getElementById('lcout-'+i);if(o)o.innerHTML=''};
+    var rl=document.getElementById('lcr-'+i);if(rl)rl.onclick=function(){mdlDoLoad(i,false)};}
   while(Date.now()-t0<max){
     await new Promise(function(res){setTimeout(res,2500)});
     var el=document.getElementById('lcload-'+i);if(!el)return; // re-render: abortar
     var secs=Math.round((Date.now()-t0)/1000);
     var p=await j('/api/models/probe?endpoint='+encodeURIComponent(endpoint));
     if(p&&p.up){el.className='lcok';el.innerHTML='✓ modelo CARGADO y sirviendo ('+secs+'s)';mdlPoll();return;}
+    // crash rápido: si el proceso ya murió (y no sirve), no esperamos el timeout de 180s.
+    if(pid&&secs>6){var a=await j('/api/models/alive?pid='+pid);if(a&&a.alive===false){fail(el,secs);return;}}
     el.innerHTML='⏳ cargando modelo… ('+secs+'s)';
   }
-  var e2=document.getElementById('lcload-'+i);if(e2){e2.className='lcwarn';e2.innerHTML='✕ el modelo no cargó en 180s — revisa el log del nodo (arquitectura no soportada por llama-server o falta de VRAM)';}
+  var e2=document.getElementById('lcload-'+i);if(e2)fail(e2,180);
 }
 document.getElementById('modelsbtn').onclick=function(){document.getElementById('modelsmodal').hidden=false;mdlSearch();mdlPoll()};
 document.getElementById('modelsclose').onclick=function(){document.getElementById('modelsmodal').hidden=true};
@@ -521,13 +528,13 @@ document.getElementById('insttabs').addEventListener('click',function(e){
 });
 // Header: versión ACTUAL (formateada como fecha/hora del build), versión DISPONIBLE
 // (última en GitHub) si hay una nueva, y el checkbox de auto-update (en vivo).
-function fmtVer(v){return (v&&/^\d{12}$/.test(v))?v.replace(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/,'$1-$2-$3 $4:$5'):(v||'dev')}
 async function loadVersion(){var r=await j('/api/version');if(!r)return;var el=document.getElementById('verinfo');if(!el)return;
-  var h='<span class=vercur title="versión en ejecución">v'+fmtVer(r.current)+'</span>';
-  if(r.pending)h+=' <span class=verpend title="hay una versión más nueva en GitHub">↑ '+fmtVer(r.available)+'</span>';
+  var h='<span class=vercur title="versión en ejecución">v'+(r.current||'dev')+'</span>';
+  if(r.pending)h+=' <span class=verpend title="versión disponible en GitHub">↑ v'+(r.available||'')+'</span> <button class="btn sm" id=updnow>actualizar ahora</button>';
   h+=' <label class=aucheck title="auto-actualizar cada 30 min"><input type=checkbox id=aucheck'+(r.autoupdate?' checked':'')+'> auto-update</label>';
   el.innerHTML=h;
-  var cb=document.getElementById('aucheck');if(cb)cb.onchange=function(){j('/api/autoupdate?on='+cb.checked,{method:'POST'})}}
+  var cb=document.getElementById('aucheck');if(cb)cb.onchange=function(){j('/api/autoupdate?on='+cb.checked,{method:'POST'})};
+  var un=document.getElementById('updnow');if(un)un.onclick=function(){un.textContent='actualizando…';un.disabled=true;j('/api/update',{method:'POST'})};}
 loadVersion();setInterval(loadVersion,60000);
 tick();setInterval(tick,3000);
 </script></body></html>

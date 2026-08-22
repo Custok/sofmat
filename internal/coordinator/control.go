@@ -9,7 +9,40 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
+
+// procReg tracks llama-server processes this daemon launched, so the panel can
+// tell a CRASH (the model failed to load and the process exited) from a slow load
+// — without waiting out the poll timeout.
+var procReg = struct {
+	mu   sync.Mutex
+	dead map[int]bool
+}{dead: map[int]bool{}}
+
+func markDead(pid int) { procReg.mu.Lock(); procReg.dead[pid] = true; procReg.mu.Unlock() }
+func isDead(pid int) bool {
+	procReg.mu.Lock()
+	defer procReg.mu.Unlock()
+	return procReg.dead[pid]
+}
+
+// controlAlive reports whether a llama-server this daemon launched is still alive
+// (false only once it has exited). Unknown pids answer alive=true, so a model on
+// another node just falls back to the poll timeout.
+func (s *Server) controlAlive(w http.ResponseWriter, r *http.Request) {
+	pid := 0
+	if p := r.URL.Query().Get("pid"); p != "" {
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				pid = -1
+				break
+			}
+			pid = pid*10 + int(c-'0')
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"alive": pid <= 0 || !isDead(pid)})
+}
 
 // isSelfHost reports whether host refers to THIS machine, so the coordinator can
 // launch models on its own node in-process (zero-config: no control agent, no
@@ -57,7 +90,11 @@ func launchLlama(exe string, args []string) map[string]any {
 	if err := cmd.Start(); err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
-	return map[string]any{"ok": true, "pid": cmd.Process.Pid}
+	pid := cmd.Process.Pid
+	// reap the child and record its exit, so /control/alive can flag a load crash
+	// fast instead of the panel waiting out the whole poll timeout.
+	go func() { _ = cmd.Wait(); markDead(pid) }()
+	return map[string]any{"ok": true, "pid": pid}
 }
 
 // controlLoad launches llama-server with the caller's args (POST /control/load),

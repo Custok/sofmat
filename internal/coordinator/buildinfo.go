@@ -84,3 +84,18 @@ func (s *Server) panelSetAutoUpdate(w http.ResponseWriter, r *http.Request) {
 	SetAutoUpdate(r.URL.Query().Get("on") == "true")
 	writeJSON(w, http.StatusOK, map[string]any{"autoupdate": AutoUpdateOn()})
 }
+
+// UpdateNow is main's checkAndUpdate, wired in so the panel's "actualizar ahora"
+// button can trigger an immediate self-update instead of waiting for the timer.
+var UpdateNow func()
+
+// panelUpdateNow fires an immediate update check (swap + re-exec if a newer release
+// exists) from the header button.
+func (s *Server) panelUpdateNow(w http.ResponseWriter, r *http.Request) {
+	if UpdateNow == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "update no disponible (dev / --no-update)"})
+		return
+	}
+	go UpdateNow() // may os.Exit after swapping the binary and re-exec'ing into the new one
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updating": true})
+}
