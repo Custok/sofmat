@@ -419,6 +419,8 @@ document.addEventListener('click',function(e){
 });
 // ---- descarga de modelos (unsloth) ----
 function fmtGB(b){b=Number(b)||0;return b?(b/1073741824).toFixed(b<10737418240?2:1)+' GB':'—'}
+function fmtMBs(b){b=Number(b)||0;return b<=0?'':(b>=1073741824?(b/1073741824).toFixed(2)+' GB/s':(b/1048576).toFixed(1)+' MB/s')}
+function fmtETA(s){s=Math.round(Number(s)||0);if(s<=0)return '—';var h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60;return h>0?(h+'h '+m+'m'):(m>0?(m+'m '+String(x).padStart(2,'0')+'s'):(x+'s'))}
 async function mdlSearch(){var q=document.getElementById('mdlq').value.trim();var el=document.getElementById('mdllist');el.innerHTML='<div class=modalsub>Buscando…</div>';document.getElementById('mdlfiles').innerHTML='';
   var r=await j('/api/hf/models?q='+encodeURIComponent(q));if(!r||!r.models){el.innerHTML='<div class=modalsub>Error al listar.</div>';return}
   if(!r.models.length){el.innerHTML='<div class=modalsub>Sin resultados.</div>';return}
@@ -433,7 +435,7 @@ async function mdlFiles(repo){var el=document.getElementById('mdlfiles');el.inne
 }
 async function mdlDownload(repo,file){await j('/api/hf/download',{method:'POST',headers:ah(),body:JSON.stringify({repo:repo,file:file})});mdlPoll()}
 async function mdlPoll(){var r=await j('/api/hf/progress');var el=document.getElementById('mdldl');
-  if(r&&r.downloads&&r.downloads.length){el.innerHTML=r.downloads.map(function(d){var pct=Number(d.pct)||0;var st=d.status==='done'?'✓ listo':d.status==='error'?('✕ '+(d.error||'error')):(pct.toFixed(1)+'% · '+fmtGB(d.done)+' / '+fmtGB(d.total));return '<div class=dlrow><div class=dlh><span class=mono>'+d.id+'</span><span class=mono>'+st+'</span></div><div class=bar><i class="'+(d.status==='error'?'warm':'')+'" style="width:'+(d.status==='done'?100:pct)+'%"></i></div></div>'}).join('');}
+  if(r&&r.downloads&&r.downloads.length){el.innerHTML=r.downloads.map(function(d){var pct=Number(d.pct)||0;var st=d.status==='done'?'✓ listo':d.status==='error'?('✕ '+(d.error||'error')):(pct.toFixed(1)+'% · '+fmtGB(d.done)+' / '+fmtGB(d.total)+(Number(d.speed)>0?(' · '+fmtMBs(d.speed)+' · ETA '+fmtETA(d.eta)):''));return '<div class=dlrow><div class=dlh><span class=mono>'+d.id+'</span><span class=mono>'+st+'</span></div><div class=bar><i class="'+(d.status==='error'?'warm':'')+'" style="width:'+(d.status==='done'?100:pct)+'%"></i></div></div>'}).join('');}
   else el.innerHTML='<div class=modalsub>Sin descargas.</div>';
   mdlLocal();
 }

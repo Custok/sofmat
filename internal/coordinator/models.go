@@ -40,7 +40,9 @@ var hfDownloadClient = &http.Client{}
 // the panel shows the catalog. author=unsloth is hard-wired — no other org.
 func (s *Server) hfModels(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	u := "https://huggingface.co/api/models?author=unsloth&limit=80&sort=downloads&direction=-1"
+	// filter=gguf: soflink solo carga/descarga GGUF, así el catálogo no muestra
+	// repos NVFP4/AWQ/MLX cuyo listado de cuantizaciones saldría vacío.
+	u := "https://huggingface.co/api/models?author=unsloth&filter=gguf&limit=80&sort=downloads&direction=-1"
 	if q != "" {
 		u += "&search=" + url.QueryEscape(q)
 	}
@@ -138,6 +140,7 @@ type dlJob struct {
 	Status  string    `json:"status"` // downloading | done | error
 	Error   string    `json:"error,omitempty"`
 	Started time.Time `json:"-"`
+	Rate    float64   `json:"-"` // velocidad instantánea (bytes/s), muestreada ~cada 1s en el loop
 }
 
 var dlReg = struct {
@@ -203,6 +206,7 @@ func (s *Server) runDownload(job *dlJob, name string) {
 		return
 	}
 	buf := make([]byte, 1<<20) // 1 MiB
+	lastAt, lastDone := time.Now(), int64(0)
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
@@ -213,6 +217,11 @@ func (s *Server) runDownload(job *dlJob, name string) {
 			}
 			dlReg.mu.Lock()
 			job.Done += int64(n)
+			// muestrea la velocidad instantánea cada ~1s (para ETA en el panel)
+			if dt := time.Since(lastAt); dt >= time.Second {
+				job.Rate = float64(job.Done-lastDone) / dt.Seconds()
+				lastAt, lastDone = time.Now(), job.Done
+			}
 			dlReg.mu.Unlock()
 		}
 		if rerr == io.EOF {
@@ -244,9 +253,17 @@ func (s *Server) hfProgress(w http.ResponseWriter, r *http.Request) {
 		if j.Total > 0 {
 			pct = round1(float64(j.Done) / float64(j.Total) * 100)
 		}
+		speed, eta := 0.0, 0.0
+		if j.Status == "downloading" {
+			speed = j.Rate
+			if j.Rate > 0 && j.Total > j.Done {
+				eta = round1(float64(j.Total-j.Done) / j.Rate)
+			}
+		}
 		out = append(out, map[string]any{
 			"id": name, "repo": j.Repo, "file": j.File,
 			"total": j.Total, "done": j.Done, "pct": pct, "status": j.Status, "error": j.Error,
+			"speed": speed, "eta": eta,
 		})
 	}
 	dlReg.mu.Unlock()
