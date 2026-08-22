@@ -54,7 +54,7 @@ Everything else follows from this: TP within a host × PP between hosts.
   drives the autoregressive loop, and re-shards onto a fallback plan when a
   worker disappears. Ships with `MockBackend` and an end-to-end test.
 - **`leak-guard/`** — the gate that keeps the repo publishable: a pre-commit +
-  CI scanner for secrets and private infrastructure, plus OWASP-A08
+  CI scanner for secrets and private infrastructure, plus
   anti-deserialisation checks.
 
 ## The KPI: transparent to the network

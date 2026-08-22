@@ -23,7 +23,7 @@ high bar. Before you open a PR:
 
 ## Non-negotiables
 
-### Security (OWASP)
+### Security
 - **Never deserialize anything off the wire with `pickle`, `yaml.load`, or `torch.load(weights_only=False)`.** Activations use the binary frame in `transport/framing.py`; everything received is validated before use. <!-- leak-guard-allow: this line documents the forbidden calls, it does not use them -->
 
 - **Validate everything received before it is used** (shapes, sizes, types).

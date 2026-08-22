@@ -105,7 +105,7 @@ config.example.json    copy to config.local.json (git-ignored) and describe your
 ## Design principles
 
 - **Config-driven, infra-agnostic.** You describe *your* cluster; nothing about any deployment is baked in. Real endpoints live only in `config.local.*` (git-ignored); the repo uses anonymous node labels.
-- **Security first (OWASP Top 10).** Authenticated transport, binary wire framing (**never `pickle`** — deserializing untrusted data over a socket is remote code execution), strict validation before anything touches the GPU. A leak-guard scanner + anti-deserialization gate runs pre-commit and in CI.
+- **Security first.** Authenticated transport, binary wire framing (**never `pickle`** — deserializing untrusted data over a socket is remote code execution), strict validation before anything touches the GPU. A leak-guard scanner + anti-deserialization gate runs pre-commit and in CI.
 - **Measure before you build.** Every speed claim above is a wall-clock measurement on real hardware, not an estimate.
 
 ## Status
