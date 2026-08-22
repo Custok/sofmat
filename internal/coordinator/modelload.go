@@ -272,7 +272,16 @@ func (s *Server) modelsLoad(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "file requerido"})
 		return
 	}
-	name := filepath.Base(req.File)
+	// req.File is a path RELATIVE to the models dir: either a legacy flat
+	// "model.gguf" or a per-model "folder/model.gguf". Preserve the subfolder
+	// (filepath.Base would drop it and break folder-based models), while
+	// rejecting traversal so a client can't reach outside the models dir.
+	rel := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(req.File)), "/")
+	if parts := strings.Split(rel, "/"); rel == "" || strings.Contains(rel, "..") || len(parts) > 2 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "nombre de modelo inválido: " + req.File})
+		return
+	}
+	name := filepath.FromSlash(rel)
 	// only a real downloaded model may be launched.
 	if _, err := os.Stat(filepath.Join(modelsDir(), name)); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "modelo no está descargado: " + name})
