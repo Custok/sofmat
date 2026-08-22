@@ -151,6 +151,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/models/local", s.localModels)
 	mux.HandleFunc("/api/models/load", s.guard(s.modelsLoad))
 	mux.HandleFunc("/api/models/eject", s.guard(s.modelsEject))
+	mux.HandleFunc("/api/models/delete", s.guard(s.modelsDelete))
 	mux.HandleFunc("/api/models/probe", s.modelsProbe)
 	mux.HandleFunc("/", s.panelPage)                // dashboard home (catch-all last)
 	return mux

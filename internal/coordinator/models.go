@@ -291,3 +291,34 @@ func (s *Server) localModels(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": out, "dir": dir})
 }
+
+// modelsDelete borra un .gguf del disco (models dir). Endurecido contra path
+// traversal: solo acepta un nombre simple (sin rutas ni "..") acabado en .gguf y
+// que exista dentro del models dir. Nunca borra fuera de ahí.
+func (s *Server) modelsDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		File string `json:"file"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.File) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "file requerido"})
+		return
+	}
+	name := strings.TrimSpace(req.File)
+	if name != filepath.Base(name) || !strings.HasSuffix(strings.ToLower(name), ".gguf") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "nombre inválido"})
+		return
+	}
+	path := filepath.Join(modelsDir(), name)
+	if _, err := os.Stat(path); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "el modelo no existe"})
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": err.Error(),
+			"hint":  "si el modelo está cargado, haz Eject antes de borrar (el fichero está en uso)",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": name})
+}

@@ -447,7 +447,7 @@ async function mdlLocal(){
   el.innerHTML=r.models.map(function(m,i){
     var checks=nodes.map(function(n){return '<label class=lc><input type=checkbox class="lc-node" data-i="'+i+'" value="'+n.node+'"'+(n.node==='node-a'?' checked':'')+'> '+dn(n.node)+'</label>'}).join('');
     var mains=nodes.map(function(n){return '<label class=lc><input type=radio name="lc-main-'+i+'" value="'+n.node+'"'+(n.node==='node-a'?' checked':'')+'> '+dn(n.node)+'</label>'}).join('');
-    return '<div class=qrow><span><b>'+m.quant+'</b> <span class=faint2>'+m.file+'</span></span><span style="display:flex;gap:10px;align-items:center"><span class=mono>'+fmtGB(m.size)+'</span><button class="btn sm" data-cfg="'+i+'">Cargar…</button></span></div>'
+    return '<div class=qrow><span><b>'+m.quant+'</b> <span class=faint2>'+m.file+'</span></span><span style="display:flex;gap:10px;align-items:center"><span class=mono>'+fmtGB(m.size)+'</span><button class="btn sm" data-cfg="'+i+'">Cargar…</button><button class="btn sm ghost" data-del="'+encodeURIComponent(m.file)+'" title="Borrar del disco">🗑</button></span></div>'
       +'<div class=lcfg id=lcfg-'+i+' hidden data-file="'+m.file+'">'
       +'<div class=lcrow><span class=lclbl>Nodos</span><span class=lcopts>'+checks+'</span></div>'
       +'<div class=lcrow><span class=lclbl>Main</span><span class=lcopts>'+mains+'</span></div>'
@@ -459,6 +459,12 @@ async function mdlLocal(){
   el.querySelectorAll('[data-cfg]').forEach(function(b){b.onclick=function(){var f=document.getElementById('lcfg-'+b.dataset.cfg);f.hidden=!f.hidden}});
   el.querySelectorAll('[data-preview]').forEach(function(b){b.onclick=function(){mdlDoLoad(b.dataset.preview,true)}});
   el.querySelectorAll('[data-launch]').forEach(function(b){b.onclick=function(){mdlDoLoad(b.dataset.launch,false)}});
+  el.querySelectorAll('[data-del]').forEach(function(b){b.onclick=function(){mdlDelete(decodeURIComponent(b.dataset.del))}});
+}
+async function mdlDelete(file){
+  if(!confirm('¿Borrar del disco «'+file+'»?\n\nSe elimina el fichero .gguf de forma permanente. Esta acción NO se puede deshacer.'))return;
+  var r=await j('/api/models/delete',{method:'POST',headers:ah(),body:JSON.stringify({file:file})});
+  if(r&&r.ok){mdlLocal()}else{alert('No se pudo borrar: '+((r&&r.error)||'error')+((r&&r.hint)?('\n\n'+r.hint):''))}
 }
 function mdlLoadReq(i){
   var file=document.getElementById('lcfg-'+i).dataset.file,nodes=[];
