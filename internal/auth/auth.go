@@ -1,4 +1,4 @@
-// Package auth — autenticación master<->worker compartida (OWASP A01). Port del
+// Package auth — autenticación master<->worker compartida. Port del
 // núcleo de `common/auth.py`: HMAC-SHA256(token, nonce) verificado en tiempo
 // constante. El token NUNCA cruza el cable; se lee del entorno
 // (SOFMAT_AUTH_TOKEN), jamás hardcodeado (A02). Piso que impide que un proceso

@@ -160,7 +160,7 @@ func StructuralRules() []Rule {
 			`\b[A-Za-z0-9_-]+\.(?:mynetgear\.com|dyndns\.\w+|no-ip\.\w+)\b`,
 			"dynamic-DNS hostname of our network"),
 		{Name: "unsafe-deser", Match: unsafeDeser,
-			Hint: "unsafe deserialization (OWASP A08) — use a binary framing / safe_load / weights_only=True; never on network input"},
+			Hint: "unsafe deserialization — use a binary framing / safe_load / weights_only=True; never on network input"},
 	}
 }
 

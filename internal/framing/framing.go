@@ -2,7 +2,7 @@
 // pipeline sofmat. Port 1:1 del prototipo `transport/framing.py` (los tests
 // Python son la spec de comportamiento).
 //
-// Seguridad (README, OWASP Top 10):
+// Seguridad (README):
 //   - A08: nada de deserialización dinámica en el camino caliente; cabecera
 //     fija y payload contiguo. Un frame no puede ejecutar nada al decodificar.
 //   - A04: cada campo se valida ANTES de exponer el payload — magic, versión,
