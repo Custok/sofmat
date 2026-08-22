@@ -84,7 +84,12 @@ func (s *Server) panelVersion(w http.ResponseWriter, r *http.Request) {
 	// only shows the "actualizar" button when at least one node is behind — so it
 	// disappears once the whole fleet is on the newest version.
 	behind := []string{}
-	if avail != "" {
+	// CRITICAL: the fan-out below polls every node's /api/version. Each poll carries
+	// ?local=1, and a request WITH ?local=1 returns local info only and NEVER fans
+	// out. Without this guard, every /api/version would trigger a poll of all nodes,
+	// each of which would poll all nodes again → an unbounded exponential storm that
+	// floods the LAN (this actually took the network down once).
+	if avail != "" && r.URL.Query().Get("local") != "1" {
 		type res struct{ id, ver string }
 		ch := make(chan res, len(s.cfg.Nodes))
 		var wg sync.WaitGroup
@@ -98,7 +103,7 @@ func (s *Server) panelVersion(w http.ResponseWriter, r *http.Request) {
 				defer wg.Done()
 				ver := ""
 				cl := &http.Client{Timeout: 1500 * time.Millisecond}
-				if resp, err := cl.Get(base + "/api/version"); err == nil {
+				if resp, err := cl.Get(base + "/api/version?local=1"); err == nil { // ?local=1 = no re-fan-out
 					var vv struct {
 						Current string `json:"current"`
 					}

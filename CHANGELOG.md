@@ -2,6 +2,14 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202608230043 (2026-08-23 00:43)
+FIX CRITICO de red:
+
+- Cortada la recursion de panelVersion: cada /api/version consultaba la version de TODOS los nodos, y cada nodo consultado hacia lo mismo -> explosion exponencial que saturaba la LAN (tumbo la red). Ahora el fan-out usa ?local=1 y una peticion con ?local=1 NO reenvia. Bucle roto.
+- Retiradas las releases v202608222358 y v202608230003 (contenian ese bug). NO las useis.
+- Incluye el display NET en Mb/s y el sensor Linux robusto de las versiones previas.
+
+
 ## v202608230003 (2026-08-23 00:03)
 Mejoras:
 
