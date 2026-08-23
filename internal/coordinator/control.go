@@ -8,19 +8,43 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 )
 
 // procReg tracks llama-server processes this daemon launched, so the panel can
 // tell a CRASH (the model failed to load and the process exited) from a slow load
-// — without waiting out the poll timeout.
+// — without waiting out the poll timeout. `live` additionally holds the PIDs this
+// daemon started and that are still running, so an eject can target ONLY our own
+// processes and never a prod llama-server the host runs independently (e.g. the
+// RAG's on node-b) — a generic pattern kill would take those down.
 var procReg = struct {
 	mu   sync.Mutex
 	dead map[int]bool
-}{dead: map[int]bool{}}
+	live map[int]bool
+}{dead: map[int]bool{}, live: map[int]bool{}}
 
-func markDead(pid int) { procReg.mu.Lock(); procReg.dead[pid] = true; procReg.mu.Unlock() }
+func recordLaunched(pid int) { procReg.mu.Lock(); procReg.live[pid] = true; procReg.mu.Unlock() }
+
+// livePIDs returns the PIDs of the llama-server processes THIS daemon launched
+// that have not yet been observed to exit.
+func livePIDs() []int {
+	procReg.mu.Lock()
+	defer procReg.mu.Unlock()
+	out := make([]int, 0, len(procReg.live))
+	for pid := range procReg.live {
+		out = append(out, pid)
+	}
+	return out
+}
+
+func markDead(pid int) {
+	procReg.mu.Lock()
+	procReg.dead[pid] = true
+	delete(procReg.live, pid)
+	procReg.mu.Unlock()
+}
 func isDead(pid int) bool {
 	procReg.mu.Lock()
 	defer procReg.mu.Unlock()
@@ -91,6 +115,7 @@ func launchLlama(exe string, args []string) map[string]any {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
 	pid := cmd.Process.Pid
+	recordLaunched(pid) // so an eject can target only our own llama-server, never a prod one
 	// reap the child and record its exit, so /control/alive can flag a load crash
 	// fast instead of the panel waiting out the whole poll timeout.
 	go func() { _ = cmd.Wait(); markDead(pid) }()
@@ -113,19 +138,35 @@ func (s *Server) controlLoad(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, res)
 }
 
-// controlEject kills every llama-server on this host (all loaded instances).
+// controlEject kills the llama-server instances THIS daemon launched on this host
+// — never every llama-server on the box. A generic pattern kill (taskkill /IM,
+// pkill -f) would also take down a prod llama-server the host runs on its own
+// (e.g. the RAG's decode on node-b), so we only stop our own tracked PIDs.
 func (s *Server) controlEject(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": ejectAllLlama()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ejectOwnLlama()})
 }
 
-func ejectAllLlama() bool {
-	var err error
-	if runtime.GOOS == "windows" {
-		err = exec.Command("taskkill", "/F", "/IM", "llama-server.exe").Run()
-	} else {
-		err = exec.Command("pkill", "-f", "llama-server").Run()
+// ejectOwnLlama stops only the llama-server processes this daemon started (the
+// tracked live PIDs). Returns true when nothing failed (an empty set = ok).
+func ejectOwnLlama() bool {
+	ok := true
+	for _, pid := range livePIDs() {
+		if err := killPID(pid); err != nil {
+			ok = false
+		} else {
+			markDead(pid)
+		}
 	}
-	return err == nil
+	return ok
+}
+
+// killPID force-kills a single process by PID (cross-platform), so eject targets
+// exactly the llama-server we launched and nothing else.
+func killPID(pid int) error {
+	if runtime.GOOS == "windows" {
+		return exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid)).Run()
+	}
+	return exec.Command("kill", "-9", strconv.Itoa(pid)).Run()
 }
 
 // controlKill stops just the llama-server LISTENING on a given port, so ejecting

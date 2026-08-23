@@ -212,6 +212,44 @@ func (s *Server) llamaExePath() string {
 	return name
 }
 
+// rpcExePath is the host ggml-rpc-server a worker node launches to join a UNIÓN
+// pipeline. From SOFMAT_RPC / config.local.json (rpc_exe); auto-discovered next to
+// the binary and in common bundle sub-dirs; else a bare PATH lookup, so no host
+// path ships. TODO(fleet-load): actually spawn this on each worker node's control
+// plane (:1357 /control/rpc) when launching a multi-node UNIÓN — today modelsLoad's
+// union branch only returns the plan (workers assumed already running).
+func (s *Server) rpcExePath() string {
+	if e := os.Getenv("SOFMAT_RPC"); e != "" {
+		return e
+	}
+	if s.cfg.RpcExe != "" {
+		return s.cfg.RpcExe
+	}
+	name := "ggml-rpc-server"
+	if runtime.GOOS == "windows" {
+		name = "ggml-rpc-server.exe"
+	}
+	cands := []string{}
+	if exe, err := os.Executable(); err == nil {
+		d := filepath.Dir(exe)
+		cands = append(cands,
+			filepath.Join(d, name),
+			filepath.Join(d, "inference", name),
+			filepath.Join(d, "llama", name),
+			filepath.Join(d, "bin", name),
+		)
+	}
+	for _, c := range cands {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	return name
+}
+
 // hostModelsDir is where the HOST sees the downloaded models (the host-side path
 // the launch -m flag needs, distinct from the container's write path). From
 // config.local.json / SOFMAT_MODELS_HOST; defaults to the models dir.
@@ -360,7 +398,12 @@ func (s *Server) modelsLoad(w http.ResponseWriter, r *http.Request) {
 		args = append(args, "--tensor-split", strings.Join(split, ","))
 		plan["workers"] = workers
 		plan["tensor_split"] = split
-		plan["note"] = "los nodos worker deben ejecutar ggml-rpc-server:" + strconv.Itoa(rpcPort) + " (pendiente en los node-agent)"
+		// TODO(fleet-load): launch ggml-rpc-server (s.rpcExePath()) on each worker
+		// node's control plane (:1357) before firing the main, instead of assuming
+		// the workers are already up. Left as a plan step to avoid a partial fleet
+		// launch that could disturb a running prod decode.
+		plan["rpc_exe"] = s.rpcExePath()
+		plan["note"] = "los nodos worker deben ejecutar ggml-rpc-server:" + strconv.Itoa(rpcPort) + " (pendiente fleet-load: rpc_exe en los nodos worker)"
 	}
 
 	exe := s.llamaExePath()
@@ -419,9 +462,25 @@ func (s *Server) modelsLoad(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, plan)
 }
 
-// modelsEject stops one loaded model: it kills the llama-server on that port (via
-// the node's control agent) and drops it from the registry — without touching the
-// other instances or the HUD's decode.
+// controlBaseForHost returns the soflink control-plane base URL for a host IP: the
+// configured node's agent when that agent exposes control, else the daemon's own
+// port on that IP (:1357). This lets an eject reach the node that actually HOSTS an
+// endpoint even when the model isn't in this coordinator's loaded registry (e.g. an
+// externally-launched prod decode).
+func (s *Server) controlBaseForHost(ip string) string {
+	for _, n := range s.cfg.Nodes {
+		if hostOf(n.Agent) == ip && hasControlAgent(n.Agent) {
+			return strings.TrimRight(n.Agent, "/")
+		}
+	}
+	return "http://" + ip + ":1357"
+}
+
+// modelsEject stops one loaded model: it kills the llama-server on that port on the
+// node that HOSTS the endpoint — resolved from the endpoint's IP, not from a fixed
+// control node and not only from this coordinator's loaded registry (an external
+// decode like the prod one isn't tracked in loadedReg). Drops it from the registry
+// without touching the other instances.
 func (s *Server) modelsEject(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Endpoint string `json:"endpoint"`
@@ -431,22 +490,19 @@ func (s *Server) modelsEject(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "endpoint requerido"})
 		return
 	}
+	ip := hostOf(req.Endpoint)
 	port := ""
-	if i := strings.LastIndex(req.Endpoint, ":"); i >= 0 {
-		port = req.Endpoint[i+1:]
-	}
-	node := ""
-	for _, m := range loadedModels() {
-		if m.Endpoint == req.Endpoint {
-			node = m.Node
+	if hp := hostPort(req.Endpoint); hp != "" {
+		if i := strings.LastIndex(hp, ":"); i >= 0 {
+			port = hp[i+1:]
 		}
 	}
 	if port != "" {
-		agent := s.agentBase(node)
-		if s.isSelfHost(hostOf(agent)) || node == "" {
+		if s.isSelfHost(ip) {
 			killLlamaByPort(port) // in-process on this host (no node-agent needed)
-		} else if agent != "" {
-			if resp, err := s.client.Post(agent+"/control/kill?port="+port, "application/json", nil); err == nil {
+		} else {
+			base := s.controlBaseForHost(ip)
+			if resp, err := s.client.Post(base+"/control/kill?port="+port, "application/json", nil); err == nil {
 				_ = resp.Body.Close()
 			}
 		}

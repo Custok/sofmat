@@ -372,7 +372,7 @@ document.getElementById('nodesbtn').onclick=async function(){
       +'<div class=ncfgm>'+(c.size_gb?'<b>'+c.size_gb+' GB</b> · ':'')+(c.quant||'')+' · ctx '+(c.ctx||'')+' · main <b>'+d2(c.main)+'</b>'+(c.remote?' · remoto':'')+'</div>'
       +'<div class=topo>'+topo+'</div>'+(c.note?'<div class=ncfgn>'+c.note+'</div>':'')
       +'<div class=ncfgb><button class="btn sm" data-use="'+c.key+'">Usar esta config</button>'
-      +(c.launchable?'<button class="btn sm ghost" data-load="'+c.key+'">Cargar (main local)</button>':'')+'</div></div>';
+      +(c.launchable?'<button class="btn sm ghost" data-load="'+c.key+'">Cargar (main '+d2(c.main)+')</button>':'')+'</div></div>';
   });
   document.getElementById('nodeslist').innerHTML=h;
   document.querySelectorAll('#nodeslist [data-use]').forEach(function(b){b.onclick=async function(){await j('/api/setconfig',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config:b.dataset.use})});document.getElementById('nodesmodal').hidden=true;tick()}});

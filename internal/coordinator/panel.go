@@ -496,10 +496,15 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 		for _, st := range p.Topology {
 			topo = append(topo, map[string]any{"node": st.Node, "layers": st.Layers, "gpus": st.GPUs})
 		}
+		// launchable: any preset whose MAIN node exposes a control plane can be
+		// (re)launched from here — the eject/load now routes to the main node's
+		// :1357, not only to node-a.
+		mainAgent := s.agentBase(p.Main)
+		launchable := s.isSelfHost(hostOf(mainAgent)) || hasControlAgent(mainAgent)
 		configs = append(configs, map[string]any{
 			"key": p.Key, "label": p.Label, "main": p.Main, "remote": p.Remote,
 			"note": p.Note, "quant": p.Quant, "ctx": p.Ctx, "size_gb": p.SizeGB,
-			"topology": topo, "launchable": p.Main == "node-a", "active": p.Key == activeKey(preset),
+			"topology": topo, "launchable": launchable, "active": p.Key == activeKey(preset),
 		})
 	}
 

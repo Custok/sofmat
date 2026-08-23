@@ -38,6 +38,12 @@ type Config struct {
 	LlamaExe      string `json:"llama_exe"`
 	ModelsHostDir string `json:"models_host_dir"`
 
+	// RpcExe is the host's ggml-rpc-server binary a worker node launches to join a
+	// multi-node UNIÓN pipeline (weights split by --tensor-split, RPC to the main).
+	// Real machine path lives only in config.local.json (gitignored). Empty =
+	// "ggml-rpc-server" on PATH. Used by the fleet-load phase (see rpcExePath).
+	RpcExe string `json:"rpc_exe"`
+
 	// GPUIndexReversed: the engine (e.g. a Vulkan build) enumerates GPUs in the
 	// REVERSE of nvidia-smi order, so --main-gpu / --tensor-split must be remapped.
 	// Set per node in config.local.json when confirmed (see the launch log's

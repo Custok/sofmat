@@ -2,6 +2,14 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202608231328 (2026-08-23)
+Gestion del llama-server en el HOST de cada nodo (eject/load en toda la flota):
+
+- Eject/load enrutados al nodo del instance, no siempre al nodo de control fijo. El eject de un modelo cargado ahora se dirige al nodo que HOSPEDA el endpoint (resuelto por la IP del propio endpoint -> plano de control :1357), y ya no depende solo del registro local del coordinador (un decode lanzado por fuera tambien se puede expulsar). Cargar un preset se enruta al plano de control del nodo MAIN del preset, para poder (re)lanzarlo desde otro nodo.
+- Eject seguro por PID propio: el eject deja de usar un patron generico (taskkill /IM llama-server.exe, pkill -f llama-server) que tumbaria un llama-server de produccion ajeno en el mismo host; ahora detiene SOLO los PID que lanzo este soflink (se registran al arrancar cada proceso).
+- rpc_exe en el config: nueva ruta del ggml-rpc-server del host para la fase de fleet-load de las uniones multi-nodo (accesor + auto-descubrimiento junto al binario). El lanzamiento del worker RPC queda como TODO documentado: la union no se dispara a medias.
+- Panel: el boton Cargar aparece para cualquier preset cuyo nodo main exponga plano de control, no solo el local; su etiqueta indica el nodo main destino.
+
 ## v202608230234 (2026-08-23)
 Arreglo de red domestica (cortes incluso por cable):
 
