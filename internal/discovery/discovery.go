@@ -100,7 +100,9 @@ func Sweep(ctx context.Context, subnets []*net.IPNet, port int, timeout time.Dur
 		targets = append(targets, HostsIn(s)...)
 	}
 	client := &http.Client{Timeout: timeout}
-	sem := make(chan struct{}, 256)
+	// Cap concurrency low so the sweep ramps up gradually instead of opening all
+	// 253 connections at once — a gentle trickle the home router can absorb.
+	sem := make(chan struct{}, 16)
 	var (
 		mu    sync.Mutex
 		peers []Peer

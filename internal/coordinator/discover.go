@@ -30,7 +30,12 @@ func (s *Server) startDiscovery() {
 				s.peerMu.Unlock()
 			}
 			s.reconcileRenames() // heal labels from peers (missing keys only)
-			time.Sleep(20 * time.Second)
+			// The first loop iteration above is the startup sweep (auto-join for
+			// new nodes like the DGX). After that, sweep only every 5 minutes:
+			// every node is already in the explicit config, so the periodic sweep
+			// only exists to catch rare NEW nodes. At 20s a /24 sweep floods the
+			// home router's conntrack table (~253 SYNs/node) and drops the LAN.
+			time.Sleep(300 * time.Second)
 		}
 	}()
 }

@@ -2,6 +2,12 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202608230234 (2026-08-23)
+Arreglo de red domestica (cortes incluso por cable):
+
+- Barrido de descubrimiento LAN: el intervalo del barrido PERIODICO sube de 20s a 300s (5 min). Se mantiene UN barrido al arranque, asi que el auto-descubrimiento de nodos nuevos (la DGX, etc.) sigue funcionando; el barrido periodico solo hace falta para nodos nuevos, que es raro (toda la flota ya esta en el config explicito). A 20s, un barrido /24 en :1357 lanzaba ~253 SYN por nodo cada 20s y saturaba la tabla de conexiones (conntrack) del router domestico Orbi -> caidas de red.
+- Concurrencia del barrido limitada de 256 a 16 conexiones simultaneas: el pico de sondeos sube de forma gradual en vez de abrir las 253 de golpe, un goteo que el router absorbe.
+
 ## v202608230158 (2026-08-23)
 Reduccion drastica del churn de conexiones (arreglo de red domestica):
 
