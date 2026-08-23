@@ -2,13 +2,21 @@ package coordinator
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Custok/sofmat/internal/gateway"
 )
+
+// versionProbeClient shares the pooled keep-alive transport so the per-node
+// /api/version?local=1 fan-out REUSES connections instead of opening a fresh
+// client + socket per node on every call.
+var versionProbeClient = &http.Client{Timeout: 1500 * time.Millisecond, Transport: gateway.PooledTransport()}
 
 // Version is this binary's build stamp (YYYYMMDDHHMM), set by main from the
 // -ldflags value so the panel can show which build is running and when it updated.
@@ -102,12 +110,12 @@ func (s *Server) panelVersion(w http.ResponseWriter, r *http.Request) {
 			go func(id, base string) {
 				defer wg.Done()
 				ver := ""
-				cl := &http.Client{Timeout: 1500 * time.Millisecond}
-				if resp, err := cl.Get(base + "/api/version?local=1"); err == nil { // ?local=1 = no re-fan-out
+				if resp, err := versionProbeClient.Get(base + "/api/version?local=1"); err == nil { // ?local=1 = no re-fan-out
 					var vv struct {
 						Current string `json:"current"`
 					}
 					_ = json.NewDecoder(resp.Body).Decode(&vv)
+					_, _ = io.Copy(io.Discard, resp.Body) // drain so the keep-alive conn is reused
 					resp.Body.Close()
 					ver = vv.Current
 				}

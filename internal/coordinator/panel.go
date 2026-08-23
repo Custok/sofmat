@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"path"
@@ -109,7 +110,7 @@ func (s *Server) panelPage(w http.ResponseWriter, r *http.Request) {
 // backend is unreachable from this node (e.g. a remote node probing another
 // host's prefill port through a closed firewall) — otherwise /api/status hangs
 // on the 600s serving client and the whole dashboard shows blank.
-var probeClient = &http.Client{Timeout: 1000 * time.Millisecond}
+var probeClient = &http.Client{Timeout: 1000 * time.Millisecond, Transport: gateway.PooledTransport()}
 
 // getJSON GETs and decodes a path from a base URL (served-model info).
 func (s *Server) getJSONFrom(base, pth string) map[string]any {
@@ -120,7 +121,9 @@ func (s *Server) getJSONFrom(base, pth string) map[string]any {
 	if err != nil || resp == nil {
 		return nil
 	}
-	defer resp.Body.Close()
+	// Drain to EOF before Close so the pooled keep-alive connection is reused on
+	// the next status tick instead of being torn down (per-tick TIME_WAIT churn).
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}

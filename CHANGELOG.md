@@ -1,6 +1,15 @@
-﻿# Changelog
+# Changelog
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
+
+## v202608230158 (2026-08-23)
+Reduccion drastica del churn de conexiones (arreglo de red domestica):
+
+- Telemetria con HTTP keep-alive: los sondeos periodicos del panel (/gpu de cada nodo, /props, /v1/models y el fan-out de /api/version?local=1) ahora comparten un unico http.Transport con pool de conexiones (MaxIdleConnsPerHost=8, IdleConnTimeout=90s) en vez de abrir un socket nuevo por tick.
+- Bodies drenados hasta EOF antes de Close, para que la conexion keep-alive vuelva de verdad al pool y se reutilice (sin drenar, se cerraba y generaba un TIME_WAIT por sondeo).
+- Panel: intervalo de refresco de estado subido de 3s a 5s.
+
+Resultado: el numero de conexiones TCP cortas y de TIME_WAIT generadas por la telemetria baja a ~0 por sondeo, aliviando la tabla de conexiones del router.
 
 ## v202608230043 (2026-08-23 00:43)
 FIX CRITICO de red:

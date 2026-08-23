@@ -10,10 +10,26 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
 )
+
+// pooledTransport is the shared keep-alive transport every soflink prober draws
+// from, so the periodic status poll (/gpu, /props, /v1/models, version fan-out)
+// REUSES a handful of idle sockets instead of opening a fresh TCP connection on
+// every tick — a domestic router's small connection table cannot absorb that
+// churn (and the resulting TIME_WAIT flood) across a fleet.
+var pooledTransport = &http.Transport{
+	MaxIdleConns:        100,
+	MaxIdleConnsPerHost: 8,
+	IdleConnTimeout:     90 * time.Second,
+}
+
+// PooledTransport exposes the shared keep-alive transport so probers in other
+// packages (the coordinator) share ONE connection pool.
+func PooledTransport() *http.Transport { return pooledTransport }
 
 // NodeFetcher takes (name, url) and returns the node agent's JSON document.
 type NodeFetcher func(name, url string) (map[string]any, error)
@@ -26,7 +42,7 @@ type NodeRef struct {
 
 // HTTPNodeFetcher is the real fetcher: GET the agent endpoint, parse JSON.
 func HTTPNodeFetcher(timeout time.Duration) NodeFetcher {
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{Timeout: timeout, Transport: pooledTransport}
 	return func(name, url string) (map[string]any, error) {
 		req, err := http.NewRequest(http.MethodGet, url, nil)
 		if err != nil {
@@ -37,7 +53,10 @@ func HTTPNodeFetcher(timeout time.Duration) NodeFetcher {
 		if err != nil {
 			return nil, err
 		}
-		defer resp.Body.Close()
+		// Drain to EOF before Close so the keep-alive connection is RETURNED to the
+		// pool and reused on the next poll. An un-drained body is closed (not reused),
+		// which is what floods the router with per-tick TCP churn + TIME_WAIT.
+		defer func() { _, _ = io.Copy(io.Discard, resp.Body); resp.Body.Close() }()
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("agent %s: HTTP %d", name, resp.StatusCode)
 		}

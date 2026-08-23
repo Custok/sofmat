@@ -264,7 +264,7 @@ async function tick(){
   it.innerHTML=(s.instances||[]).map(function(i){
     var dc=i.up?(i.selected?'var(--good)':'var(--muted)'):'var(--crit)';
     return '<div class="itab'+(i.selected?' on':'')+(i.up?'':' off')+'" data-inst="'+i.key+'">'
-      +'<div class=in><span class=idot style="background:'+dc+'"></span>'+(i.model||i.name)+(i.key.indexOf('loaded:')===0?' <a class=iej data-eject="'+(i.endpoint||'')+'" title="Eject este modelo">⏏</a>':'')+'</div>'
+      +'<div class=in><span class=idot style="background:'+dc+'"></span>'+(i.model||i.name)+(i.endpoint?' <a class=iej data-eject="'+i.endpoint+'" title="Eject / parar este modelo">⏏</a>':'')+'</div>'
       +'<div class=ir>'+(i.func||i.role)+'</div>'
       +'<div class=imeta><span class=ipill><svg width=12 height=12 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.4><rect x=2 y=2.5 width=12 height=4 rx=1/><rect x=2 y=9.5 width=12 height=4 rx=1/><circle cx=4.6 cy=4.5 r=.75 fill=currentColor stroke=none/><circle cx=4.6 cy=11.5 r=.75 fill=currentColor stroke=none/></svg>'+(i.hosts||0)+' host'+((i.hosts==1)?'':'s')+'</span>'
       +'<span class=ipill><svg width=13 height=13 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.4><rect x=1.5 y=4 width=11 height=8 rx=1.5/><circle cx=6 cy=8 r=1.8/><path d="M12.5 6.5h2M12.5 9.5h2"/></svg>'+(i.gpus||0)+' GPU</span></div>'
@@ -560,5 +560,5 @@ async function loadVersion(){var r=await j('/api/version');if(!r)return;var el=d
     if(rr&&rr.nodes&&m){m.textContent=' → '+Object.keys(rr.nodes).map(function(k){return dn(k)+': '+rr.nodes[k]}).join(' · ');}
     setTimeout(function(){if(uf){uf.textContent='actualizar';uf.disabled=false}loadVersion()},5000);};}
 loadVersion();setInterval(loadVersion,60000);
-tick();setInterval(tick,3000);
+tick();setInterval(tick,5000);
 </script></body></html>
