@@ -139,6 +139,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/eject", s.guard(s.adminEject))
 	mux.HandleFunc("/api/load", s.guard(s.adminLoad))
 	mux.HandleFunc("/api/apply", s.guard(s.configApply))
+	mux.HandleFunc("/api/apply-union", s.guard(s.configApplyUnion)) // one click raises the whole decode+prefill group (idempotent)
 	mux.HandleFunc("/api/genkey", s.panelGenKey)
 	mux.HandleFunc("/api/chat", s.panelChat)
 	mux.HandleFunc("/api/chat/stream", s.panelChatStream)

@@ -96,7 +96,10 @@ func (s *Server) isSelfHost(host string) bool {
 // the endpoint can't be turned into an arbitrary command runner.
 func isLlamaServer(exe string) bool {
 	b := strings.ToLower(filepath.Base(exe))
-	return b == "llama-server" || b == "llama-server.exe"
+	// llama-server.sh is a bundle wrapper (exports LD_LIBRARY_PATH then exec's the
+	// real llama-server) used by the Linux nodes; still a fixed name, so it can't be
+	// turned into an arbitrary command runner.
+	return b == "llama-server" || b == "llama-server.exe" || b == "llama-server.sh"
 }
 
 // launchLlama starts llama-server (allowlisted) with the exe's own dir as CWD so

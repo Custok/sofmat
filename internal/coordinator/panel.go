@@ -29,6 +29,25 @@ var measureMsgs = []map[string]any{{
 	"content": "Escribe en Python quicksort con docstring, type hints y 3 asserts. Solo el codigo completo.",
 }}
 
+// measurePrefillMsgs is a longer, fixed prompt used ONLY to measure prefill
+// throughput (prompt-processing / pp). A prefill is characterised by how fast it
+// ingests the prompt, so it must actually process many tokens: the short
+// measureMsgs above, once its prefix is cached, re-evaluates only a handful of
+// tokens (prompt_n≈4) and yields a meaningless pp. Paired with cache_prompt=false
+// in prefillPP, this forces the whole prompt through the engine every time so
+// timings.prompt_per_second reflects the real prefill rate (hundreds of tok/s).
+var measurePrefillMsgs = []map[string]any{{
+	"role": "user",
+	"content": "Analiza el siguiente escenario de arquitectura de software y responde de forma exhaustiva. " +
+		"Tenemos un sistema distribuido de inferencia con varios nodos GPU conectados por una red de baja " +
+		"latencia, un coordinador que enruta las peticiones, una fase de prefill que procesa el prompt completo " +
+		"y una fase de decode que genera la respuesta token a token. Describe las implicaciones de rendimiento " +
+		"de separar prefill y decode en nodos distintos, el papel del ancho de banda entre nodos, el coste de " +
+		"transferir la cache KV entre etapas, y como el tamano del contexto afecta a la latencia de la primera " +
+		"respuesta y al throughput agregado del cluster bajo carga concurrente. Considera tambien el impacto de " +
+		"la cuantizacion de los pesos y de la cache en la calidad y en la velocidad de cada fase del pipeline.",
+}}
+
 // panelState holds the small mutable UI state the dashboard needs across polls:
 // node renames, the selected instance, the operator-picked active config, and
 // the last measured throughput per instance / for the disaggregated cluster.
@@ -144,6 +163,55 @@ func (s *Server) instanceEndpoint(key string) string {
 	default:
 		return s.bc.DecodeEntryURL
 	}
+}
+
+// instanceModel is the display model name for an instance card: the config's
+// per-instance model_name when set (so the prefill card shows ITS model, not the
+// decode's served-model), else the live served-model fallback.
+func (s *Server) instanceModel(key, fallback string) string {
+	if inst, ok := s.cfg.Instance(key); ok && inst.ModelName != "" {
+		return inst.ModelName
+	}
+	return fallback
+}
+
+// isPrefillInstance reports whether an instance key is a prefill role. For a
+// prefill the meaningful throughput is prompt-processing (pp / prompt_per_second),
+// NOT token generation (predicted_per_second) — the two are measured differently.
+func (s *Server) isPrefillInstance(key string) bool {
+	if key == "prefill" {
+		return true
+	}
+	if inst, ok := s.cfg.Instance(key); ok {
+		return inst.Role == "prefill"
+	}
+	return false
+}
+
+// prefillPP measures a prefill backend's prompt-processing rate (pp): it sends a
+// long fixed prompt with cache_prompt disabled — so the whole prompt is actually
+// re-evaluated instead of served from the prefix cache — asks for a single token,
+// and reads timings.prompt_per_second. This is the number that characterises a
+// prefill; predicted (decode) tok/s from a prefill endpoint is misleading.
+func (s *Server) prefillPP(base string) (pp float64, err error) {
+	body, _ := json.Marshal(map[string]any{
+		"messages": measurePrefillMsgs, "max_tokens": 1, "temperature": 0.4,
+		"cache_prompt":         false,
+		"chat_template_kwargs": map[string]any{"enable_thinking": false},
+	})
+	resp, err := s.client.Post(base+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var d map[string]any
+	if err = json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		return 0, err
+	}
+	if tim, ok := d["timings"].(map[string]any); ok {
+		pp = round1(pnum(tim["prompt_per_second"]))
+	}
+	return pp, nil
 }
 
 // ---- served-model + node assembly ----------------------------------------
@@ -303,10 +371,37 @@ func (s *Server) pipelineFrom(p *config.Preset) map[string]any {
 	return pl
 }
 
+// pipelineFromInstance builds the panel pipeline from an INSTANCE's own topology
+// (per-node inclusive layer RANGES → counts), so each role's card shows its real
+// split instead of inheriting the active decode pipeline (a prefill serving a
+// different model must show ITS nodes, not the decode's).
+func (s *Server) pipelineFromInstance(inst config.Instance) map[string]any {
+	if len(inst.Topology) == 0 {
+		return nil
+	}
+	stages := make([]map[string]any, 0, len(inst.Topology))
+	total := 0
+	for _, st := range inst.Topology {
+		n := st.Layers[1] - st.Layers[0] + 1 // inclusive range → layer count
+		if n < 0 {
+			n = 0
+		}
+		stages = append(stages, map[string]any{"node": st.Node, "layers": n, "gpus": st.GPUs})
+		total += n
+	}
+	pl := map[string]any{"stages": stages, "total_layers": total}
+	if hop := s.hopMSTo(inst.Endpoint); hop > 0 {
+		pl["hop_ms"] = hop
+	}
+	return pl
+}
+
 // hopMS is a quick median TCP RTT (ms) to the served endpoint's host — the
 // per-hop latency that bounds single-stream decode.
-func (s *Server) hopMS(p *config.Preset) float64 {
-	hostport := strings.TrimPrefix(strings.TrimPrefix(p.Endpoint, "http://"), "https://")
+func (s *Server) hopMS(p *config.Preset) float64 { return s.hopMSTo(p.Endpoint) }
+
+func (s *Server) hopMSTo(endpoint string) float64 {
+	hostport := strings.TrimPrefix(strings.TrimPrefix(endpoint, "http://"), "https://")
 	if i := strings.IndexByte(hostport, '/'); i >= 0 {
 		hostport = hostport[:i]
 	}
@@ -364,18 +459,30 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 	preset := s.activePreset(model, cn)
 	pipe := s.pipelineFrom(preset)
 
-	// The SERVED MODEL card reflects the SELECTED instance: a selected loaded model
-	// overrides the displayed model/quant/ctx/size + a single-node pipeline —
-	// WITHOUT touching the decode instance's own labels (which keep `model`/`pipe`).
-	hLoaded, hModel, hQuant, hCtx, hSize, hPath, hPipe := loaded, model, quant, nctx, sizeGB, modelPath, pipe
-	if strings.HasPrefix(selected, "loaded:") {
-		ep := strings.TrimPrefix(selected, "loaded:")
-		var sl int
-		hLoaded, hModel, hQuant, hCtx, sl, hSize, hPath = s.servedModelFrom(ep)
-		_ = sl
-		for _, lm := range loadedModels() {
-			if lm.Endpoint == ep {
-				hPipe = map[string]any{"stages": []map[string]any{{"node": lm.Node, "layers": lm.Layers, "gpus": 1}}, "total_layers": lm.Layers}
+	// The SERVED MODEL card reflects the SELECTED instance: when a NON-decode
+	// instance is selected (the Q4 prefill, or a panel-loaded model) the card reads
+	// ITS endpoint for model/quant/ctx/slots/size and shows ITS pipeline — WITHOUT
+	// touching the decode instance's own labels (decode keeps model/slots/pipe).
+	hLoaded, hModel, hQuant, hCtx, hSlots, hSize, hPath, hPipe := loaded, model, quant, nctx, slots, sizeGB, modelPath, pipe
+	if selBase := s.selectedBase(selected); selBase != "" && selBase != s.bc.DecodeEntryURL {
+		l2, m2, q2, c2, sl2, sz2, p2 := s.servedModelFrom(selBase)
+		hLoaded, hModel, hQuant, hCtx, hSize, hPath = l2, m2, q2, c2, sz2, p2
+		if sl2 > 0 {
+			hSlots = sl2
+		}
+		if strings.HasPrefix(selected, "loaded:") {
+			for _, lm := range loadedModels() {
+				if lm.Endpoint == selBase {
+					hPipe = map[string]any{"stages": []map[string]any{{"node": lm.Node, "layers": lm.Layers, "gpus": 1}}, "total_layers": lm.Layers}
+				}
+			}
+		} else if inst, ok := s.cfg.Instance(selected); ok {
+			// a config role (e.g. prefill): prefer its configured display name — a
+			// Windows gguf path can't be basename'd by servedModelFrom — and show its
+			// OWN topology instead of the active decode pipeline.
+			hModel = s.instanceModel(selected, m2)
+			if p := s.pipelineFromInstance(inst); p != nil {
+				hPipe = p
 			}
 		}
 	}
@@ -468,12 +575,23 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		return connInfo{endpoint: ep, modelPath: modelPath, apiKey: apiKey, apiKeyEnabled: apiKey != "", coordinator: coordShown}
 	}
+	// Each role's card shows ITS OWN pipeline (built from its instance topology),
+	// not the active decode pipeline — so the prefill card shows node-a + node-c,
+	// not the decode's node-d + node-c.
+	instPipe := func(key string) map[string]any {
+		if inst, ok := s.cfg.Instance(key); ok {
+			if p := s.pipelineFromInstance(inst); p != nil {
+				return p
+			}
+		}
+		return pipe
+	}
 	instances := []map[string]any{}
 	if loaded {
-		instances = append(instances, s.instance("decode", "decode · genera la respuesta", model, selected, pipe, tokps, instConn("decode", s.bc.DecodeEntryURL)))
+		instances = append(instances, s.instance("decode", "decode · genera la respuesta", s.instanceModel("decode", model), selected, instPipe("decode"), tokps, instConn("decode", s.bc.DecodeEntryURL)))
 	}
 	if prefillUp {
-		instances = append(instances, s.instance("prefill", "prefill · procesa el prompt", model, selected, pipe, tokps, instConn("prefill", s.bc.PrefillURL)))
+		instances = append(instances, s.instance("prefill", "prefill · procesa el prompt", s.instanceModel("prefill", model), selected, instPipe("prefill"), tokps, instConn("prefill", s.bc.PrefillURL)))
 	}
 	// Models launched via the panel show as their OWN instances (served on their
 	// own endpoint), separate from the config roles — so "load a downloaded model"
@@ -505,6 +623,7 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 			"key": p.Key, "label": p.Label, "main": p.Main, "remote": p.Remote,
 			"note": p.Note, "quant": p.Quant, "ctx": p.Ctx, "size_gb": p.SizeGB,
 			"topology": topo, "launchable": launchable, "active": p.Key == activeKey(preset),
+			"group": p.Group,
 		})
 	}
 
@@ -524,7 +643,7 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"loaded": hLoaded, "loading": false, "model": hModel, "quant": hQuant,
-		"size_gb": hSize, "n_ctx": hCtx, "slots": slots, "context_gb": ctxGB,
+		"size_gb": hSize, "n_ctx": hCtx, "slots": hSlots, "context_gb": ctxGB,
 		"endpoint": endpointLabel, "model_path": hPath, "nodes": nodes,
 		"instances": instances, "pipeline": hPipe, "configs": configs, "names": renames,
 		"tokps": nz(tokps[selected]), "cluster_tokps": clusterOut,
@@ -553,9 +672,15 @@ func (s *Server) instance(key, funcLabel, model, selected string, pipe map[strin
 		}
 		hosts = len(seen)
 	}
+	// metric names what the tok/s figure measures: prompt-processing (pp) for a
+	// prefill, token generation for everything else — so the card can label it.
+	metric := "decode"
+	if s.isPrefillInstance(key) {
+		metric = "pp"
+	}
 	return map[string]any{
 		"key": key, "up": true, "selected": key == selected, "model": model,
-		"name": model, "func": funcLabel, "role": funcLabel,
+		"name": model, "func": funcLabel, "role": funcLabel, "metric": metric,
 		"hosts": hosts, "gpus": gpus, "tokps": nz(tokps[key]), "pipeline": pipe,
 		"endpoint": conn.endpoint, "model_path": conn.modelPath,
 		"api_key": conn.apiKey, "api_key_enabled": conn.apiKeyEnabled,
@@ -704,13 +829,13 @@ func (s *Server) panelMeasure(w http.ResponseWriter, r *http.Request) {
 	pstate.mu.Unlock()
 
 	if req.Mode == "cluster" && s.bc.PrefillURL != "" {
-		_, _, _, _, preTps, e1 := s.chatCall(s.bc.PrefillURL, measureMsgs, 1)
+		// prefill leg = prompt-processing rate (pp); decode leg = generation tok/s.
+		pf, e1 := s.prefillPP(s.bc.PrefillURL)
 		_, _, _, decTps, _, e2 := s.chatCall(s.bc.DecodeEntryURL, measureMsgs, 220)
 		if e2 != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": errStr(e2)})
 			return
 		}
-		pf := preTps
 		if e1 != nil {
 			pf = 0
 		}
@@ -728,15 +853,25 @@ func (s *Server) panelMeasure(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "concurrent", "aggregate": agg, "per_stream_avg": per})
 		return
 	}
-	_, _, _, tps, _, err := s.chatCall(s.instanceEndpoint(sel), measureMsgs, 220)
+	// For a prefill instance the meaningful number is prompt-processing (pp); for
+	// decode (and downloaded models) it's generation tok/s.
+	var val float64
+	var err error
+	metric := "decode"
+	if s.isPrefillInstance(sel) {
+		metric = "pp"
+		val, err = s.prefillPP(s.instanceEndpoint(sel))
+	} else {
+		_, _, _, val, _, err = s.chatCall(s.instanceEndpoint(sel), measureMsgs, 220)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": errStr(err)})
 		return
 	}
 	pstate.mu.Lock()
-	pstate.tokps[sel] = tps
+	pstate.tokps[sel] = val
 	pstate.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "individual", "tokps": tps})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "individual", "tokps": val, "metric": metric})
 }
 
 // measureConcurrent fires n requests at once and reports aggregate tok/s

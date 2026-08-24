@@ -26,6 +26,16 @@ type Config struct {
 	PublicURL string `json:"public_url"`
 	APIKey    string `json:"api_key"`
 
+	// AutoStart, when true, means the operator asked soflink to launch on boot (the
+	// panel's "Arrancar al inicio" check) AND auto-bring-up the configured unión,
+	// so the fleet self-recovers after a reboot without anyone clicking. Persisted
+	// in config.local.json; the platform install (a per-user startup task on
+	// Windows, which keeps GPU access in the user session) is (de)registered when it
+	// flips. AutoStartGroup names which group to raise on boot; empty = the first
+	// group found.
+	AutoStart      bool   `json:"auto_start"`
+	AutoStartGroup string `json:"auto_start_group"`
+
 	// SelfID is this node's anonymous label for LAN discovery (the /soflink/hello
 	// id). When empty, a stable anonymized id is derived from the hostname —
 	// never the raw hostname on the wire.
@@ -114,6 +124,15 @@ type Instance struct {
 	Endpoint string  `json:"endpoint"`
 	Main     string  `json:"main"` // node id hosting the main process
 	Topology []Stage `json:"topology"`
+
+	// ModelName is the display name of the model this instance serves. When set it
+	// overrides the served-model label on the panel card, so a role serving a
+	// DIFFERENT model (e.g. a Q4_0 prefill running beside a Q8_0 decode) shows its
+	// OWN model instead of inheriting the decode's served-model name. Empty = fall
+	// back to the live served-model reported by the endpoint. Model, when set, is
+	// the gguf path (informational; the running process owns the real path).
+	ModelName string `json:"model_name"`
+	Model     string `json:"model"`
 }
 
 // Stage is a node's inclusive layer range within an instance's pipeline.
@@ -130,6 +149,13 @@ type Preset struct {
 	Label     string        `json:"label"`
 	ModelName string        `json:"model_name"`
 	Model     string        `json:"model"` // gguf path (local main only)
+
+	// Exe is the launcher binary for THIS preset's main node, when it differs from
+	// the coordinator host's llama_exe — e.g. a remote decode whose main is a Linux
+	// node using a bundle wrapper (llama-server.sh) at its own path. Empty = the
+	// main node's own llama_exe (llamaExePath). Only *llama-server* basenames (incl.
+	// a llama-server.sh wrapper) are allowlisted by the control plane.
+	Exe string `json:"exe"`
 	Quant     string        `json:"quant"`
 	Ctx       string        `json:"ctx"`
 	KV        string        `json:"kv"`
@@ -141,6 +167,14 @@ type Preset struct {
 	RPC       string        `json:"rpc"`
 	Args      []string      `json:"args"`
 	Topology  []PresetStage `json:"topology"`
+
+	// Group ties presets that run TOGETHER as one deployment (e.g. a disaggregated
+	// decode+prefill unión): the panel renders them as a single card with one
+	// "Cargar unión" button, and /api/apply-union brings the whole group up
+	// idempotently (a role already answering /health is left running). Empty =
+	// standalone preset (its own card + button). Order within a group follows the
+	// presets array (bring the base/decode up first).
+	Group string `json:"group,omitempty"`
 }
 
 // PresetStage is one node's share of a preset's pipeline (layer count + GPUs).

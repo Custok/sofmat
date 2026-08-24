@@ -108,7 +108,14 @@ func (s *Server) configApply(w http.ResponseWriter, r *http.Request) {
 // the right node but don't fire a partial/guessed launch.
 func (s *Server) presetSpec(p *config.Preset) (spec []byte, blocked string) {
 	if len(p.Args) > 0 {
-		b, _ := json.Marshal(map[string]any{"exe": s.llamaExePath(), "args": p.Args})
+		// A preset may carry its own launcher (a remote main on a different OS/path,
+		// e.g. a Linux decode's llama-server.sh wrapper); otherwise the main node's
+		// own llama_exe. The control plane still allowlists the basename.
+		exe := p.Exe
+		if exe == "" {
+			exe = s.llamaExePath()
+		}
+		b, _ := json.Marshal(map[string]any{"exe": exe, "args": p.Args})
 		return b, ""
 	}
 	return nil, "preset sin args de arranque: falta el fleet-load (ggml-rpc-server/rpc_exe en los nodos worker)"

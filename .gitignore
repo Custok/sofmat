@@ -35,3 +35,26 @@ bench_results/*.local.*
 /sofmat.exe
 *.test
 *.out
+
+# Bundle llama embebido para el AppImage (908 MB) — JAMAS al repo
+dist/llama-a3b1eff-sm120.tar.gz
+dist/*.tar.gz
+
+# build artifacts (release assets, never in repo)
+*.exe
+*.AppImage
+.ver
+.buildver
+dist/soflink*
+dist/node-agent*
+dist/*.AppImage
+
+# local ops / junk (never in repo)
+/*.ps1
+*.log
+*.log.err
+renames.local.json
+.relver
+dist/VERSION.txt
+node-agent.exe
+README.internal.md
