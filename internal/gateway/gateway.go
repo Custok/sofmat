@@ -109,7 +109,11 @@ func New(o Options) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
-	known, err := NewKnownPrefixes(512)
+	// The engine holds at most one sequence per slot, so at most NSlots prefixes
+	// can be hot: a larger registry claims reuse the engine evicted long ago and
+	// then routes a cold 16k prompt to the decode as "small-new-prefill"
+	// (observed 2026-09-06: est 3.7k new, the engine processed 16.8k).
+	known, err := NewKnownPrefixes(n)
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +345,13 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 func (g *Gateway) Finish(p *Plan, resp Body) {
 	// the slot now holds this prefix's KV — record it for later admissions.
 	g.known.Record(p.pkey, p.prefixToks)
+	// ...unless the engine just told us it did NOT have it: a reply whose cache_n
+	// is well below the prefix means the registry was stale (evicted slot, other
+	// route). Forget it so the next admission counts the whole prompt again.
+	if cn, ok := timingInt(resp, "cache_n"); ok && !p.viaPrefill && p.prefixToks > 0 && cn < p.prefixToks/2 {
+		g.known.Forget(p.pkey)
+		p.fields["prefix_cold"] = true
+	}
 
 	// feed the alpha EMA from the engine's acceptance counters, if present.
 	dn, dnOK := timingInt(resp, "draft_n")

@@ -102,6 +102,24 @@ func (k *KnownPrefixes) Record(key string, estTokens int) {
 	k.touch(key)
 }
 
+// Forget drops key: the engine was observed NOT to hold this prefix (a
+// decode reply with cache_n far below the prefix), so the registry must not
+// keep discounting it.
+func (k *KnownPrefixes) Forget(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.toks[key]; !ok {
+		return
+	}
+	delete(k.toks, key)
+	for i, o := range k.order {
+		if o == key {
+			k.order = append(k.order[:i], k.order[i+1:]...)
+			break
+		}
+	}
+}
+
 // HotTokens returns the tokens already prefilled for key (0 if unknown or
 // evicted) and refreshes its LRU position.
 func (k *KnownPrefixes) HotTokens(key string) int {

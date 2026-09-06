@@ -2,6 +2,11 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609062100 (2026-09-06)
+Admision: el registro de prefijos calientes se alinea con la cache real del decode.
+
+- Visto en la prueba de David desde el HUD: un prompt de 16 816 tokens se admitio como `small-new-prefill` (est. 3 688 nuevos) porque el registro del gateway creia caliente el system-prompt de una peticion anterior, pero el decode ya lo habia desalojado (`cache_n 0`) y lo proceso entero (7,4 s). Fix: (1) el registro tiene tantas entradas como slots tiene el decode (4), no 512: no puede haber mas prefijos calientes que slots; (2) si el decode responde con `cache_n` por debajo de la mitad del prefijo en una peticion directa, el gateway olvida ese prefijo (`prefix_cold: true` en el registro) y la siguiente peticion se admite por su tamano completo.
+
 ## v202609061930 (2026-09-06)
 Handoff: transporte del sidecar del borrador MTP (parche llama.cpp incluido en docs/patches).
 

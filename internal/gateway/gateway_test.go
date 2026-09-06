@@ -162,6 +162,54 @@ func TestSecondRequestSamePrefixIsDecodeDirect(t *testing.T) {
 	}
 }
 
+// A stale "hot prefix" must not send a cold long prompt to the decode as small:
+// when the engine reports it did not have the prefix (cache_n ≈ 0), the
+// registry forgets it and the next request is admitted on the whole prompt.
+func TestColdPrefixForgottenAfterEngineMiss(t *testing.T) {
+	cacheN := 0.0
+	gw, c := newTestGW(t, func(o *Options) {
+		o.BackendCall = func(body Body, extra Headers) (Body, error) {
+			return Body{"timings": map[string]any{"prompt_n": 10000.0, "cache_n": cacheN}}, nil
+		}
+	})
+	gw.Chat(Headers{}, chatBody(bigPrompt, "hola")) // first: prefill + handoff, prefix recorded hot
+	if len(c.prefill) != 1 {
+		t.Fatalf("first request must prefill: %+v", c)
+	}
+	// engine says the prefix was NOT there on the direct second request
+	gw.Chat(Headers{}, chatBody(bigPrompt, "segunda"))
+	if len(c.prefill) != 1 {
+		t.Fatal("second request rides the (believed) hot prefix")
+	}
+	if lastRecord(t, gw)["prefix_cold"] != true {
+		t.Fatalf("engine miss must be recorded: %v", lastRecord(t, gw))
+	}
+	// third request: the registry forgot the prefix → whole prompt counts → prefill again
+	gw.Chat(Headers{}, chatBody(bigPrompt, "tercera"))
+	if len(c.prefill) != 2 {
+		t.Fatalf("after an engine miss the prefix must be re-admitted on its full size: %+v", c)
+	}
+	// and a genuine hit keeps it hot
+	cacheN = 9000
+	gw.Chat(Headers{}, chatBody(bigPrompt, "cuarta"))
+	gw.Chat(Headers{}, chatBody(bigPrompt, "quinta"))
+	if len(c.prefill) != 2 {
+		t.Fatal("a real cache hit must keep the prefix hot")
+	}
+}
+
+// The registry cannot hold more hot prefixes than the engine has slots.
+func TestHotPrefixRegistryBoundedBySlots(t *testing.T) {
+	gw, c := newTestGW(t, func(o *Options) { o.NSlots = 2 })
+	gw.Chat(Headers{}, chatBody(bigPrompt+"A", "x"))
+	gw.Chat(Headers{}, chatBody(bigPrompt+"B", "x"))
+	gw.Chat(Headers{}, chatBody(bigPrompt+"C", "x")) // evicts A
+	gw.Chat(Headers{}, chatBody(bigPrompt+"A", "y")) // A must count as cold again → prefill
+	if len(c.prefill) != 4 {
+		t.Fatalf("with 2 slots the 4th request (evicted prefix) must prefill again: %d", len(c.prefill))
+	}
+}
+
 func TestSmallPromptNeverTouchesPrefill(t *testing.T) {
 	gw, c := newTestGW(t, nil)
 	gw.Chat(Headers{}, chatBody("corto", "hola"))
