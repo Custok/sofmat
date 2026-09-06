@@ -135,6 +135,24 @@ mismo que el del decode y se suman ~0,7 s de save+fetch+restore); **sí protege 
 Por eso el gateway aplica `kv_handoff: busy` (por defecto): sonda `GET /slots` del decode y traspasa
 SOLO si algún slot está `is_processing`; con el decode libre va directo. `always` fuerza el traspaso.
 
+**Causa y arreglo (2026-09-06 19:15-20:10).** En llama.cpp `a3b1eff` el borrador MTP de qwen35 corre en un
+contexto aparte (`ctx_dft`, `common/speculative.cpp`) con su propia KV; `slots/save|restore` a fichero
+(`tools/server/server-context.cpp`) solo serializan `ctx_tgt`, mientras que la caché de prompts en
+memoria del server guarda los dos (de ahí −16 % mismo proceso vs −52 % cruzado). Parche
+`docs/patches/llama-a3b1eff-slot-save-dft.patch`: el `save` escribe además `<fichero>.dft` (estado de
+`ctx_dft` + `pending_h` del impl MTP; ≈ 4,1 KB/token) y el `restore` lo lee si existe; JSON con
+`n_written_dft` / `n_read_dft`. soflink (v202609061930) transporta y borra el sidecar. Prueba
+discriminante (debian, .51, mismo binario parcheado, reinicio entre casos, 8 002 tokens, 128 salida):
+
+| caso | restore | aceptación MTP | tg |
+|---|---|---|---|
+| reinicio → restore CON `.dft` | `n_read_dft` 32,9 MB | **58 %** | **59,1** |
+| reinicio → restore SIN `.dft` | `n_read_dft` 0 | 33 % | 39,8 |
+| control directo (sin restore) | — | 56 % | 59,9 |
+
+El sidecar recupera exactamente lo que se perdía. Pendiente: despliegue del bundle parcheado en el
+decode y e2e cruzada; propuesta upstream (PR a llama.cpp).
+
 ## Non-goals / abierto
 - No construir aún: **spec de diseño**; se implementa cuando la carga real (multi-tenant) haga
   frecuente el interference ×8.5.
