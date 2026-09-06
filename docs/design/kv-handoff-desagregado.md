@@ -166,6 +166,17 @@ ahorra 7,6 s (el decode procesa 46k a ~1 400 tok/s, el prefill a 1 830). El side
 demás siempre y ya no cuesta velocidad a nadie); `busy` queda como alternativa. Pendiente: PR upstream
 del parche a llama.cpp; hasta entonces la flota corre el bundle parcheado en los dos roles.
 
+**Admisión consciente de la caché y modo `auto` (v202609062130).** Un agente que encadena vueltas de
+tools (el HUD) enviaba cada vuelta el prompt entero al prefill (34k → 18 s + traspaso) aunque el decode
+tenía 22k de ese prefijo calientes y lo habría continuado en ~1 s. El gateway guarda ahora los ids del
+último prompt por clave de prefijo (tantas entradas como slots tiene el decode; se olvida cuando el decode
+responde `cache_n` ≈ 0) y cuenta como trabajo NUEVO solo lo que sigue al prefijo común con la vuelta
+anterior (`new_tokens`); si no llega al suelo de 8 192 → `cache-hot` → directo. Y el modo `auto` (por
+defecto): con el decode ocupado, traspaso si lo nuevo ≥ 8 192 (proteger los streams); con el decode
+libre, modelo de coste con las tasas medidas por tamaño (EMA): `directo = nuevos / pp_decode` frente a
+`prefill = total / pp_prefill + traspaso` → 46k frío → prefill (27 s vs 33), 11,5k frío → directo,
+vuelta de agente 34k con 22k calientes → directo (8 s vs 20). `busy` y `always` siguen disponibles.
+
 ## Non-goals / abierto
 - No construir aún: **spec de diseño**; se implementa cuando la carga real (multi-tenant) haga
   frecuente el interference ×8.5.
