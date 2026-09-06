@@ -2,6 +2,11 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609062345 (2026-09-06)
+Handoff: comprobar los soflink de los dos nodos ANTES de gastar el prefill.
+
+- Visto en produccion: el soflink del nodo prefill no volvio tras un reinicio del host (AppImage sin unidad); el gateway hizo 33 s de prefill + save y solo entonces fallo el `kv-fetch` (conexion rechazada) → 57 s en vez de 24 s directo. Ahora `Prefill` pide `/soflink/hello` (1,5 s) al soflink del prefill y al del decode antes de tocar el motor; si alguno no responde, error inmediato (`prefill_error: prefill/decode soflink unreachable`) + cortacircuitos, sin trabajo en GPU.
+
 ## v202609062215 (2026-09-06)
 Gateway robusto con el prefill caido (nodo ejectado o host apagado).
 

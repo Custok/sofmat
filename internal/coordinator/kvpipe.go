@@ -270,10 +270,35 @@ func (k *kvPipe) Count(body gateway.Body) (int, error) {
 	return len(ids), nil
 }
 
+// ctlReachable checks that a node's soflink answers its discovery hello: the
+// state cannot travel without the prefill node's /kv and the decode node's
+// /control/kv-fetch, so this is asked BEFORE spending the prefill (measured:
+// 33 s of prefill wasted when the prefill node's soflink was down after a
+// reboot and the fetch failed afterwards).
+func (k *kvPipe) ctlReachable(base string) error {
+	c := &http.Client{Timeout: 1500 * time.Millisecond, Transport: kvTransport}
+	resp, err := c.Get(base + "/soflink/hello")
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s/soflink/hello: HTTP %d", base, resp.StatusCode)
+	}
+	return nil
+}
+
 // Prefill processes the prompt (minus its last token) on the prefill engine
 // and saves the slot state; the returned handoff_id is the state file name the
 // decode node will pull. Metrics are returned as numbers for the request log.
 func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, error) {
+	if err := k.ctlReachable(k.prefillCtl); err != nil {
+		return nil, fmt.Errorf("prefill soflink unreachable: %w", err)
+	}
+	if err := k.ctlReachable(k.decodeCtl); err != nil {
+		return nil, fmt.Errorf("decode soflink unreachable: %w", err)
+	}
 	ids, err := k.tokens(body)
 	if err != nil {
 		return nil, err

@@ -517,6 +517,47 @@ func TestHandoffFailureDegradesToDecode(t *testing.T) {
 	}
 }
 
+// The prefill node's soflink being down (e.g. not relaunched after a reboot)
+// must be detected BEFORE the prefill runs: no engine work, immediate fallback.
+func TestPrefillSoflinkDownSkipsPrefillWork(t *testing.T) {
+	pre, dec := newFakeEngine(t), newFakeEngine(t)
+	preCtl := soflinkFor(t, pre.dir)
+	decCtl := soflinkFor(t, dec.dir)
+	cfg := &config.Config{
+		Nodes: []config.Node{{ID: "node-c", Agent: preCtl.URL, GPUs: 2}, {ID: "node-d", Agent: decCtl.URL, GPUs: 2}},
+		Instances: []config.Instance{
+			{Key: "decode", Role: "decode", Endpoint: dec.srv.URL, Main: "node-d"},
+			{Key: "prefill", Role: "prefill", Endpoint: pre.srv.URL, Main: "node-c"},
+		},
+		KVHandoff: "always",
+	}
+	s, err := NewServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := httptest.NewServer(s.Handler())
+	t.Cleanup(gw.Close)
+	preCtl.Close() // the prefill node's soflink dies
+
+	code, data := postChat(t, gw.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": longUser}},
+	})
+	if code != 200 || !bytes.Contains(data, []byte("resumen")) {
+		t.Fatalf("request must survive: %d %s", code, data)
+	}
+	pre.mu.Lock()
+	n := len(pre.completions)
+	pre.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("no prefill work when its soflink is unreachable: %d completions", n)
+	}
+	rec := lastRequestRecord(t, gw.URL)
+	pe, _ := rec["prefill_error"].(string)
+	if rec["admitted_via"] != "decode-fallback" || !strings.Contains(pe, "prefill soflink unreachable") {
+		t.Fatalf("cause must be recorded: %v", rec)
+	}
+}
+
 func TestStreamingGoesThroughHandoff(t *testing.T) {
 	r := newRig(t, func(e *fakeEngine) string { return e.dir })
 	code, data := postChat(t, r.gateway.URL, map[string]any{
