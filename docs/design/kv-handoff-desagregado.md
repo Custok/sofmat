@@ -150,8 +150,21 @@ discriminante (debian, .51, mismo binario parcheado, reinicio entre casos, 8 002
 | reinicio → restore SIN `.dft` | `n_read_dft` 0 | 33 % | 39,8 |
 | control directo (sin restore) | — | 56 % | 59,9 |
 
-El sidecar recupera exactamente lo que se perdía. Pendiente: despliegue del bundle parcheado en el
-decode y e2e cruzada; propuesta upstream (PR a llama.cpp).
+El sidecar recupera exactamente lo que se perdía. **Desplegado en los dos motores (bundle
+`llama-a3b1eff-dft`) y confirmado en la e2e cruzada por el gateway (2026-09-06 20:48-20:50, soflink
+v202609062100, `kv_handoff: always`):**
+
+| tokens | prefill | save | fetch (.bin + .dft) | restore | prompt_n · cache_n | acept. | tg | pared gateway | pared directo |
+|---|---|---|---|---|---|---|---|---|---|
+| 11,5k | 5,6 s (2 075 tok/s) | 0,29 s | 0,35-0,38 s (352 + 45 MiB) | 0,09-0,11 s | 1 · 11 498 | 56-61 % | **59,9-66,5** | 7,2-7,4 s | 5,9 s (tg 64,9) |
+| 46k | 25,1 s (1 830 tok/s) | 0,81 s | 0,9 s (959 + 181 MiB) | 0,28 s | 1 · 45 996 | 61 % | **59,8** | **28,3 s** | 35,9 s (tg 46,0) |
+
+Con el parche el traspaso ya no penaliza la generación (60-66 tok/s = directo); a 11k cuesta +1,5 s
+de pared frente al directo (save+fetch+restore ≈ 0,8 s + pp del prefill igual al del decode) y a 46k
+ahorra 7,6 s (el decode procesa 46k a ~1 400 tok/s, el prefill a 1 830). El sidecar pesa ≈ 4,1 KB/token
+(KV f16 de la capa MTP). Con esto `kv_handoff: always` pasa a ser la política recomendada (protege a los
+demás siempre y ya no cuesta velocidad a nadie); `busy` queda como alternativa. Pendiente: PR upstream
+del parche a llama.cpp; hasta entonces la flota corre el bundle parcheado en los dos roles.
 
 ## Non-goals / abierto
 - No construir aún: **spec de diseño**; se implementa cuando la carga real (multi-tenant) haga
