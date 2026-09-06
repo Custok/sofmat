@@ -360,6 +360,46 @@ func TestCountErrorFallsBackToDecode(t *testing.T) {
 	}
 }
 
+// With a busy probe wired, the handoff only happens while the decode is busy
+// (interference to avoid); an idle decode takes the faster direct path.
+func TestIdleDecodeGoesDirect(t *testing.T) {
+	gw, c := newTestGW(t, func(o *Options) {
+		o.DecodeBusy = func() bool { return false }
+		o.CountTokens = func(Body) (int, error) { t.Fatal("no count on an idle decode"); return 0, nil }
+	})
+	gw.Chat(Headers{}, chatBody(bigPrompt, "hola"))
+	if len(c.prefill) != 0 || len(c.decode) != 1 {
+		t.Fatalf("idle decode must be direct: %+v", c)
+	}
+	last := lastRecord(t, gw)
+	if last["admitted_via"] != "decode" || last["admission"] != "decode-idle" {
+		t.Fatalf("record wrong: %v", last)
+	}
+}
+
+func TestBusyDecodeGoesPrefill(t *testing.T) {
+	gw, c := newTestGW(t, func(o *Options) {
+		o.DecodeBusy = func() bool { return true }
+	})
+	gw.Chat(Headers{}, chatBody(bigPrompt, "hola"))
+	if len(c.prefill) != 1 {
+		t.Fatalf("busy decode must offload the prefill: %+v", c)
+	}
+	if lastRecord(t, gw)["admitted_via"] != "prefill" {
+		t.Fatal("record must say prefill")
+	}
+}
+
+func TestBusyProbePanicReadsIdle(t *testing.T) {
+	gw, c := newTestGW(t, func(o *Options) {
+		o.DecodeBusy = func() bool { panic("probe down") }
+	})
+	resp, err := gw.Chat(Headers{}, chatBody(bigPrompt, "hola"))
+	if err != nil || resp == nil || len(c.prefill) != 0 {
+		t.Fatalf("a broken probe must not fail or offload: %v %+v", err, c)
+	}
+}
+
 func TestFallbackVisibleInMetrics(t *testing.T) {
 	gw, _ := newTestGW(t, func(o *Options) {
 		o.Handoff = func(string, string) (Body, error) { return nil, errors.New("no") }

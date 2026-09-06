@@ -2,6 +2,13 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609061805 (2026-09-06)
+Politica del handoff: solo cuando protege a alguien.
+
+- Nuevo `kv_handoff` en la config del coordinador: `busy` (por defecto) = un prompt largo se traspasa al nodo de prefill SOLO si el decode esta generando para otras peticiones (sonda `GET /slots`, `is_processing`); con el decode libre va directo. `always` = traspaso siempre que se admita.
+- Motivo (medido en la e2e real, 27B Q6_K): tras un `restore` la generacion baja de ~66 a ~32-38 tok/s porque el estado de slot de llama-server no incluye el contexto del borrador MTP (dejar K tokens sin procesar para "calentarlo" no lo recupera: K=1/64/512/1024 iguales). El traspaso vale para que un prompt largo no bloquee los streams vivos (interferencia x5,8 medida), no para acelerar una peticion en solitario.
+- Registro: `admission: decode-idle` cuando la politica manda directo; una sonda caida se lee como "libre" (camino rapido).
+
 ## v202609061750 (2026-09-06)
 Prefill/decode desagregado REAL: KV handoff entre nodos (F1 de docs/design/kv-handoff-desagregado.md).
 

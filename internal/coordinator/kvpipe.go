@@ -187,6 +187,31 @@ func (k *kvPipe) tokens(body gateway.Body) ([]int, error) {
 	return ids, nil
 }
 
+// DecodeBusy probes the decode engine's /slots: true when any slot is
+// processing (a live request the handoff should protect). A failed probe reads
+// as idle so a monitoring hiccup never forces the slower path.
+func (k *kvPipe) DecodeBusy() bool {
+	c := &http.Client{Timeout: 1500 * time.Millisecond, Transport: gateway.PooledTransport()}
+	resp, err := c.Get(k.decodeURL + "/slots")
+	if err != nil {
+		return false
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var slots []map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&slots); err != nil {
+		return false
+	}
+	for _, s := range slots {
+		if b, _ := s["is_processing"].(bool); b {
+			return true
+		}
+	}
+	return false
+}
+
 // Count is the gateway's exact token counter (chat template applied).
 func (k *kvPipe) Count(body gateway.Body) (int, error) {
 	ids, err := k.tokens(body)

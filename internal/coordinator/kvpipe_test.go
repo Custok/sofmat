@@ -25,6 +25,7 @@ import (
 type fakeEngine struct {
 	mu          sync.Mutex
 	dir         string // its --slot-save-path
+	busy        bool   // what GET /slots reports (is_processing)
 	completions []int  // prompt token counts received by /completion
 	saved       []string
 	erased      int
@@ -42,8 +43,17 @@ func writeTestJSON(w http.ResponseWriter, code int, v any) {
 
 func newFakeEngine(t *testing.T) *fakeEngine {
 	t.Helper()
-	e := &fakeEngine{dir: t.TempDir()}
+	e := &fakeEngine{dir: t.TempDir(), busy: true}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/slots", func(w http.ResponseWriter, r *http.Request) {
+		e.mu.Lock()
+		busy := e.busy
+		e.mu.Unlock()
+		writeTestJSON(w, 200, []any{
+			map[string]any{"id": 0, "is_processing": busy},
+			map[string]any{"id": 1, "is_processing": false},
+		})
+	})
 	mux.HandleFunc("/apply-template", func(w http.ResponseWriter, r *http.Request) {
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
@@ -171,7 +181,7 @@ type rig struct {
 	gateway         *httptest.Server
 }
 
-func newRig(t *testing.T, decodeKVDir func(*fakeEngine) string) *rig {
+func newRig(t *testing.T, decodeKVDir func(*fakeEngine) string, mutate ...func(*config.Config)) *rig {
 	t.Helper()
 	pre, dec := newFakeEngine(t), newFakeEngine(t)
 	preCtl := soflinkFor(t, pre.dir)
@@ -185,6 +195,9 @@ func newRig(t *testing.T, decodeKVDir func(*fakeEngine) string) *rig {
 			{Key: "decode", Role: "decode", Endpoint: dec.srv.URL, Main: "node-d"},
 			{Key: "prefill", Role: "prefill", Endpoint: pre.srv.URL, Main: "node-c"},
 		},
+	}
+	for _, m := range mutate {
+		m(cfg)
 	}
 	s, err := NewServer(cfg)
 	if err != nil {
@@ -295,6 +308,47 @@ func TestHandoffEndToEnd(t *testing.T) {
 func jsonNum(f float64) string {
 	b, _ := json.Marshal(f)
 	return string(b)
+}
+
+// Default policy ("busy"): an idle decode takes the direct path even for a
+// long prompt; "always" offloads regardless of the decode's state.
+func TestIdleDecodeStaysDirectUnlessAlways(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	r.decode.mu.Lock()
+	r.decode.busy = false
+	r.decode.mu.Unlock()
+	code, _ := postChat(t, r.gateway.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": longUser}},
+	})
+	if code != 200 {
+		t.Fatalf("chat failed: %d", code)
+	}
+	r.prefill.mu.Lock()
+	n := len(r.prefill.completions)
+	r.prefill.mu.Unlock()
+	if n != 0 {
+		t.Fatal("idle decode must not offload the prefill")
+	}
+	if rec := lastRequestRecord(t, r.gateway.URL); rec["admission"] != "decode-idle" || rec["admitted_via"] != "decode" {
+		t.Fatalf("record wrong: %v", rec)
+	}
+
+	always := newRig(t, func(e *fakeEngine) string { return e.dir }, func(c *config.Config) { c.KVHandoff = "always" })
+	always.decode.mu.Lock()
+	always.decode.busy = false
+	always.decode.mu.Unlock()
+	postChat(t, always.gateway.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": longUser}},
+	})
+	always.prefill.mu.Lock()
+	n = len(always.prefill.completions)
+	always.prefill.mu.Unlock()
+	if n != 1 {
+		t.Fatal("kv_handoff=always must offload even on an idle decode")
+	}
+	if rec := lastRequestRecord(t, always.gateway.URL); rec["admitted_via"] != "prefill" {
+		t.Fatalf("record wrong: %v", rec)
+	}
 }
 
 func TestShortPromptStaysDecodeDirect(t *testing.T) {

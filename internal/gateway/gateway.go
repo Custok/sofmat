@@ -47,6 +47,14 @@ type Handoff func(handoffID string, slot string) (Body, error)
 // the estimate admitted to prefill is re-checked against the exact floor.
 type CountTokens func(body Body) (int, error)
 
+// DecodeBusy reports whether the decode engine is generating for OTHER
+// requests right now. Optional: when set, the prefill route is taken only
+// while the decode is busy — the handoff exists to keep a long prefill from
+// stalling live token streams (measured ×5.8 interference); on an idle decode
+// the direct path is faster (the restored state lacks the engine's speculative
+// draft context, so post-handoff generation runs slower).
+type DecodeBusy func() bool
+
 // StatusProvider returns the /api/status document.
 type StatusProvider func() Body
 
@@ -57,6 +65,7 @@ type Gateway struct {
 	prefill   PrefillCall // optional; nil = no disaggregation
 	handoff   Handoff     // optional; nil = no disaggregation
 	count     CountTokens // optional; nil = estimate only
+	busy      DecodeBusy  // optional; nil = handoff whenever admitted
 	threshold int         // admission threshold on the ESTIMATE
 	exactMin  int         // floor on the EXACT count (when count != nil)
 	ring      *Ring
@@ -75,6 +84,7 @@ type Options struct {
 	PrefillCall    PrefillCall
 	Handoff        Handoff
 	CountTokens    CountTokens
+	DecodeBusy     DecodeBusy
 	Threshold      int
 	ExactMinTokens int
 	NSlots         int
@@ -116,6 +126,7 @@ func New(o Options) (*Gateway, error) {
 		prefill:   o.PrefillCall,
 		handoff:   o.Handoff,
 		count:     o.CountTokens,
+		busy:      o.DecodeBusy,
 		threshold: th,
 		exactMin:  em,
 		ring:      NewRing(members, 64),
@@ -250,7 +261,13 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		// fail-soft: any prefill/handoff problem degrades to decode-direct.
 		admittedVia = "decode-fallback"
 		goPrefill := true
-		if g.count != nil {
+		if g.busy != nil && !g.busySafe() {
+			// idle decode: nothing to protect from interference, direct is faster.
+			fields["admission"] = "decode-idle"
+			admittedVia = "decode"
+			goPrefill = false
+		}
+		if goPrefill && g.count != nil {
 			// exact recount (chat template applied) — the estimate only opened the door.
 			n, err := g.countSafe(merged)
 			switch {
@@ -390,6 +407,16 @@ func (g *Gateway) driveHandoffSafe(hid, slot string) (out Body, err error) {
 		}
 	}()
 	return g.handoff(hid, slot)
+}
+
+// busySafe: a probe error or panic reads as "idle" (the faster direct path).
+func (g *Gateway) busySafe() (busy bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			busy = false
+		}
+	}()
+	return g.busy()
 }
 
 func (g *Gateway) countSafe(body Body) (n int, err error) {

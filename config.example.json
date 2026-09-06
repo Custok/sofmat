@@ -1,6 +1,7 @@
 {
   "listen": ":8080",
   "kv_state_dir": "",
+  "kv_handoff": "busy",
   "nodes": [
     { "id": "node-a", "endpoint": "http://node-a.local:PORT", "gpus": 2 },
     { "id": "node-c", "endpoint": "http://node-c.local:PORT", "gpus": 1 },
