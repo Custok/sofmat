@@ -26,6 +26,7 @@ type fakeEngine struct {
 	mu          sync.Mutex
 	dir         string // its --slot-save-path
 	busy        bool   // what GET /slots reports (is_processing)
+	sidecar     bool   // save also writes <name>.dft (patched engine)
 	completions []int  // prompt token counts received by /completion
 	saved       []string
 	erased      int
@@ -109,6 +110,9 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 			if err := os.WriteFile(filepath.Join(e.dir, name), []byte("STATE:"+name), 0o644); err != nil {
 				writeTestJSON(w, 500, map[string]any{"error": err.Error()})
 				return
+			}
+			if e.sidecar { // patched engine: draft-context sidecar next to the state
+				_ = os.WriteFile(filepath.Join(e.dir, name+".dft"), []byte("DFT:"+name), 0o644)
 			}
 			e.mu.Lock()
 			e.saved = append(e.saved, name)
@@ -354,6 +358,48 @@ func TestIdleDecodeStaysDirectUnlessAlways(t *testing.T) {
 	}
 	if rec := lastRequestRecord(t, always.gateway.URL); rec["admitted_via"] != "prefill" {
 		t.Fatalf("record wrong: %v", rec)
+	}
+}
+
+// A patched prefill engine writes a draft-context sidecar; it must travel with the
+// state, be recorded, and be cleaned up. An unpatched one (no sidecar) still works.
+func TestDraftSidecarTravelsWhenPresent(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	r.prefill.mu.Lock()
+	r.prefill.sidecar = true
+	r.prefill.mu.Unlock()
+	code, _ := postChat(t, r.gateway.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": longUser}},
+	})
+	if code != 200 {
+		t.Fatalf("chat failed: %d", code)
+	}
+	rec := lastRequestRecord(t, r.gateway.URL)
+	if rec["dft"] != true || rec["dft_bytes"] == nil {
+		t.Fatalf("sidecar must be fetched and recorded: %v", rec)
+	}
+	r.prefill.mu.Lock()
+	name := r.prefill.saved[0]
+	r.prefill.mu.Unlock()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, e1 := os.Stat(filepath.Join(r.decode.dir, name+".dft"))
+		_, e2 := os.Stat(filepath.Join(r.prefill.dir, name+".dft"))
+		if os.IsNotExist(e1) && os.IsNotExist(e2) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, err := os.Stat(filepath.Join(r.decode.dir, name+".dft")); !os.IsNotExist(err) {
+		t.Fatal("sidecar must be cleaned up on the decode node")
+	}
+
+	plain := newRig(t, func(e *fakeEngine) string { return e.dir })
+	postChat(t, plain.gateway.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": longUser}},
+	})
+	if rec := lastRequestRecord(t, plain.gateway.URL); rec["admitted_via"] != "prefill" || rec["dft"] != false {
+		t.Fatalf("no sidecar must still hand off, recorded as dft=false: %v", rec)
 	}
 }
 

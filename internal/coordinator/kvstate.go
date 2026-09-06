@@ -26,7 +26,9 @@ import (
 	"time"
 )
 
-var stateNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.bin$`)
+// A state is "<name>.bin"; a patched engine (docs/patches, slot save sidecar) also
+// writes "<name>.bin.dft" with the speculative draft context — same rules.
+var stateNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.bin(\.dft)?$`)
 
 // validStateName accepts only a plain file name a peer may address.
 func validStateName(n string) bool {

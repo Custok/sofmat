@@ -2,6 +2,12 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609061930 (2026-09-06)
+Handoff: transporte del sidecar del borrador MTP (parche llama.cpp incluido en docs/patches).
+
+- Causa del tg a la mitad tras un restore, localizada en llama.cpp a3b1eff: `slots/save|restore` a fichero solo serializan el contexto del modelo principal; el borrador MTP (contexto `ctx_dft` aparte) arranca frio en otro proceso. Parche `docs/patches/llama-a3b1eff-slot-save-dft.patch` (server-context, speculative, server-task): el save escribe ademas `<fichero>.dft` (KV del borrador + `pending_h`) y el restore lo lee si existe; respuesta con `n_written_dft` / `n_read_dft`. Compilado en CPU sin errores; build CUDA sm120 por la flota.
+- soflink: `POST /control/kv-fetch` del `<estado>.dft` best-effort tras el estado principal (registro `dft`, `dft_bytes`), borrado de ambos ficheros en los dos nodos, nombres `.bin.dft` admitidos en `/kv/*`. Con motores sin parche no cambia nada.
+
 ## v202609061815 (2026-09-06)
 Handoff: restaurar siempre en un slot LIBRE del decode.
 

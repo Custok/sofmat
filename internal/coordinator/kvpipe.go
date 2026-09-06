@@ -328,6 +328,17 @@ func (k *kvPipe) Handoff(hid, slot string) (gateway.Body, error) {
 	if v, ok := ft["bytes"].(float64); ok {
 		out["fetch_bytes"] = int64(v)
 	}
+	// draft-context sidecar (engine patched with docs/patches/llama-*-slot-save-dft):
+	// best-effort — an unpatched prefill has none and the decode then drafts cold,
+	// exactly as before. Recorded so the request log shows whether it travelled.
+	out["dft"] = false
+	if sd, err := k.postJSON(k.decodeCtl+"/control/kv-fetch",
+		map[string]any{"url": src + ".dft", "name": hid + ".dft"}, 120*time.Second); err == nil {
+		out["dft"] = true
+		if v, ok := sd["bytes"].(float64); ok {
+			out["dft_bytes"] = int64(v)
+		}
+	}
 	// a restore into a slot that is generating queues behind that stream (measured:
 	// 31 s instead of 0.2 s for a 32k state) — prefer an idle slot.
 	slot = k.pickIdleSlot(slot)
@@ -351,13 +362,15 @@ func (k *kvPipe) Handoff(hid, slot string) (gateway.Body, error) {
 func (k *kvPipe) cleanup(hid string) {
 	go func() {
 		for _, base := range []string{k.decodeCtl, k.prefillCtl} {
-			req, err := http.NewRequest(http.MethodDelete, base+"/kv/"+hid, nil)
-			if err != nil {
-				continue
-			}
-			if resp, err := k.client.Do(req); err == nil {
-				_, _ = io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
+			for _, name := range []string{hid, hid + ".dft"} {
+				req, err := http.NewRequest(http.MethodDelete, base+"/kv/"+name, nil)
+				if err != nil {
+					continue
+				}
+				if resp, err := k.client.Do(req); err == nil {
+					_, _ = io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}
 			}
 		}
 	}()
