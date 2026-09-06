@@ -49,9 +49,12 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 		e.mu.Lock()
 		busy := e.busy
 		e.mu.Unlock()
+		// busy: slots 0-2 generating, only slot 3 idle (so a handoff must land in 3)
 		writeTestJSON(w, 200, []any{
 			map[string]any{"id": 0, "is_processing": busy},
-			map[string]any{"id": 1, "is_processing": false},
+			map[string]any{"id": 1, "is_processing": busy},
+			map[string]any{"id": 2, "is_processing": busy},
+			map[string]any{"id": 3, "is_processing": false},
 		})
 	})
 	mux.HandleFunc("/apply-template", func(w http.ResponseWriter, r *http.Request) {
@@ -276,6 +279,9 @@ func TestHandoffEndToEnd(t *testing.T) {
 	}
 	if dec.restoreSlot != strings.TrimSuffix(strings.TrimSuffix(jsonNum(slot), ".0"), ".") {
 		t.Fatalf("restore slot %q != chat id_slot %v", dec.restoreSlot, slot)
+	}
+	if dec.restoreSlot != "3" {
+		t.Fatalf("with slots 0-2 busy the restore must land in the idle slot 3, got %q", dec.restoreSlot)
 	}
 	if _, ok := chat["messages"]; !ok {
 		t.Fatal("decode must receive the original messages (re-templated by the engine)")

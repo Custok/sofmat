@@ -37,9 +37,11 @@ type BackendCall func(body Body, extra Headers) (Body, error)
 // save_ms, tokens, state_bytes, ...) is copied into the request record.
 type PrefillCall func(body Body, extra Headers) (Body, error)
 
-// Handoff moves the saved state to the decode node and restores it into the
-// decode slot; it returns its metrics (fetch_ms, restore_ms, n_restored) or an
-// error. Owned by the transport module; the gateway only sequences it.
+// Handoff moves the saved state to the decode node and restores it into a
+// decode slot — the requested one when idle, else an idle one (a restore into
+// a slot that is generating waits for that stream to end); it returns its
+// metrics (fetch_ms, restore_ms, n_restored) plus "slot" = the slot actually
+// used, or an error. Owned by the transport module; the gateway sequences it.
 type Handoff func(handoffID string, slot string) (Body, error)
 
 // CountTokens returns the EXACT prompt token count of a chat body as the
@@ -300,6 +302,13 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 					fields["handoff_id"] = hid
 					fields["handoff_ms"] = msSince(t0)
 					decodeHeaders["x-sofmat-kv-handoff"] = hid
+					// the driver may have restored into a different (idle) slot than the
+					// affinity pick — a restore into a busy slot waits for that stream to end.
+					if s, _ := hm["slot"].(string); s != "" && s != slot {
+						slot = s
+						decodeHeaders["x-sofmat-slot"] = s
+						fields["slot"] = s
+					}
 					// engine-visible: continue in the slot that now holds the restored KV.
 					if si, err := strconv.Atoi(slot); err == nil {
 						merged["id_slot"] = si

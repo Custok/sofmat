@@ -119,6 +119,22 @@ pipeline multi-nodo (topologías distintas por rol).
 Código: `internal/gateway/gateway.go` (Prepare/Finish), `internal/coordinator/kvpipe.go`
 (drivers), `internal/coordinator/kvstate.go` (`/kv/*`, `/control/kv-fetch`, `--slot-save-path`).
 
+**Límite conocido (e2e real, 2026-09-06) y política resultante.** Tras el `restore`, la generación
+del decode baja de ~66-69 a ~31-33 tok/s: la aceptación del borrador MTP cae del ~60 % al ~17-25 %.
+Descartado: el `n_max` del gateway (mismo tg directo con 3/16/defecto), dejar K tokens sin procesar
+para "calentar" la MTP (K = 1/64/512/1024 iguales), el ubatch del prefill (`-b 2048 -ub 512` = decode,
+sin cambio). En el MISMO proceso (save en un slot, restore en otro) el coste es −16 %; entre procesos
+−52 %: lo que se pierde está en cómo llama-server serializa el estado (el contexto del borrador MTP y/o
+el estado recurrente), y eso es territorio del motor. Consecuencia: **el traspaso no acelera una
+petición en solitario** (11,5k: 8,0 s por el gateway vs 5,8 s directo, porque el pp del prefill es el
+mismo que el del decode y se suman ~0,7 s de save+fetch+restore); **sí protege a los demás**:
+| escenario (A streaming en el decode, B = prompt largo) | A durante B | pausa máx. de A |
+|---|---|---|
+| B directo al decode (co-locado) | **3,4 tok/s** (de 43) | 1,18 s |
+| B por el gateway → prefill + handoff | ~40 tok/s | 0,06 s |
+Por eso el gateway aplica `kv_handoff: busy` (por defecto): sonda `GET /slots` del decode y traspasa
+SOLO si algún slot está `is_processing`; con el decode libre va directo. `always` fuerza el traspaso.
+
 ## Non-goals / abierto
 - No construir aún: **spec de diseño**; se implementa cuando la carga real (multi-tenant) haga
   frecuente el interference ×8.5.

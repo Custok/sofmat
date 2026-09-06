@@ -2,6 +2,12 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609061815 (2026-09-06)
+Handoff: restaurar siempre en un slot LIBRE del decode.
+
+- Medido con un usuario en streaming: un `restore` dirigido al slot que estaba generando se encola detras de ese stream (31,5 s en vez de 0,2 s para un estado de 32k). Ahora el driver consulta `GET /slots` del decode y restaura en el slot pedido solo si esta libre; si no, en el primer slot libre (con todos ocupados, se encola). El gateway sigue al driver: `id_slot`, cabecera y registro reflejan el slot usado.
+- Interferencia medida (A en streaming en el decode, B = prompt de 32k): B directo al decode deja a A en 3,4 tok/s (de 36) con pausas de 1,1 s; B por el gateway (prefill + handoff) deja a A en 37,8 tok/s (de 41,9) con pausa maxima 0,07 s.
+
 ## v202609061805 (2026-09-06)
 Politica del handoff: solo cuando protege a alguien.
 

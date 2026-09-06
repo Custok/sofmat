@@ -187,29 +187,61 @@ func (k *kvPipe) tokens(body gateway.Body) ([]int, error) {
 	return ids, nil
 }
 
+// decodeSlots reads the decode engine's /slots (nil on any failure).
+func (k *kvPipe) decodeSlots() []map[string]any {
+	c := &http.Client{Timeout: 1500 * time.Millisecond, Transport: gateway.PooledTransport()}
+	resp, err := c.Get(k.decodeURL + "/slots")
+	if err != nil {
+		return nil
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var slots []map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&slots); err != nil {
+		return nil
+	}
+	return slots
+}
+
 // DecodeBusy probes the decode engine's /slots: true when any slot is
 // processing (a live request the handoff should protect). A failed probe reads
 // as idle so a monitoring hiccup never forces the slower path.
 func (k *kvPipe) DecodeBusy() bool {
-	c := &http.Client{Timeout: 1500 * time.Millisecond, Transport: gateway.PooledTransport()}
-	resp, err := c.Get(k.decodeURL + "/slots")
-	if err != nil {
-		return false
-	}
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body); resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return false
-	}
-	var slots []map[string]any
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&slots); err != nil {
-		return false
-	}
-	for _, s := range slots {
+	for _, s := range k.decodeSlots() {
 		if b, _ := s["is_processing"].(bool); b {
 			return true
 		}
 	}
 	return false
+}
+
+// pickIdleSlot returns want when that slot is idle (or the probe fails), else
+// the first idle slot; with every slot busy it keeps want (the restore queues).
+func (k *kvPipe) pickIdleSlot(want string) string {
+	slots := k.decodeSlots()
+	if slots == nil {
+		return want
+	}
+	firstIdle := ""
+	for _, s := range slots {
+		id := ""
+		if v, ok := s["id"].(float64); ok {
+			id = fmt.Sprintf("%d", int(v))
+		}
+		busy, _ := s["is_processing"].(bool)
+		if id == want && !busy {
+			return want
+		}
+		if !busy && firstIdle == "" && id != "" {
+			firstIdle = id
+		}
+	}
+	if firstIdle != "" {
+		return firstIdle
+	}
+	return want
 }
 
 // Count is the gateway's exact token counter (chat template applied).
@@ -296,6 +328,10 @@ func (k *kvPipe) Handoff(hid, slot string) (gateway.Body, error) {
 	if v, ok := ft["bytes"].(float64); ok {
 		out["fetch_bytes"] = int64(v)
 	}
+	// a restore into a slot that is generating queues behind that stream (measured:
+	// 31 s instead of 0.2 s for a 32k state) — prefer an idle slot.
+	slot = k.pickIdleSlot(slot)
+	out["slot"] = slot
 	t1 := time.Now()
 	rs, err := k.postJSON(fmt.Sprintf("%s/slots/%s?action=restore", k.decodeURL, slot),
 		map[string]any{"filename": hid}, 120*time.Second)

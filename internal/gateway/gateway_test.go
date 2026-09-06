@@ -124,6 +124,21 @@ func TestHandoffPinsEngineSlotInBody(t *testing.T) {
 	}
 }
 
+// The handoff driver may restore into a different idle slot: the decode call
+// must follow it (id_slot, header, record), never the affinity pick.
+func TestHandoffSlotOverrideFollowed(t *testing.T) {
+	gw, c := newTestGW(t, func(o *Options) {
+		o.Handoff = func(hid, slot string) (Body, error) { return Body{"slot": "3", "restore_ms": 50.0}, nil }
+	})
+	gw.Chat(Headers{}, chatBody(bigPrompt, "hola"))
+	if c.bodies[0]["id_slot"] != 3 || c.decode[0]["x-sofmat-slot"] != "3" {
+		t.Fatalf("decode must follow the driver's slot: %v %v", c.bodies[0]["id_slot"], c.decode[0])
+	}
+	if lastRecord(t, gw)["slot"] != "3" {
+		t.Fatal("record must show the slot actually used")
+	}
+}
+
 func TestSmallPromptBodyHasNoSlotPin(t *testing.T) {
 	gw, c := newTestGW(t, nil)
 	gw.Chat(Headers{}, chatBody("corto", "hola"))
