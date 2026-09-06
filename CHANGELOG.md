@@ -2,6 +2,11 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609062215 (2026-09-06)
+Gateway robusto con el prefill caido (nodo ejectado o host apagado).
+
+- Visto al ejectar el prefill de un nodo por hardware: el gateway ya degradaba a decode directo (200, causa en el registro), pero cada prompt largo volvia a intentar el tokenize contra el nodo. Ahora un fallo en el lado prefill (tokenize, prefill, save, fetch, restore) abre un cortacircuitos de 30 s (`PrefillBreaker`; registro `admission: prefill-down`) y las llamadas al prefill/decode de control usan un transporte con dial acotado a 2 s: un host apagado cuesta 2 s una vez cada 30 s, no un timeout TCP por peticion.
+
 ## v202609062130 (2026-09-06)
 Admision consciente de la cache + modo `auto` (nuevo por defecto).
 

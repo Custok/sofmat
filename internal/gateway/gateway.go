@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -98,6 +99,13 @@ type Gateway struct {
 	known     *KnownPrefixes
 	last      *lastPrompts // per prefix key: ids of the last prompt routed (cache lower bound)
 	cost      *costModel   // measured pp / handoff EMAs for ModeAuto
+
+	// circuit breaker: after a prefill-side failure (tokenize, prefill, handoff)
+	// the prefill route is skipped without contacting the node for breakerFor,
+	// so a dead prefill host costs one dial timeout, not one per long request.
+	breakerMu  sync.Mutex
+	downUntil  time.Time
+	breakerFor time.Duration
 }
 
 // Options for New. NSlots defaults to 4; KeepContent defaults to false;
@@ -117,7 +125,13 @@ type Options struct {
 	ExactMinTokens int
 	NSlots         int
 	KeepContent    bool
+	// PrefillBreaker is how long the prefill route stays closed after a
+	// prefill-side failure (0 = PrefillBreakerDefault; negative = never close).
+	PrefillBreaker time.Duration
 }
+
+// PrefillBreakerDefault: a dead or ejected prefill node is retried every 30 s.
+const PrefillBreakerDefault = 30 * time.Second
 
 func New(o Options) (*Gateway, error) {
 	if o.Verify == nil || o.BackendCall == nil || o.StatusProvider == nil {
@@ -165,7 +179,12 @@ func New(o Options) (*Gateway, error) {
 	if (mode == ModeBusy || mode == ModeAuto) && o.DecodeBusy == nil {
 		return nil, fmt.Errorf("mode %s needs a DecodeBusy probe", mode)
 	}
+	breaker := o.PrefillBreaker
+	if breaker == 0 {
+		breaker = PrefillBreakerDefault
+	}
 	return &Gateway{
+		breakerFor: breaker,
 		verify:    o.Verify,
 		backend:   o.BackendCall,
 		status:    o.StatusProvider,
@@ -315,11 +334,17 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		// fail-soft: any prefill/handoff problem degrades to decode-direct.
 		admittedVia = "decode-fallback"
 		goPrefill := true
+		if g.prefillDown() {
+			// breaker open: the prefill side failed moments ago, don't dial it again.
+			fields["admission"] = "prefill-down"
+			admittedVia = "decode"
+			goPrefill = false
+		}
 		busy := false
-		if g.mode != ModeAlways {
+		if goPrefill && g.mode != ModeAlways {
 			busy = g.busySafe()
 		}
-		if g.mode == ModeBusy && !busy {
+		if goPrefill && g.mode == ModeBusy && !busy {
 			// idle decode: nothing to protect from interference, direct is faster
 			// (and no tokenizer round-trip needed to know it).
 			fields["admission"] = "decode-idle"
@@ -335,6 +360,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 			ids, err = g.tokensSafe(merged)
 			if err != nil {
 				fields["prefill_error"] = "tokenize: " + err.Error()
+				g.tripBreaker()
 				goPrefill = false
 			} else {
 				n = len(ids)
@@ -347,6 +373,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 			n, err = g.countSafe(merged)
 			if err != nil {
 				fields["prefill_error"] = "count: " + err.Error()
+				g.tripBreaker()
 				goPrefill = false
 			} else {
 				newExact = n
@@ -376,6 +403,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 			pre, err := g.callPrefillSafe(merged, Headers{"x-sofmat-slot": slot})
 			if err != nil {
 				fields["prefill_error"] = err.Error()
+				g.tripBreaker()
 			} else {
 				copyMetrics(fields, pre)
 				hid, _ := pre["handoff_id"].(string)
@@ -383,6 +411,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 					fields["prefill_error"] = "no handoff_id"
 				} else if hm, err := g.driveHandoffSafe(hid, slot); err != nil {
 					fields["handoff_error"] = err.Error()
+					g.tripBreaker()
 				} else {
 					copyMetrics(fields, hm)
 					fields["handoff_id"] = hid
@@ -517,6 +546,23 @@ func (g *Gateway) driveHandoffSafe(hid, slot string) (out Body, err error) {
 		}
 	}()
 	return g.handoff(hid, slot)
+}
+
+// prefillDown reports whether the breaker is open (recent prefill-side failure).
+func (g *Gateway) prefillDown() bool {
+	g.breakerMu.Lock()
+	defer g.breakerMu.Unlock()
+	return time.Now().Before(g.downUntil)
+}
+
+// tripBreaker closes the prefill route for breakerFor (no-op when negative).
+func (g *Gateway) tripBreaker() {
+	if g.breakerFor < 0 {
+		return
+	}
+	g.breakerMu.Lock()
+	g.downUntil = time.Now().Add(g.breakerFor)
+	g.breakerMu.Unlock()
 }
 
 // busySafe: a probe error or panic reads as "idle" (the faster direct path).

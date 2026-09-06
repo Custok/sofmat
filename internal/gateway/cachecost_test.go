@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func seq(n, from int) []int {
@@ -155,6 +156,52 @@ func TestTokenizeErrorFallsBackToDecode(t *testing.T) {
 	}
 	if lastRecord(t, gw)["prefill_error"] != "tokenize: prefill down" {
 		t.Fatalf("cause must be recorded: %v", lastRecord(t, gw))
+	}
+}
+
+// After a prefill-side failure the route stays closed for the breaker window:
+// no tokenizer/prefill call is attempted (a dead host would cost a dial
+// timeout per long request), and it reopens once the window passes.
+func TestPrefillBreaker(t *testing.T) {
+	calls := 0
+	gw, c := newTestGW(t, func(o *Options) {
+		o.Tokens = func(Body) ([]int, error) { calls++; return nil, errors.New("dial tcp: refused") }
+		o.PrefillBreaker = 60 * time.Millisecond
+	})
+	// distinct tenants: each request is a cold prefix (else the 2nd would ride prefix-hot)
+	t1, t2, t3 := Headers{"x-sofmat-tenant": "a"}, Headers{"x-sofmat-tenant": "b"}, Headers{"x-sofmat-tenant": "c"}
+	gw.Chat(t1, chatBody(bigPrompt, "uno"))
+	gw.Chat(t2, chatBody(bigPrompt, "dos"))
+	if calls != 1 || len(c.decode) != 2 {
+		t.Fatalf("second request inside the window must not dial the prefill: calls=%d decode=%d", calls, len(c.decode))
+	}
+	rec := lastRecord(t, gw)
+	if rec["admission"] != "prefill-down" || rec["admitted_via"] != "decode" {
+		t.Fatalf("breaker must be visible: %v", rec)
+	}
+	time.Sleep(80 * time.Millisecond)
+	gw.Chat(t3, chatBody(bigPrompt, "tres"))
+	if calls != 2 {
+		t.Fatal("after the window the prefill must be retried")
+	}
+	// handoff failures trip it too
+	gw2, _ := newTestGW(t, func(o *Options) {
+		o.Handoff = func(string, string) (Body, error) { return nil, errors.New("kv-fetch: HTTP 503") }
+	})
+	gw2.Chat(t1, chatBody(bigPrompt, "uno"))
+	gw2.Chat(t2, chatBody(bigPrompt, "dos"))
+	if lastRecord(t, gw2)["admission"] != "prefill-down" {
+		t.Fatal("a handoff failure must open the breaker")
+	}
+	// negative = never close
+	gw3, c3 := newTestGW(t, func(o *Options) {
+		o.Tokens = func(Body) ([]int, error) { return nil, errors.New("down") }
+		o.PrefillBreaker = -1
+	})
+	gw3.Chat(t1, chatBody(bigPrompt, "uno"))
+	gw3.Chat(t2, chatBody(bigPrompt, "dos"))
+	if lastRecord(t, gw3)["admission"] == "prefill-down" || len(c3.decode) != 2 {
+		t.Fatal("breaker disabled must retry every time")
 	}
 }
 

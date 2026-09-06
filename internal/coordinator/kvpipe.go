@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -41,6 +42,16 @@ const (
 	tokCacheTTL   = 3 * time.Minute
 	tokCacheCap   = 64
 )
+
+// kvTransport bounds the DIAL to the prefill/decode nodes: a host that is down
+// (not just a closed port) must cost a couple of seconds once — the gateway's
+// breaker then keeps the route closed — not a TCP timeout per long request.
+var kvTransport = &http.Transport{
+	DialContext:         (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	MaxIdleConns:        32,
+	MaxIdleConnsPerHost: 8,
+	IdleConnTimeout:     90 * time.Second,
+}
 
 type kvPipe struct {
 	prefillURL string // prefill llama-server
@@ -66,7 +77,7 @@ func newKVPipe(prefillURL, decodeURL, prefillCtl, decodeCtl string) *kvPipe {
 		decodeURL:  strings.TrimRight(decodeURL, "/"),
 		prefillCtl: strings.TrimRight(prefillCtl, "/"),
 		decodeCtl:  strings.TrimRight(decodeCtl, "/"),
-		client:     &http.Client{Timeout: 600 * time.Second, Transport: gateway.PooledTransport()},
+		client:     &http.Client{Timeout: 600 * time.Second, Transport: kvTransport},
 		toks:       map[string]tokEntry{},
 	}
 }
@@ -108,7 +119,7 @@ func (k *kvPipe) postJSON(url string, body any, timeout time.Duration) (map[stri
 	req.Header.Set("Content-Type", "application/json")
 	c := k.client
 	if timeout > 0 {
-		c = &http.Client{Timeout: timeout, Transport: gateway.PooledTransport()}
+		c = &http.Client{Timeout: timeout, Transport: kvTransport}
 	}
 	resp, err := c.Do(req)
 	if err != nil {
@@ -189,7 +200,7 @@ func (k *kvPipe) tokens(body gateway.Body) ([]int, error) {
 
 // decodeSlots reads the decode engine's /slots (nil on any failure).
 func (k *kvPipe) decodeSlots() []map[string]any {
-	c := &http.Client{Timeout: 1500 * time.Millisecond, Transport: gateway.PooledTransport()}
+	c := &http.Client{Timeout: 1500 * time.Millisecond, Transport: kvTransport}
 	resp, err := c.Get(k.decodeURL + "/slots")
 	if err != nil {
 		return nil
