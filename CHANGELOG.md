@@ -2,6 +2,17 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609061750 (2026-09-06)
+Prefill/decode desagregado REAL: KV handoff entre nodos (F1 de docs/design/kv-handoff-desagregado.md).
+
+- Gateway `/v1/chat/completions` (JSON y streaming): un prompt largo (estimacion >= 6144 tokens y recuento EXACTO >= 8192 con la plantilla de chat aplicada) se procesa en el nodo de PREFILL y su estado KV viaja al nodo de DECODE, que solo procesa el ultimo token (`timings.prompt_n = 1`). Medido en el spike F0 (27B Q6_K, 10GbE): handoff 0,35 / 0,9 / 2,2 s a 8k / 32k / 100k tokens frente a 3,5 / 14,7 / 66 s reprocesando el prompt en el decode.
+- Receta del motor: `apply-template` + `tokenize` en el prefill (misma plantilla que el decode: mismo gguf + `--jinja`), `/completion` con `tokens[:-1]` y `n_predict 0` (la cache recurrente del modelo hibrido no se puede truncar), `slots/0?action=save` + `erase` (presupuesto KV unificado; prefills serializados), el soflink del nodo decode baja el estado directo del soflink del prefill (`POST /control/kv-fetch` <- `GET /kv/<nombre>`), `slots/<slot>?action=restore` y la peticion original con `id_slot` + `cache_prompt`. Ficheros borrados en los dos nodos tras el restore.
+- Todo fail-soft: cualquier fallo (recuento, prefill, fetch, restore) degrada a decode directo sin perder la peticion; la causa queda en el registro.
+- Nuevo `GET /api/requests`: registro por peticion con decision de admision, via (`decode` / `prefill` / `decode-fallback`), tokens, `prefill_ms`, `save_ms`, `fetch_ms`, `restore_ms`, `handoff_ms`, `prompt_n`, `cache_n`, `kv_miss`, tg tok/s.
+- Config nueva por nodo: `kv_state_dir` (= `--slot-save-path` del llama-server del nodo). Activa `GET/DELETE /kv/<nombre>` y `POST /control/kv-fetch` en ese nodo, y anade `--slot-save-path` a los llama-server que lance soflink. Sin ella el gateway sigue decode-only.
+- Umbral de admision: 2048 -> 6144 tokens estimados + suelo exacto 8192 (medido: por debajo de 8k el handoff no compensa).
+- Tests: gateway con backends simulados (recuento exacto, pin de slot, metricas, kv_miss, streaming) y e2e del coordinador con dos llama-server falsos + tres soflink reales (prefill, decode, gateway) en loopback.
+
 ## v202609061625 (2026-09-06)
 Mejoras desde la version anterior:
 

@@ -142,7 +142,9 @@ func (s *Server) controlLoad(w http.ResponseWriter, r *http.Request) {
 		Args []string `json:"args"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	res := launchLlama(body.Exe, body.Args)
+	// this node's own kv_state_dir (the coordinator can't know a remote's), so the
+	// engine it launches can save/restore slot states for the KV handoff.
+	res := launchLlama(body.Exe, s.withSlotSavePath(body.Args))
 	code := http.StatusOK
 	if res["ok"] != true {
 		code = http.StatusBadRequest

@@ -2,17 +2,22 @@ package gateway
 
 // Gateway — composes policy + admission + status + request-log behind one
 // authenticated surface. Every dependency (auth verify, backend call, prefill
-// call, handoff driver, status provider) is injected, so routing/policy logic
-// is fully testable without a network or a live engine.
+// call, handoff driver, token counter, status provider) is injected, so the
+// routing/policy logic is fully testable without a network or a live engine.
 //
 // The engine's real speedup lever (speculative n_max), the prefix-cache reuse
 // (slot affinity) and the disaggregated admission (prefill node + KV handoff)
 // are applied HERE as policy, so they persist across engine restarts.
+//
+// A request is handled in two halves so the streaming path can share them:
+// Prepare (auth, admission, prefill + handoff, body/headers to send) and
+// Finish (engine timings → request record). Chat is Prepare + backend + Finish.
 
 import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 )
 
 var ErrUnauthorized = errors.New("unauthorized")
@@ -26,37 +31,52 @@ type Verify func(h Headers) bool
 // BackendCall proxies a request to the decode engine.
 type BackendCall func(body Body, extra Headers) (Body, error)
 
-// PrefillCall sends the request to the dedicated prefill node; it must return
-// a body containing "handoff_id" once the KV is ready to ship.
+// PrefillCall runs the prompt on the dedicated prefill node and saves its KV
+// state; it must return a body containing "handoff_id" (the state's name) once
+// the state is ready to ship. Any numeric field it returns (prefill_ms,
+// save_ms, tokens, state_bytes, ...) is copied into the request record.
 type PrefillCall func(body Body, extra Headers) (Body, error)
 
-// Handoff drives the transport-lane KV scatter (prefill topology -> decode
-// layer map) and returns true once the decode pipeline holds the sequence.
-// Owned by the transport module; the gateway only sequences it.
-type Handoff func(handoffID string, slot string) bool
+// Handoff moves the saved state to the decode node and restores it into the
+// decode slot; it returns its metrics (fetch_ms, restore_ms, n_restored) or an
+// error. Owned by the transport module; the gateway only sequences it.
+type Handoff func(handoffID string, slot string) (Body, error)
+
+// CountTokens returns the EXACT prompt token count of a chat body as the
+// engine will see it (chat template applied). Optional: when set, a request
+// the estimate admitted to prefill is re-checked against the exact floor.
+type CountTokens func(body Body) (int, error)
 
 // StatusProvider returns the /api/status document.
 type StatusProvider func() Body
 
 type Gateway struct {
-	verify  Verify
-	backend BackendCall
-	status  StatusProvider
-	prefill PrefillCall // optional; nil = no disaggregation
-	handoff Handoff     // optional; nil = no disaggregation
-	ring    *Ring
-	alpha   *AlphaEma
-	log     *RequestLog
-	known   *KnownPrefixes
+	verify    Verify
+	backend   BackendCall
+	status    StatusProvider
+	prefill   PrefillCall // optional; nil = no disaggregation
+	handoff   Handoff     // optional; nil = no disaggregation
+	count     CountTokens // optional; nil = estimate only
+	threshold int         // admission threshold on the ESTIMATE
+	exactMin  int         // floor on the EXACT count (when count != nil)
+	ring      *Ring
+	alpha     *AlphaEma
+	log       *RequestLog
+	known     *KnownPrefixes
 }
 
-// Options for New. NSlots defaults to 4; KeepContent defaults to false.
+// Options for New. NSlots defaults to 4; KeepContent defaults to false;
+// Threshold defaults to PrefillThresholdTokens (estimated tokens) and
+// ExactMinTokens to PrefillExactMinTokens (exact tokens, only with CountTokens).
 type Options struct {
 	Verify         Verify
 	BackendCall    BackendCall
 	StatusProvider StatusProvider
 	PrefillCall    PrefillCall
 	Handoff        Handoff
+	CountTokens    CountTokens
+	Threshold      int
+	ExactMinTokens int
 	NSlots         int
 	KeepContent    bool
 }
@@ -81,18 +101,32 @@ func New(o Options) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
+	th := o.Threshold
+	if th <= 0 {
+		th = PrefillThresholdTokens
+	}
+	em := o.ExactMinTokens
+	if em <= 0 {
+		em = PrefillExactMinTokens
+	}
 	return &Gateway{
-		verify:  o.Verify,
-		backend: o.BackendCall,
-		status:  o.StatusProvider,
-		prefill: o.PrefillCall,
-		handoff: o.Handoff,
-		ring:    NewRing(members, 64),
-		alpha:   alpha,
-		log:     NewRequestLog(500, o.KeepContent),
-		known:   known,
+		verify:    o.Verify,
+		backend:   o.BackendCall,
+		status:    o.StatusProvider,
+		prefill:   o.PrefillCall,
+		handoff:   o.Handoff,
+		count:     o.CountTokens,
+		threshold: th,
+		exactMin:  em,
+		ring:      NewRing(members, 64),
+		alpha:     alpha,
+		log:       NewRequestLog(500, o.KeepContent),
+		known:     known,
 	}, nil
 }
+
+// Disaggregated reports whether a prefill node + handoff driver are wired.
+func (g *Gateway) Disaggregated() bool { return g.prefill != nil && g.handoff != nil }
 
 func (g *Gateway) auth(h Headers) error {
 	if !g.verify(h) {
@@ -117,12 +151,48 @@ func (g *Gateway) Requests(h Headers, n int) ([]Record, error) {
 	return g.log.Tail(n), nil
 }
 
+// Plan is a prepared request: the body and headers to send to the decode
+// engine (policy applied: n_max, slot, and — after a successful handoff — the
+// engine-visible id_slot + cache_prompt so the restored KV is reused), plus
+// the record fields Finish completes with the engine's timings.
+type Plan struct {
+	Body    Body
+	Headers Headers
+
+	fields     Record
+	pkey       string
+	prefixToks int
+	alphaKey   string
+	viaPrefill bool
+	start      time.Time
+}
+
 // Chat handles POST /api/chat: apply policy, proxy, log. Returns the backend
 // response verbatim.
 func (g *Gateway) Chat(h Headers, body Body) (Body, error) {
+	p, err := g.Prepare(h, body)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := g.backend(p.Body, p.Headers)
+	if err != nil {
+		p.fields["error"] = err.Error()
+		g.finishRecord(p)
+		return nil, err
+	}
+	g.Finish(p, resp)
+	return resp, nil
+}
+
+// Prepare runs everything BEFORE the decode call: auth, slot affinity,
+// admission, and — for a large new prompt with a prefill node wired — the
+// prefill + KV handoff. Any prefill/handoff problem degrades to decode-direct
+// (fail-soft): the request never fails because of the disaggregation.
+func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	if err := g.auth(h); err != nil {
 		return nil, err
 	}
+	start := time.Now()
 
 	tenant := h["x-sofmat-tenant"]
 	if tenant == "" {
@@ -143,7 +213,8 @@ func (g *Gateway) Chat(h Headers, body Body) (Body, error) {
 		PrefixTokens:     prefixToks,
 		TailTokens:       tailToks,
 		HotPrefixTokens:  g.known.HotTokens(pkey),
-		PrefillAvailable: g.prefill != nil && g.handoff != nil,
+		Threshold:        g.threshold,
+		PrefillAvailable: g.Disaggregated(),
 	})
 
 	// next_wave: speculative depth from live alpha (per tenant) or domain.
@@ -164,57 +235,137 @@ func (g *Gateway) Chat(h Headers, body Body) (Body, error) {
 		merged[SpeculativeNMaxKey] = nMax
 	}
 
+	fields := Record{
+		"route":          "/api/chat",
+		"tenant":         tenant,
+		"slot":           slot,
+		"n_max":          merged[SpeculativeNMaxKey],
+		"admission":      decision.Reason,
+		"est_new_tokens": decision.EstNewTokens,
+	}
 	decodeHeaders := Headers{"x-sofmat-slot": slot}
 	admittedVia := decision.Route
+	viaPrefill := false
 	if decision.Route == "prefill" {
 		// fail-soft: any prefill/handoff problem degrades to decode-direct.
 		admittedVia = "decode-fallback"
-		if pre, err := g.callPrefillSafe(merged, Headers{"x-sofmat-slot": slot}); err == nil {
-			if hid, _ := pre["handoff_id"].(string); hid != "" && g.driveHandoffSafe(hid, slot) {
-				decodeHeaders["x-sofmat-kv-handoff"] = hid
-				admittedVia = "prefill"
+		goPrefill := true
+		if g.count != nil {
+			// exact recount (chat template applied) — the estimate only opened the door.
+			n, err := g.countSafe(merged)
+			switch {
+			case err != nil:
+				fields["prefill_error"] = "count: " + err.Error()
+				goPrefill = false
+			case n < g.exactMin:
+				fields["tokens"] = n
+				fields["admission"] = "exact-below-floor"
+				admittedVia = "decode"
+				goPrefill = false
+			default:
+				fields["tokens"] = n
+			}
+		}
+		if goPrefill {
+			t0 := time.Now()
+			pre, err := g.callPrefillSafe(merged, Headers{"x-sofmat-slot": slot})
+			if err != nil {
+				fields["prefill_error"] = err.Error()
+			} else {
+				copyMetrics(fields, pre)
+				hid, _ := pre["handoff_id"].(string)
+				if hid == "" {
+					fields["prefill_error"] = "no handoff_id"
+				} else if hm, err := g.driveHandoffSafe(hid, slot); err != nil {
+					fields["handoff_error"] = err.Error()
+				} else {
+					copyMetrics(fields, hm)
+					fields["handoff_id"] = hid
+					fields["handoff_ms"] = msSince(t0)
+					decodeHeaders["x-sofmat-kv-handoff"] = hid
+					// engine-visible: continue in the slot that now holds the restored KV.
+					if si, err := strconv.Atoi(slot); err == nil {
+						merged["id_slot"] = si
+					}
+					merged["cache_prompt"] = true
+					admittedVia = "prefill"
+					viaPrefill = true
+				}
 			}
 		}
 	}
+	fields["admitted_via"] = admittedVia
 
-	resp, err := g.backend(merged, decodeHeaders)
-	if err != nil {
-		return nil, err
-	}
+	return &Plan{
+		Body:       merged,
+		Headers:    decodeHeaders,
+		fields:     fields,
+		pkey:       pkey,
+		prefixToks: prefixToks,
+		alphaKey:   alphaKey,
+		viaPrefill: viaPrefill,
+		start:      start,
+	}, nil
+}
+
+// Finish runs everything AFTER the decode call: prefix bookkeeping, the alpha
+// EMA feed and the request record (engine timings included). resp may carry
+// only {"timings": ...} — the streaming path reconstructs that from the last
+// SSE chunk.
+func (g *Gateway) Finish(p *Plan, resp Body) {
 	// the slot now holds this prefix's KV — record it for later admissions.
-	g.known.Record(pkey, prefixToks)
+	g.known.Record(p.pkey, p.prefixToks)
 
 	// feed the alpha EMA from the engine's acceptance counters, if present.
 	dn, dnOK := timingInt(resp, "draft_n")
 	da, daOK := timingInt(resp, "draft_n_accepted")
 	if dnOK && daOK {
-		g.alpha.Update(alphaKey, dn, da)
+		g.alpha.Update(p.alphaKey, dn, da)
 	}
-
-	fields := Record{
-		"route":            "/api/chat",
-		"tenant":           tenant,
-		"slot":             slot,
-		"n_max":            merged[SpeculativeNMaxKey],
-		"draft_n":          nil,
-		"draft_n_accepted": nil,
-		"admission":        decision.Reason,
-		"admitted_via":     admittedVia,
-		"est_new_tokens":   decision.EstNewTokens,
-	}
-	if alphaEma != nil {
-		fields["alpha_ema"] = *alphaEma
+	if alphaEma := g.alpha.Get(p.alphaKey); alphaEma != nil {
+		p.fields["alpha_ema"] = *alphaEma
 	} else {
-		fields["alpha_ema"] = nil
+		p.fields["alpha_ema"] = nil
 	}
+	p.fields["draft_n"] = nil
+	p.fields["draft_n_accepted"] = nil
 	if dnOK {
-		fields["draft_n"] = dn
+		p.fields["draft_n"] = dn
 	}
 	if daOK {
-		fields["draft_n_accepted"] = da
+		p.fields["draft_n_accepted"] = da
 	}
-	g.log.RecordEntry(fields, nil)
-	return resp, nil
+	// engine timings: prompt_n is the proof of the handoff (1 = the restored KV
+	// was reused; the whole prompt = the engine re-processed it → kv_miss).
+	if pn, ok := timingInt(resp, "prompt_n"); ok {
+		p.fields["prompt_n"] = pn
+		if p.viaPrefill {
+			p.fields["kv_miss"] = pn > kvMissPromptTokens
+		}
+	}
+	if cn, ok := timingInt(resp, "cache_n"); ok {
+		p.fields["cache_n"] = cn
+	}
+	if n, ok := timingInt(resp, "predicted_n"); ok {
+		p.fields["predicted_n"] = n
+	}
+	if v, ok := timingFloat(resp, "predicted_per_second"); ok {
+		p.fields["tg_tokps"] = v
+	}
+	if v, ok := timingFloat(resp, "prompt_ms"); ok {
+		p.fields["prompt_ms"] = v
+	}
+	g.finishRecord(p)
+}
+
+// kvMissPromptTokens: after a handoff the decode should process ~1 token (the
+// held-back last one); anything past this many means the restored KV was not
+// reused and the prompt was re-processed.
+const kvMissPromptTokens = 64
+
+func (g *Gateway) finishRecord(p *Plan) {
+	p.fields["total_ms"] = msSince(p.start)
+	g.log.RecordEntry(p.fields, nil)
 }
 
 // callPrefillSafe isolates the prefill call: an error OR a panic in the
@@ -232,13 +383,37 @@ func (g *Gateway) callPrefillSafe(body Body, extra Headers) (out Body, err error
 	return out, err
 }
 
-func (g *Gateway) driveHandoffSafe(hid, slot string) (ok bool) {
+func (g *Gateway) driveHandoffSafe(hid, slot string) (out Body, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			ok = false
+			out, err = nil, fmt.Errorf("handoff panic: %v", r)
 		}
 	}()
 	return g.handoff(hid, slot)
+}
+
+func (g *Gateway) countSafe(body Body) (n int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			n, err = 0, fmt.Errorf("count panic: %v", r)
+		}
+	}()
+	return g.count(body)
+}
+
+// copyMetrics folds the numeric/bool fields a driver returned into the record
+// (strings other than handoff_id are dropped: metrics only, never content).
+func copyMetrics(dst Record, src Body) {
+	for k, v := range src {
+		switch v.(type) {
+		case int, int64, float64, bool:
+			dst[k] = v
+		}
+	}
+}
+
+func msSince(t time.Time) float64 {
+	return float64(time.Since(t).Microseconds()) / 1000
 }
 
 // ── body helpers ────────────────────────────────────────────────────────────
@@ -307,6 +482,21 @@ func timingInt(resp Body, key string) (int, bool) {
 		return v, true
 	case float64:
 		return int(v), true
+	default:
+		return 0, false
+	}
+}
+
+func timingFloat(resp Body, key string) (float64, bool) {
+	tm, _ := resp["timings"].(map[string]any)
+	if tm == nil {
+		return 0, false
+	}
+	switch v := tm[key].(type) {
+	case int:
+		return float64(v), true
+	case float64:
+		return v, true
 	default:
 		return 0, false
 	}

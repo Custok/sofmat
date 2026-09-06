@@ -74,6 +74,15 @@ type Config struct {
 	// when no measured value exists in the profiles file.
 	BoundaryOverheadMS float64 `json:"boundary_overhead_ms"`
 
+	// KVStateDir is the directory THIS node's llama-server saves slot states in
+	// (its --slot-save-path). Opt-in per node in config.local.json: when set, the
+	// daemon serves those files to peers (GET /kv/<name>), pulls a peer's state into
+	// the same dir (POST /control/kv-fetch) so a `slots/<id>?action=restore` on the
+	// local engine finds it, and adds --slot-save-path to every llama-server it
+	// launches. This is the transport of the disaggregated prefill→decode handoff
+	// (docs/design/kv-handoff-desagregado.md, F1). Empty = feature off on this node.
+	KVStateDir string `json:"kv_state_dir"`
+
 	// GitHubToken authenticates the auto-updater's GitHub API calls. The public
 	// API is 60 req/h per IP (a shared LAN egress exhausts it fast); with a token
 	// it's 5000 req/h, so the fleet never loses its update channel. Lives ONLY in

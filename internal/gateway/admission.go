@@ -16,10 +16,18 @@ import (
 	"unicode/utf8"
 )
 
-// PrefillThresholdTokens is the default admission threshold in estimated NEW
-// prompt tokens. Conservative v1 floor; the interference bench moves it onto
-// a measured curve.
-const PrefillThresholdTokens = 2048
+// PrefillThresholdTokens is the default admission threshold in ESTIMATED new
+// prompt tokens (chars/4, biased low). Measured on the F0 spike (2026-09-06,
+// 27B Q6_K, two nodes over 10GbE): the handoff (save + fetch + restore ≈ 0.35 s
+// at 8k) beats re-processing the prompt on the decode from ~8k tokens (3.1 s
+// saved at 8k, 14 s at 32k, 64 s at 100k). The estimate opens the door at 75 %
+// of that so the exact recount (PrefillExactMinTokens) makes the final call.
+const PrefillThresholdTokens = 6144
+
+// PrefillExactMinTokens is the floor applied to the EXACT token count (chat
+// template applied, counted by the prefill engine) once the estimate admitted
+// a request to the prefill route: below it, decode-direct is cheaper.
+const PrefillExactMinTokens = 8192
 
 // charsPerToken is the estimator fallback (mixed ES/EN measured ~3.6-4.2
 // chars/token; 4 biases low, preferring decode-direct on ties — the cheaper

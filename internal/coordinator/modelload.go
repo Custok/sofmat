@@ -440,7 +440,7 @@ func (s *Server) modelsLoad(w http.ResponseWriter, r *http.Request) {
 	// endpoint; never touches the coordinator's decode/HUD.
 	var out map[string]any
 	if local {
-		out = launchLlama(exe, args)
+		out = launchLlama(exe, s.withSlotSavePath(args))
 	} else {
 		body, _ := json.Marshal(spec)
 		resp, err := s.client.Post(agent+"/control/load", "application/json", bytes.NewReader(body))

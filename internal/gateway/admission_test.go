@@ -57,8 +57,10 @@ func TestKnownPrefixes(t *testing.T) {
 }
 
 func TestClassifyAdmission(t *testing.T) {
+	// the literal sizes below assume the ORIGINAL 2048 floor; pin it so the test
+	// keeps its meaning now that the measured default is PrefillThresholdTokens.
 	d := ClassifyAdmission(AdmissionInput{PrefixTokens: 3000, TailTokens: 500,
-		PrefillAvailable: true})
+		Threshold: 2048, PrefillAvailable: true})
 	if d.Route != "prefill" || d.Reason != "large-new-prefill" || d.EstNewTokens != 3500 {
 		t.Fatalf("large: %+v", d)
 	}
@@ -73,7 +75,7 @@ func TestClassifyAdmission(t *testing.T) {
 		t.Fatalf("hot: %+v", d)
 	}
 	d = ClassifyAdmission(AdmissionInput{PrefixTokens: 5000, TailTokens: 4000,
-		HotPrefixTokens: 5000, PrefillAvailable: true})
+		HotPrefixTokens: 5000, Threshold: 2048, PrefillAvailable: true})
 	if d.Route != "prefill" {
 		t.Fatalf("hot prefix + huge tail must still reroute: %+v", d)
 	}
@@ -89,7 +91,7 @@ func TestClassifyAdmission(t *testing.T) {
 	}
 	// partial hot prefix counts only the delta: 1000 new + 500 tail < 2048
 	d = ClassifyAdmission(AdmissionInput{PrefixTokens: 4000, TailTokens: 500,
-		HotPrefixTokens: 3000, PrefillAvailable: true})
+		HotPrefixTokens: 3000, Threshold: 2048, PrefillAvailable: true})
 	if d.Route != "decode" || d.EstNewTokens != 1500 {
 		t.Fatalf("partial hot: %+v", d)
 	}

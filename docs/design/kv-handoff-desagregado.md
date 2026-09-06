@@ -81,6 +81,44 @@ El payload cacheado es el mismo `state_seq_get_data` **keyed por hash del prefij
 - **Ola especulativa** (decode): el pipeline de decode sigue corriendo su `--spec-type draft-mtp`;
   el handoff sólo cambia de DÓNDE viene el KV inicial, no cómo decodifica.
 
+## F1 — IMPLEMENTADO (2026-09-06): handoff por estado de slot, sin scatter
+La primera versión real NO usa el scatter por-capa: el decode corre el modelo **completo en un
+nodo** (una topología por rol, misma cuantización en los dos), así que el payload es el
+**estado del slot** que el propio server ya sabe guardar y restaurar (`--slot-save-path`,
+`POST /slots/{id}?action=save|restore|erase`). Lo que aporta sofmat es la **secuencia** entre
+dos motores en dos máquinas y el transporte del fichero, todo en el gateway (fail-soft).
+
+**Receta medida (spike F0, 27B Q6_K, 10GbE):**
+1. Gateway: estimación ≥ `PrefillThresholdTokens` (6144) → `apply-template` + `tokenize` en el
+   prefill (misma plantilla que el decode: mismo gguf + `--jinja`; ids verificados idénticos
+   entre nodos) → recuento exacto ≥ `PrefillExactMinTokens` (8192) o decode directo.
+2. Prefill: `/completion {prompt: tokens[:-1], n_predict: 0, id_slot: 0, cache_prompt: true}`
+   → `slots/0?action=save {filename}` → `erase`. Se retiene el ÚLTIMO token porque la cache
+   recurrente del modelo híbrido no se puede truncar: el decode debe recibir el prompt idéntico
+   y procesar solo ese token. Prefills serializados (presupuesto KV unificado entre slots).
+3. Transporte: el soflink del nodo **decode** baja el fichero directo del soflink del nodo
+   **prefill** (`POST /control/kv-fetch {url, name}` ← `GET /kv/<name>`; un salto, sin pasar por
+   el gateway) a su propio `kv_state_dir` (= `--slot-save-path` del decode).
+4. Decode: `slots/<slot>?action=restore {filename}` y la petición original (`/v1/chat/completions`,
+   JSON o SSE) con `id_slot: <slot>` + `cache_prompt: true` → `timings.prompt_n = 1`,
+   `cache_n = N-1`. Fichero borrado en ambos nodos.
+5. Registro por petición (`GET /api/requests`): vía (`prefill` / `decode` / `decode-fallback` con
+   causa), tokens, `prefill_ms`, `save_ms`, `fetch_ms`, `restore_ms`, `handoff_ms`, `prompt_n`,
+   `cache_n`, `kv_miss` (prompt_n > 64 tras un handoff = el motor reprocesó).
+
+| prompt | estado | save | GET (10GbE) | restore | handoff total | reprocesar en decode |
+|---|---|---|---|---|---|---|
+| 8k | 290 MiB | 0,19 s | 0,27 s | 67 ms | **0,35 s** | 3,5 s |
+| 32k | 711 MiB | 0,48 s | 0,67 s | 139 ms | **0,9 s** | 14,7 s |
+| 100k | 1 815 MiB | 1,18 s | 1,71 s | 418 ms | **2,2 s** | ~66 s |
+
+Estado ≈ 19 KB/token + 150 MiB. Umbral: desde 8k el ahorro (3,1 s) supera el coste; por debajo
+no compensa. El scatter por-capa de arriba sigue siendo el camino cuando el decode vuelva a ser
+pipeline multi-nodo (topologías distintas por rol).
+
+Código: `internal/gateway/gateway.go` (Prepare/Finish), `internal/coordinator/kvpipe.go`
+(drivers), `internal/coordinator/kvstate.go` (`/kv/*`, `/control/kv-fetch`, `--slot-save-path`).
+
 ## Non-goals / abierto
 - No construir aún: **spec de diseño**; se implementa cuando la carga real (multi-tenant) haga
   frecuente el interference ×8.5.

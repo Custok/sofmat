@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,18 +37,60 @@ type Server struct {
 // NewServer wires the config's instances into a gateway.
 func NewServer(cfg *config.Config) (*Server, error) {
 	bc := backendConfigFrom(cfg)
-	gw, err := gateway.New(gateway.Options{
+	opts := gateway.Options{
 		Verify:         func(gateway.Headers) bool { return true }, // TODO: real auth (internal/auth)
 		BackendCall:    httpBackend(bc.DecodeEntryURL),
 		StatusProvider: func() gateway.Body { return gateway.Body{"status": "ok"} },
-		// PrefillCall + Handoff wire in when the engine KV binding
-		// (state_seq_get/set) lands; until then decode-only (fail-soft).
-		NSlots: 4,
-	})
+		NSlots:         4,
+	}
+	// Disaggregated prefill→decode (F1): wired only when both roles are configured
+	// AND both main nodes expose a soflink agent (the KV state travels between the
+	// two agents). Otherwise the gateway stays decode-only (fail-soft).
+	if kp := kvPipeFrom(cfg, bc); kp != nil {
+		opts.PrefillCall = kp.Prefill
+		opts.Handoff = kp.Handoff
+		opts.CountTokens = kp.Count
+		log.Printf("gateway: KV handoff prefill→decode ACTIVO (prefill %s via %s → decode %s via %s; umbral exacto %d tokens)",
+			kp.prefillURL, kp.prefillCtl, kp.decodeURL, kp.decodeCtl, gateway.PrefillExactMinTokens)
+	} else {
+		log.Printf("gateway: decode-only (sin prefill configurado o sin agent soflink en los nodos main)")
+	}
+	gw, err := gateway.New(opts)
 	if err != nil {
 		return nil, err
 	}
 	return &Server{cfg: cfg, gw: gw, bc: bc, client: &http.Client{Timeout: 600 * time.Second}}, nil
+}
+
+// agentOfNode returns the soflink agent base of a configured node ("" if none).
+func agentOfNode(cfg *config.Config, id string) string {
+	for _, n := range cfg.Nodes {
+		if n.ID == id {
+			return strings.TrimRight(n.Agent, "/")
+		}
+	}
+	return ""
+}
+
+// kvPipeFrom builds the handoff drivers from the config: the decode and prefill
+// engines plus the soflink agents of their main nodes. nil = not disaggregated.
+func kvPipeFrom(cfg *config.Config, bc gateway.BackendConfig) *kvPipe {
+	if bc.PrefillURL == "" || bc.DecodeEntryURL == "" {
+		return nil
+	}
+	var preCtl, decCtl string
+	for _, in := range cfg.Instances {
+		switch in.Key {
+		case "decode":
+			decCtl = agentOfNode(cfg, in.Main)
+		case "prefill":
+			preCtl = agentOfNode(cfg, in.Main)
+		}
+	}
+	if preCtl == "" || decCtl == "" {
+		return nil
+	}
+	return newKVPipe(bc.PrefillURL, bc.DecodeEntryURL, preCtl, decCtl)
 }
 
 // backendConfigFrom resolves decode/prefill endpoints from the config instances.
@@ -164,6 +209,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/control/load", s.controlLoad)
 	mux.HandleFunc("/control/eject", s.controlEject)
 	mux.HandleFunc("/control/kill", s.controlKill)
+	// KV state exchange for the prefill→decode handoff (kvstate.go): a node serves
+	// the slot states its engine saved and pulls a peer's into its own dir.
+	mux.HandleFunc("/control/kv-fetch", s.controlKVFetch)
+	mux.HandleFunc("/kv/", s.kvFile)
+	// Live request log (routing decisions + engine timings per request).
+	mux.HandleFunc("/api/requests", s.panelRequests)
 	mux.HandleFunc("/", s.panelPage)                // dashboard home (catch-all last)
 	return mux
 }
@@ -247,18 +298,26 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("chat: from=%s stream=%v tools=%v bytes=%d", r.RemoteAddr,
 		streamRequested(body), body["tools"] != nil, len(raw))
-	// Streaming (SSE) can't go through gateway.Chat — it json.Unmarshals the
-	// whole reply, which chokes on the upstream's "data: {...}" event stream.
-	// Forward the raw request to the decode backend and flush chunks straight
-	// back. Gateway policy (slot/n_max) mutation on the stream path is v2; the
-	// HUD needs plain passthrough today.
-	if streamRequested(body) {
-		s.chatStream(w, r, raw)
-		return
-	}
 	h := gateway.Headers{}
 	for k := range r.Header {
 		h[k] = r.Header.Get(k)
+	}
+	// Streaming (SSE) can't go through gateway.Chat — it json.Unmarshals the
+	// whole reply, which chokes on the upstream's "data: {...}" event stream.
+	// It shares the gateway's two halves instead: Prepare (admission, prefill +
+	// KV handoff, slot pin) → stream the decode → Finish from the last chunk.
+	if streamRequested(body) {
+		plan, err := s.gw.Prepare(h, body)
+		if err != nil {
+			code := http.StatusBadGateway
+			if errors.Is(err, gateway.ErrUnauthorized) {
+				code = http.StatusUnauthorized
+			}
+			writeJSON(w, code, gateway.Body{"error": err.Error()})
+			return
+		}
+		s.chatStream(w, r, plan)
+		return
 	}
 	out, err := s.gw.Chat(h, body)
 	if err != nil {
@@ -268,16 +327,34 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// panelRequests serves the gateway's request log (newest last): per request the
+// admission decision, where it ran (decode / prefill / decode-fallback), the
+// handoff metrics and the engine timings (prompt_n = 1 proves the handoff).
+func (s *Server) panelRequests(w http.ResponseWriter, r *http.Request) {
+	n := 50
+	if v, err := strconv.Atoi(r.URL.Query().Get("n")); err == nil && v > 0 && v <= 500 {
+		n = v
+	}
+	rows, err := s.gw.Requests(gateway.Headers{}, n)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, gateway.Body{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, gateway.Body{"requests": rows, "disaggregated": s.gw.Disaggregated()})
+}
+
 // streamRequested reports whether the body asked for an SSE stream.
 func streamRequested(body gateway.Body) bool {
 	b, _ := body["stream"].(bool)
 	return b
 }
 
-// chatStream proxies a streaming chat request to the decode backend and copies
-// the SSE response to the client chunk-by-chunk (flushed), so clients that want
-// token streaming (e.g. a HUD) get it through the coordinator, not only direct.
-func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, raw []byte) {
+// chatStream proxies a PREPARED streaming chat request to the decode backend
+// and copies the SSE response to the client chunk-by-chunk (flushed), so clients
+// that want token streaming (e.g. a HUD) get it through the coordinator with the
+// same policy as the JSON path. The tail of the stream is kept to Finish the
+// request record from the engine's final-chunk timings.
+func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gateway.Plan) {
 	if s.bc.DecodeEntryURL == "" {
 		writeJSON(w, http.StatusServiceUnavailable, gateway.Body{"error": "no decode backend"})
 		return
@@ -285,6 +362,11 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, raw []byte) 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, gateway.Body{"error": "streaming unsupported by server"})
+		return
+	}
+	raw, err := json.Marshal(plan.Body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, gateway.Body{"error": err.Error()})
 		return
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
@@ -295,6 +377,9 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, raw []byte) 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	for k, v := range plan.Headers {
+		req.Header.Set(k, v)
+	}
 	if a := r.Header.Get("Authorization"); a != "" {
 		req.Header.Set("Authorization", a)
 	}
@@ -313,6 +398,15 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, raw []byte) 
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(resp.StatusCode)
+	const tailKeep = 16 << 10
+	var tail []byte
+	defer func() {
+		fin := gateway.Body{}
+		if tm := sseTimings(tail); tm != nil {
+			fin["timings"] = tm
+		}
+		s.gw.Finish(plan, fin)
+	}()
 	buf := make([]byte, 8192)
 	for {
 		n, rerr := resp.Body.Read(buf)
@@ -321,6 +415,10 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, raw []byte) 
 				return
 			}
 			flusher.Flush()
+			tail = append(tail, buf[:n]...)
+			if len(tail) > tailKeep {
+				tail = tail[len(tail)-tailKeep:]
+			}
 		}
 		if rerr != nil {
 			return
