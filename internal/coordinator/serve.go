@@ -50,12 +50,13 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		opts.PrefillCall = kp.Prefill
 		opts.Handoff = kp.Handoff
 		opts.CountTokens = kp.Count
-		mode := "busy"
-		if cfg.KVHandoff == "always" {
-			mode = "always"
-		} else {
-			opts.DecodeBusy = kp.DecodeBusy
+		opts.Tokens = kp.Tokens
+		opts.DecodeBusy = kp.DecodeBusy
+		mode := cfg.KVHandoff
+		if mode == "" {
+			mode = gateway.ModeAuto
 		}
+		opts.Mode = mode
 		log.Printf("gateway: KV handoff prefill→decode ACTIVO modo %s (prefill %s via %s → decode %s via %s; umbral exacto %d tokens)",
 			mode, kp.prefillURL, kp.prefillCtl, kp.decodeURL, kp.decodeCtl, gateway.PrefillExactMinTokens)
 	} else {

@@ -79,10 +79,14 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		content, _ := b["content"].(string)
-		n := len(content) / 4 // the fake tokenizer: 4 chars per token
+		n := len(content) / 4 // the fake tokenizer: 4 chars per token, id derived from the chars
 		ids := make([]int, n)
 		for i := range ids {
-			ids[i] = 1000 + i
+			h := 0
+			for _, ch := range content[4*i : 4*i+4] {
+				h = h*31 + int(ch)
+			}
+			ids[i] = 1000 + h%50000
 		}
 		writeTestJSON(w, 200, map[string]any{"tokens": ids})
 	})
@@ -323,7 +327,7 @@ func jsonNum(f float64) string {
 // Default policy ("busy"): an idle decode takes the direct path even for a
 // long prompt; "always" offloads regardless of the decode's state.
 func TestIdleDecodeStaysDirectUnlessAlways(t *testing.T) {
-	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	r := newRig(t, func(e *fakeEngine) string { return e.dir }, func(c *config.Config) { c.KVHandoff = "busy" })
 	r.decode.mu.Lock()
 	r.decode.busy = false
 	r.decode.mu.Unlock()
@@ -400,6 +404,62 @@ func TestDraftSidecarTravelsWhenPresent(t *testing.T) {
 	})
 	if rec := lastRequestRecord(t, plain.gateway.URL); rec["admitted_via"] != "prefill" || rec["dft"] != false {
 		t.Fatalf("no sidecar must still hand off, recorded as dft=false: %v", rec)
+	}
+}
+
+// Default mode "auto" on an idle decode: a cold 11k prompt is cheaper direct
+// (decode-cheaper); a cold ~50k prompt is cheaper through the prefill node
+// (its rate holds at long context); and the next turn of the same
+// conversation only counts its NEW tokens (cache-hot → direct).
+func TestAutoModeCostAndCacheAware(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	r.decode.mu.Lock()
+	r.decode.busy = false
+	r.decode.mu.Unlock()
+
+	postChat(t, r.gateway.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": longUser}}, // ~11k fake tokens
+	})
+	if rec := lastRequestRecord(t, r.gateway.URL); rec["admitted_via"] != "decode" || rec["admission"] != "decode-cheaper" {
+		t.Fatalf("cold 11k on an idle decode must go direct as cheaper: %v", rec)
+	}
+
+	// a DIFFERENT text, so it shares no prefix with the previous prompt (cold)
+	huge := strings.Repeat("Informe trimestral de la cooperativa: cifras, incidencias y planes. ", 3000) // ~51k fake tokens
+	postChat(t, r.gateway.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": huge}},
+	})
+	rec := lastRequestRecord(t, r.gateway.URL)
+	if rec["admitted_via"] != "prefill" || rec["prompt_n"] != 1.0 {
+		t.Fatalf("cold 51k on an idle decode must go through the prefill (cheaper end-to-end): %v", rec)
+	}
+	r.prefill.mu.Lock()
+	n := len(r.prefill.completions)
+	r.prefill.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("prefill must have run once: %d", n)
+	}
+
+	// next turn: same conversation + 2k new tokens → only the delta is new work
+	postChat(t, r.gateway.URL, map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": huge},
+			map[string]any{"role": "assistant", "content": "resumen"},
+			map[string]any{"role": "user", "content": strings.Repeat("y ahora amplia esto. ", 400)},
+		},
+	})
+	rec = lastRequestRecord(t, r.gateway.URL)
+	if rec["admitted_via"] != "decode" || rec["admission"] != "cache-hot" {
+		t.Fatalf("the next turn must ride the decode's cache: %v", rec)
+	}
+	if nt, _ := rec["new_tokens"].(float64); nt <= 0 || nt >= 8192 {
+		t.Fatalf("new_tokens must be the delta only: %v", rec["new_tokens"])
+	}
+	r.prefill.mu.Lock()
+	n = len(r.prefill.completions)
+	r.prefill.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("no second prefill for a cache-hot turn: %d", n)
 	}
 }
 

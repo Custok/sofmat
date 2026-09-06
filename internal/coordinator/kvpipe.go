@@ -244,6 +244,12 @@ func (k *kvPipe) pickIdleSlot(want string) string {
 	return want
 }
 
+// Tokens is the gateway's exact tokenizer (chat template applied): enables the
+// cache-aware estimate (new tokens = total − common prefix with the last turn).
+func (k *kvPipe) Tokens(body gateway.Body) ([]int, error) {
+	return k.tokens(body)
+}
+
 // Count is the gateway's exact token counter (chat template applied).
 func (k *kvPipe) Count(body gateway.Body) (int, error) {
 	ids, err := k.tokens(body)

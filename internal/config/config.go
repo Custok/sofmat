@@ -83,13 +83,17 @@ type Config struct {
 	// (docs/design/kv-handoff-desagregado.md, F1). Empty = feature off on this node.
 	KVStateDir string `json:"kv_state_dir"`
 
-	// KVHandoff picks WHEN the gateway offloads a long prompt to the prefill node
-	// (coordinator config): "busy" (default) = only while the decode engine is
-	// generating for other requests — the handoff exists to keep a long prefill
-	// from stalling live streams, and on an idle decode the direct path is faster
-	// (the saved slot state does not carry the engine's speculative draft
-	// context, so post-handoff generation runs slower); "always" = every admitted
-	// long prompt goes through the prefill node.
+	// KVHandoff picks WHEN the gateway offloads an admitted long prompt (≥ the
+	// exact floor of NEW tokens — what the decode does not already hold) to the
+	// prefill node (coordinator config):
+	//   "auto" (default): while the decode is generating for others → offload
+	//            (protect their streams); when idle → the measured cost model picks
+	//            the faster path (the decode only processes the new tokens, the
+	//            prefill node the whole prompt + the handoff; its rate holds up at
+	//            long context where the decode's falls, so from ~30k the prefill
+	//            path wins even for a lone user).
+	//   "busy":  offload only while the decode is busy.
+	//   "always": offload every admitted prompt.
 	KVHandoff string `json:"kv_handoff"`
 
 	// GitHubToken authenticates the auto-updater's GitHub API calls. The public

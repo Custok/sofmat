@@ -2,6 +2,12 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609062130 (2026-09-06)
+Admision consciente de la cache + modo `auto` (nuevo por defecto).
+
+- Visto con el HUD de David (agente que encadena vueltas de tools): con `always`, cada vuelta pasaba el prompt ENTERO por el prefill (34k → 18 s + traspaso) aunque el decode tenia 22k de ese prefijo calientes y lo habria continuado en ~1 s. Ahora el gateway guarda los ids del ultimo prompt por prefijo y cuenta como NUEVO solo lo que sigue al prefijo comun con la vuelta anterior (`new_tokens` en el registro; `cache-hot` cuando no llega al suelo de 8 192).
+- `kv_handoff: auto` (por defecto): decode ocupado → traspaso (protege los streams); decode libre → modelo de coste con las tasas MEDIDAS por tamano (EMA): `directo = nuevos / pp_decode` frente a `prefill = total / pp_prefill + traspaso`. Con los datos de hoy: 46k frio → prefill (27 s vs 33 s); 11,5k frio → directo; vuelta de agente 34k con 22k calientes → directo. `busy` y `always` siguen disponibles. Registro: `admission: decode-cheaper` cuando el modelo elige directo.
+
 ## v202609062100 (2026-09-06)
 Admision: el registro de prefijos calientes se alinea con la cache real del decode.
 

@@ -49,6 +49,26 @@ type Handoff func(handoffID string, slot string) (Body, error)
 // the estimate admitted to prefill is re-checked against the exact floor.
 type CountTokens func(body Body) (int, error)
 
+// Tokens returns the exact prompt token ids (chat template applied). When
+// set it supersedes CountTokens and enables the cache-aware estimate: the
+// tokens the decode already holds for this prefix (the common prefix with the
+// previous prompt routed under the same key) are not "new" work, so a multi-
+// turn agent conversation is not re-prefilled from scratch on every turn.
+type Tokens func(body Body) ([]int, error)
+
+// Modes for the disaggregation decision once a prompt is admitted (exact new
+// tokens ≥ the floor):
+//   ModeBusy:   offload only while the decode is generating for others.
+//   ModeAlways: offload every admitted prompt.
+//   ModeAuto:   offload while busy (protect the streams); when idle, offload
+//               only if the cost model says the prefill path is faster
+//               (total/pp_prefill + handoff < new/pp_decode, EMAs per size).
+const (
+	ModeBusy   = "busy"
+	ModeAlways = "always"
+	ModeAuto   = "auto"
+)
+
 // DecodeBusy reports whether the decode engine is generating for OTHER
 // requests right now. Optional: when set, the prefill route is taken only
 // while the decode is busy — the handoff exists to keep a long prefill from
@@ -67,13 +87,17 @@ type Gateway struct {
 	prefill   PrefillCall // optional; nil = no disaggregation
 	handoff   Handoff     // optional; nil = no disaggregation
 	count     CountTokens // optional; nil = estimate only
+	tokens    Tokens      // optional; supersedes count, enables the cache-aware estimate
 	busy      DecodeBusy  // optional; nil = handoff whenever admitted
+	mode      string      // ModeBusy / ModeAlways / ModeAuto
 	threshold int         // admission threshold on the ESTIMATE
 	exactMin  int         // floor on the EXACT count (when count != nil)
 	ring      *Ring
 	alpha     *AlphaEma
 	log       *RequestLog
 	known     *KnownPrefixes
+	last      *lastPrompts // per prefix key: ids of the last prompt routed (cache lower bound)
+	cost      *costModel   // measured pp / handoff EMAs for ModeAuto
 }
 
 // Options for New. NSlots defaults to 4; KeepContent defaults to false;
@@ -86,7 +110,9 @@ type Options struct {
 	PrefillCall    PrefillCall
 	Handoff        Handoff
 	CountTokens    CountTokens
+	Tokens         Tokens
 	DecodeBusy     DecodeBusy
+	Mode           string // ModeBusy (default when DecodeBusy is set), ModeAlways, ModeAuto
 	Threshold      int
 	ExactMinTokens int
 	NSlots         int
@@ -125,6 +151,20 @@ func New(o Options) (*Gateway, error) {
 	if em <= 0 {
 		em = PrefillExactMinTokens
 	}
+	mode := o.Mode
+	switch mode {
+	case ModeBusy, ModeAlways, ModeAuto:
+	case "":
+		mode = ModeAlways
+		if o.DecodeBusy != nil {
+			mode = ModeBusy
+		}
+	default:
+		return nil, fmt.Errorf("unknown kv handoff mode %q (busy|always|auto)", mode)
+	}
+	if (mode == ModeBusy || mode == ModeAuto) && o.DecodeBusy == nil {
+		return nil, fmt.Errorf("mode %s needs a DecodeBusy probe", mode)
+	}
 	return &Gateway{
 		verify:    o.Verify,
 		backend:   o.BackendCall,
@@ -132,15 +172,22 @@ func New(o Options) (*Gateway, error) {
 		prefill:   o.PrefillCall,
 		handoff:   o.Handoff,
 		count:     o.CountTokens,
+		tokens:    o.Tokens,
 		busy:      o.DecodeBusy,
+		mode:      mode,
 		threshold: th,
 		exactMin:  em,
 		ring:      NewRing(members, 64),
 		alpha:     alpha,
 		log:       NewRequestLog(500, o.KeepContent),
 		known:     known,
+		last:      newLastPrompts(n),
+		cost:      newCostModel(),
 	}, nil
 }
+
+// Mode reports the disaggregation mode in force.
+func (g *Gateway) Mode() string { return g.mode }
 
 // Disaggregated reports whether a prefill node + handoff driver are wired.
 func (g *Gateway) Disaggregated() bool { return g.prefill != nil && g.handoff != nil }
@@ -263,31 +310,66 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	decodeHeaders := Headers{"x-sofmat-slot": slot}
 	admittedVia := decision.Route
 	viaPrefill := false
+	var ids []int // exact prompt ids when tokenized this request (cache bookkeeping)
 	if decision.Route == "prefill" {
 		// fail-soft: any prefill/handoff problem degrades to decode-direct.
 		admittedVia = "decode-fallback"
 		goPrefill := true
-		if g.busy != nil && !g.busySafe() {
-			// idle decode: nothing to protect from interference, direct is faster.
+		busy := false
+		if g.mode != ModeAlways {
+			busy = g.busySafe()
+		}
+		if g.mode == ModeBusy && !busy {
+			// idle decode: nothing to protect from interference, direct is faster
+			// (and no tokenizer round-trip needed to know it).
 			fields["admission"] = "decode-idle"
 			admittedVia = "decode"
 			goPrefill = false
 		}
-		if goPrefill && g.count != nil {
-			// exact recount (chat template applied) — the estimate only opened the door.
-			n, err := g.countSafe(merged)
-			switch {
-			case err != nil:
+		// exact recount (chat template applied) — the estimate only opened the door.
+		n, newExact := 0, 0
+		switch {
+		case !goPrefill:
+		case g.tokens != nil:
+			var err error
+			ids, err = g.tokensSafe(merged)
+			if err != nil {
+				fields["prefill_error"] = "tokenize: " + err.Error()
+				goPrefill = false
+			} else {
+				n = len(ids)
+				// tokens the decode already holds for this prefix (lower bound: the
+				// common prefix with the previous prompt routed under the same key)
+				newExact = n - g.last.commonPrefix(pkey, ids)
+			}
+		case g.count != nil:
+			var err error
+			n, err = g.countSafe(merged)
+			if err != nil {
 				fields["prefill_error"] = "count: " + err.Error()
 				goPrefill = false
-			case n < g.exactMin:
-				fields["tokens"] = n
-				fields["admission"] = "exact-below-floor"
+			} else {
+				newExact = n
+			}
+		}
+		if goPrefill && n > 0 {
+			fields["tokens"] = n
+			fields["new_tokens"] = newExact
+			if newExact < g.exactMin {
+				if newExact < n {
+					fields["admission"] = "cache-hot"
+				} else {
+					fields["admission"] = "exact-below-floor"
+				}
 				admittedVia = "decode"
 				goPrefill = false
-			default:
-				fields["tokens"] = n
 			}
+		}
+		if goPrefill && g.mode == ModeAuto && !busy && n > 0 && !g.cost.prefillCheaper(n, newExact) {
+			// idle decode and the direct path is faster by the measured rates.
+			fields["admission"] = "decode-cheaper"
+			admittedVia = "decode"
+			goPrefill = false
 		}
 		if goPrefill {
 			t0 := time.Now()
@@ -325,6 +407,11 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		}
 	}
 	fields["admitted_via"] = admittedVia
+	if ids != nil {
+		// whichever path ran, the decode slot now holds this prompt (either it
+		// processed it or the restored state carries it).
+		g.last.remember(pkey, ids)
+	}
 
 	return &Plan{
 		Body:       merged,
@@ -350,8 +437,11 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 	// route). Forget it so the next admission counts the whole prompt again.
 	if cn, ok := timingInt(resp, "cache_n"); ok && !p.viaPrefill && p.prefixToks > 0 && cn < p.prefixToks/2 {
 		g.known.Forget(p.pkey)
+		g.last.forget(p.pkey)
 		p.fields["prefix_cold"] = true
 	}
+	// feed the cost model with what the engines just measured.
+	g.cost.observe(p.fields, resp, p.viaPrefill)
 
 	// feed the alpha EMA from the engine's acceptance counters, if present.
 	dn, dnOK := timingInt(resp, "draft_n")
@@ -437,6 +527,15 @@ func (g *Gateway) busySafe() (busy bool) {
 		}
 	}()
 	return g.busy()
+}
+
+func (g *Gateway) tokensSafe(body Body) (ids []int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			ids, err = nil, fmt.Errorf("tokenize panic: %v", r)
+		}
+	}()
+	return g.tokens(body)
 }
 
 func (g *Gateway) countSafe(body Body) (n int, err error) {
