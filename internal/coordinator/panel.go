@@ -51,6 +51,14 @@ var measurePrefillMsgs = []map[string]any{{
 // panelState holds the small mutable UI state the dashboard needs across polls:
 // node renames, the selected instance, the operator-picked active config, and
 // the last measured throughput per instance / for the disaggregated cluster.
+// actSample is the previous /slots reading for one backend, used to derive a
+// live tok/s from the delta between status ticks (LM-Studio-style activity).
+type actSample struct {
+	ts      time.Time
+	decoded float64
+	prompt  float64
+}
+
 type panelState struct {
 	mu           sync.Mutex
 	renames      map[string]string
@@ -59,6 +67,7 @@ type panelState struct {
 	apiKey       string // runtime-generated key; overrides config when set
 	tokps        map[string]float64
 	clusterTokps map[string]float64
+	actPrev      map[string]actSample // per-endpoint last /slots sample (live rate)
 }
 
 // effectiveAPIKey is the key currently enforced: a runtime-generated one wins,
@@ -111,6 +120,7 @@ var pstate = &panelState{
 	selected:     "decode",
 	tokps:        map[string]float64{},
 	clusterTokps: map[string]float64{},
+	actPrev:      map[string]actSample{},
 }
 
 // panelPage serves the embedded live dashboard, so a node's binary carries its
@@ -154,6 +164,97 @@ func (s *Server) getJSONFrom(base, pth string) map[string]any {
 }
 
 func (s *Server) getJSON(pth string) map[string]any { return s.getJSONFrom(s.bc.DecodeEntryURL, pth) }
+
+// getSlotsArr GETs /slots (a JSON ARRAY, not object) from a llama-server backend.
+func (s *Server) getSlotsArr(base string) []map[string]any {
+	if base == "" {
+		return nil
+	}
+	resp, err := probeClient.Get(base + "/slots")
+	if err != nil || resp == nil {
+		return nil
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var arr []map[string]any
+	if json.NewDecoder(resp.Body).Decode(&arr) != nil {
+		return nil
+	}
+	return arr
+}
+
+// slotActivity turns a backend's live /slots into an LM-Studio-style activity
+// object: state (idle | prompt | gen), prefill progress, tokens generated,
+// context used, cache hit, MTP on, slots busy, and a LIVE tok/s derived from the
+// n_decoded (or prompt-processed) delta since the previous status tick. Returns
+// nil when /slots is unavailable so the panel just omits the activity line.
+func (s *Server) slotActivity(base string) map[string]any {
+	slots := s.getSlotsArr(base)
+	if slots == nil {
+		return nil
+	}
+	total := len(slots)
+	busy := 0
+	var cur map[string]any
+	for _, sl := range slots {
+		if b, _ := sl["is_processing"].(bool); b {
+			busy++
+			if cur == nil {
+				cur = sl
+			}
+		}
+	}
+	if cur == nil && total > 0 {
+		cur = slots[0]
+	}
+	if cur == nil {
+		return map[string]any{"state": "idle", "slots_busy": 0, "slots_total": total}
+	}
+	pt := pnum(cur["n_prompt_tokens"])
+	pp := pnum(cur["n_prompt_tokens_processed"])
+	cache := pnum(cur["n_prompt_tokens_cache"])
+	nctx := pnum(cur["n_ctx"])
+	mtp, _ := cur["speculative"].(bool)
+	processing, _ := cur["is_processing"].(bool)
+	decoded := 0.0
+	if nt, ok := cur["next_token"].([]any); ok && len(nt) > 0 {
+		if m, ok := nt[0].(map[string]any); ok {
+			decoded = pnum(m["n_decoded"])
+		}
+	}
+	state := "idle"
+	if processing {
+		if decoded > 0 || (pt > 0 && pp >= pt) {
+			state = "gen"
+		} else {
+			state = "prompt"
+		}
+	}
+	// live rate from the delta vs the previous tick for THIS backend.
+	var tps float64
+	now := time.Now()
+	pstate.mu.Lock()
+	prev, had := pstate.actPrev[base]
+	if had && processing {
+		if dt := now.Sub(prev.ts).Seconds(); dt > 0.3 {
+			if state == "gen" && decoded > prev.decoded {
+				tps = round1((decoded - prev.decoded) / dt)
+			} else if state == "prompt" && pp > prev.prompt {
+				tps = round1((pp - prev.prompt) / dt)
+			}
+		}
+	}
+	pstate.actPrev[base] = actSample{ts: now, decoded: decoded, prompt: pp}
+	pstate.mu.Unlock()
+	return map[string]any{
+		"state": state, "slots_busy": busy, "slots_total": total,
+		"prompt_total": int(pt), "prompt_done": int(pp), "cache": int(cache),
+		"decoded": int(decoded), "ctx_used": int(pt + decoded), "ctx": int(nctx),
+		"mtp": mtp, "tps": tps,
+	}
+}
 
 // instanceEndpoint returns the base URL of an instance role.
 func (s *Server) instanceEndpoint(key string) string {
@@ -287,7 +388,10 @@ func (s *Server) aggregateNodes() map[string]map[string]any {
 		}
 		refs = append(refs, gateway.NodeRef{Name: p.ID, URL: "http://" + p.Addr + "/gpu"})
 	}
-	list := gateway.AggregateNodes(refs, gateway.HTTPNodeFetcher(1200*time.Millisecond))
+	// 3 s (was 1.2 s): a node's /gpu now answers from a cached snapshot, but a
+	// coordinator polling across the LAN still saw the Windows host time out on
+	// nvidia-smi tail latency and flip to "down" between ticks.
+	list := gateway.AggregateNodes(refs, gateway.HTTPNodeFetcher(3000*time.Millisecond))
 	out := map[string]map[string]any{}
 	for _, n := range list {
 		out[pstr(n["name"])] = n
@@ -499,6 +603,31 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// activeSet = nodos que hospedan CUALQUIER instancia UP (decode + prefill +
+	// panel-loaded), no solo la seleccionada. Si no, un nodo que hospeda SOLO el
+	// prefill (su main, p.ej. node-a con GPU al 99%) saldría "libre · disponible"
+	// pese a tener el modelo cargado. El estado del nodo se marca por esta unión.
+	activeSet := map[string]bool{}
+	if loaded {
+		for id := range ranges {
+			activeSet[id] = true
+		}
+	}
+	if prefillUp {
+		if inst, ok := s.cfg.Instance("prefill"); ok {
+			if pp := s.pipelineFromInstance(inst); pp != nil {
+				for _, st := range asMaps(pp["stages"]) {
+					activeSet[pstr(st["node"])] = true
+				}
+			}
+		}
+	}
+	for _, lm := range loadedModels() {
+		if lm.Node != "" {
+			activeSet[lm.Node] = true
+		}
+	}
+
 	order := []string{}
 	seen := map[string]bool{}
 	for _, n := range s.cfg.Nodes {
@@ -521,7 +650,7 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		up, _ := n["up"].(bool)
 		gpus := n["gpus"]
-		active := hasRange(ranges, id) && loaded
+		active := activeSet[id]
 		role := "worker (rpc)"
 		if id == "node-a" {
 			role = "master + worker"
@@ -685,6 +814,7 @@ func (s *Server) instance(key, funcLabel, model, selected string, pipe map[strin
 		"endpoint": conn.endpoint, "model_path": conn.modelPath,
 		"api_key": conn.apiKey, "api_key_enabled": conn.apiKeyEnabled,
 		"coordinator": conn.coordinator,
+		"activity":    s.slotActivity(conn.endpoint),
 	}
 }
 

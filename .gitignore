@@ -58,3 +58,7 @@ renames.local.json
 dist/VERSION.txt
 node-agent.exe
 README.internal.md
+
+# backups locales / marcadores de build
+*.bak-*
+dist/.testver

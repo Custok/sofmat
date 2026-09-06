@@ -2,6 +2,12 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609061625 (2026-09-06)
+Mejoras desde la version anterior:
+
+- Sensor /gpu con instantanea en cache: el daemon muestrea nvidia-smi + CPU/RAM en segundo plano cada 2 s y /gpu responde siempre desde la ultima lectura (campo nuevo `age_ms`). En hosts Windows cargados nvidia-smi tardaba 0,4-7 s y el panel marcaba el nodo como caido a ratos.
+- Agregador de nodos del panel: timeout por nodo 1,2 s -> 3 s (cola larga de latencia entre nodos de la LAN).
+- Panel: tok/s en vivo por instancia (muestreo de /slots entre ticks), etiqueta `model_name` por instancia y ajustes de control (kill por puerto solo de procesos propios).
 ## v202608231328 (2026-08-23)
 Gestion del llama-server en el HOST de cada nodo (eject/load en toda la flota):
 

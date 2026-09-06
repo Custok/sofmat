@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"encoding/json"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -49,6 +50,14 @@ func isDead(pid int) bool {
 	procReg.mu.Lock()
 	defer procReg.mu.Unlock()
 	return procReg.dead[pid]
+}
+
+// isLaunched reports whether THIS daemon launched (and still tracks) pid — used to
+// guard the by-port kill so it never touches an externally-run llama-server.
+func isLaunched(pid int) bool {
+	procReg.mu.Lock()
+	defer procReg.mu.Unlock()
+	return procReg.live[pid]
 }
 
 // controlAlive reports whether a llama-server this daemon launched is still alive
@@ -186,6 +195,29 @@ func (s *Server) controlKill(w http.ResponseWriter, r *http.Request) {
 
 func killLlamaByPort(port string) []string {
 	killed := []string{}
+	// GUARD (fix muerte silenciosa del decode, 1-sep-2026): solo matamos procesos que
+	// ESTE daemon lanzo (procReg.live). Un llama-server EXTERNO (decode/worker por
+	// systemd/setsid, RAG de otro host) en ese puerto se RESPETA. Antes este kill-por-
+	// puerto era CIEGO (taskkill/kill a cualquier PID escuchando) y una soflink con estado
+	// obsoleto podia tumbar el decode de prod (node-c :8090) via modelsEject. Restaura la
+	// intencion de diseno ya escrita en el comentario de procReg arriba.
+	tryKill := func(pidStr string) {
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			return
+		}
+		if !isLaunched(pid) {
+			log.Printf("killLlamaByPort: :%s ocupado por PID %s NO lanzado por soflink -> RESPETADO (no kill)", port, pidStr)
+			return
+		}
+		if runtime.GOOS == "windows" {
+			_ = exec.Command("taskkill", "/F", "/PID", pidStr).Run()
+		} else {
+			_ = exec.Command("kill", "-9", pidStr).Run()
+		}
+		markDead(pid)
+		killed = append(killed, pidStr)
+	}
 	if runtime.GOOS == "windows" {
 		out, _ := exec.Command("netstat", "-ano", "-p", "tcp").Output()
 		for _, line := range strings.Split(string(out), "\n") {
@@ -193,14 +225,12 @@ func killLlamaByPort(port string) []string {
 			if len(f) < 5 || f[3] != "LISTENING" || !strings.HasSuffix(f[1], ":"+port) {
 				continue
 			}
-			_ = exec.Command("taskkill", "/F", "/PID", f[4]).Run()
-			killed = append(killed, f[4])
+			tryKill(f[4])
 		}
 	} else {
 		out, _ := exec.Command("sh", "-c", "lsof -ti tcp:"+port+" -sTCP:LISTEN 2>/dev/null").Output()
 		for _, pid := range strings.Fields(string(out)) {
-			_ = exec.Command("kill", "-9", pid).Run()
-			killed = append(killed, pid)
+			tryKill(pid)
 		}
 	}
 	return killed

@@ -123,6 +123,16 @@ background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradien
 .itab .idot{width:8px;height:8px;border-radius:50%;flex:none}
 .itab .ir{font-size:10.5px;color:var(--faint);font-family:"IBM Plex Mono",monospace}
 .itab .itk{font-size:11px;color:var(--muted);font-family:"IBM Plex Mono",monospace}.itab .itk b{color:var(--fg);font-size:12.5px}
+.iact{display:flex;align-items:center;gap:7px;margin-top:6px;flex-wrap:wrap}
+.actp{font-family:"IBM Plex Mono",monospace;font-size:10.5px;font-weight:600;padding:2px 9px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.actp::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.actp.idle{background:var(--inset);color:var(--faint)}.actp.idle::before{opacity:.5}
+.actp.prompt{background:var(--warn-soft);color:var(--warn)}
+.actp.gen{background:var(--good-soft);color:var(--good)}
+.actp.gen::before,.actp.prompt::before{animation:actpulse 1.3s ease-in-out infinite}
+@keyframes actpulse{0%,100%{opacity:1}50%{opacity:.35}}
+.actx{font-size:10.5px;color:var(--faint);font-family:"IBM Plex Mono",monospace}
+@media(prefers-reduced-motion:reduce){.actp::before{animation:none}}
 .itab .imeta{display:flex;gap:12px;margin-top:2px}
 .itab .ipill{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);font-family:"IBM Plex Mono",monospace}
 .insttabs{align-items:center}
@@ -251,6 +261,19 @@ function genkey(){j('/api/genkey',{method:'POST',headers:ah()}).then(function(r)
 function j(u,o){return fetch(u,o).then(function(r){return r.json()})}
 function gb(mb){return (mb/1024).toFixed(1)}
 function fmtctx(c){return c?(c>=1000?Math.round(c/1000)+'k':c):'—'}
+function actLine(a){
+  if(!a) return '';
+  var st=a.state||'idle', cls, lbl;
+  if(st==='gen'){cls='gen';lbl='GEN '+(a.decoded||0)+' tok'+(a.tps?' · '+a.tps+' tk/s':'');}
+  else if(st==='prompt'){cls='prompt';lbl='PROMPT '+(a.prompt_done||0)+' / '+(a.prompt_total||0)+(a.tps?' · '+a.tps+' tk/s pp':'');}
+  else {cls='idle';lbl='EN ESPERA';}
+  var ex=[];
+  if(a.ctx) ex.push('ctx '+fmtctx(a.ctx_used||0)+'/'+fmtctx(a.ctx));
+  if(a.slots_total>1) ex.push((a.slots_busy||0)+'/'+a.slots_total+' slots');
+  if(a.cache) ex.push('cache '+fmtctx(a.cache));
+  if(a.mtp) ex.push('MTP');
+  return '<div class=iact><span class="actp '+cls+'">'+lbl+'</span>'+(ex.length?'<span class=actx>'+ex.join(' · ')+'</span>':'')+'</div>';
+}
 function drawSpark(){var s=document.getElementById('spark');if(SPARK.length<2){s.innerHTML='';return}
   var mx=Math.max.apply(null,SPARK),mn=Math.min.apply(null,SPARK),rg=(mx-mn)||1,W=132,Hh=46,n=SPARK.length;
   var pts=SPARK.map(function(v,i){return [i*(W/(n-1)),Hh-6-(v-mn)/rg*(Hh-14)]});
@@ -269,6 +292,7 @@ async function tick(){
       +'<div class=imeta><span class=ipill><svg width=12 height=12 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.4><rect x=2 y=2.5 width=12 height=4 rx=1/><rect x=2 y=9.5 width=12 height=4 rx=1/><circle cx=4.6 cy=4.5 r=.75 fill=currentColor stroke=none/><circle cx=4.6 cy=11.5 r=.75 fill=currentColor stroke=none/></svg>'+(i.hosts||0)+' host'+((i.hosts==1)?'':'s')+'</span>'
       +'<span class=ipill><svg width=13 height=13 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.4><rect x=1.5 y=4 width=11 height=8 rx=1.5/><circle cx=6 cy=8 r=1.8/><path d="M12.5 6.5h2M12.5 9.5h2"/></svg>'+(i.gpus||0)+' GPU</span></div>'
       +'<div class=itk>'+(i.tokps?'<b>'+i.tokps+'</b> tok/s'+(i.metric=='pp'?' <span style="opacity:.7">pp</span>':''):(i.up?'sin medida aún':'apagado'))+'</div>'
+      +actLine(i.activity)
       +'<div class=iconn style="font-family:ui-monospace,monospace;font-size:10.5px;opacity:.72;margin-top:5px;line-height:1.7;word-break:break-all">'
       +'<span class=cpv onclick="cp(\''+(i.endpoint||'')+'\',this)" title="clic para copiar el endpoint">'+(i.endpoint||'')+' &#8888;</span>'
       +(i.coordinator?'<br><span class=cpv onclick="cp(\''+i.coordinator+'\',this)" title="coordinador (union de roles) - clic para copiar">&#8627; via '+i.coordinator+' &#8888;</span>':'')

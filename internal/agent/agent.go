@@ -11,7 +11,56 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
+
+// snapshotEvery is how often the background sampler refreshes the telemetry
+// snapshot served by /gpu. nvidia-smi on a loaded Windows host can take
+// 0.4-6 s per call; pollers must never wait on it, so /gpu always answers
+// from the last snapshot and the sampler refreshes it on its own clock.
+const snapshotEvery = 2 * time.Second
+
+var (
+	snapMu   sync.RWMutex
+	snapData map[string]any
+	snapAt   time.Time
+	snapOnce sync.Once
+)
+
+// startSampler launches the background refresher exactly once per process.
+func startSampler(nodeID string) {
+	snapOnce.Do(func() {
+		refresh := func() {
+			p := Payload(nodeID)
+			snapMu.Lock()
+			snapData, snapAt = p, time.Now()
+			snapMu.Unlock()
+		}
+		refresh() // first reading synchronously so the very first /gpu is real
+		go func() {
+			t := time.NewTicker(snapshotEvery)
+			defer t.Stop()
+			for range t.C {
+				refresh()
+			}
+		}()
+	})
+}
+
+// snapshot returns the last telemetry reading plus its age in ms.
+func snapshot() (map[string]any, int64) {
+	snapMu.RLock()
+	defer snapMu.RUnlock()
+	if snapData == nil {
+		return nil, -1
+	}
+	out := make(map[string]any, len(snapData)+1)
+	for k, v := range snapData {
+		out[k] = v
+	}
+	return out, time.Since(snapAt).Milliseconds()
+}
 
 // GPU is one card's live telemetry.
 type GPU struct {
@@ -68,9 +117,16 @@ func Payload(nodeID string) map[string]any {
 // sensor.
 func Handler(nodeID string) http.HandlerFunc {
 	Prime() // prime any CPU-time baseline so the first read is true
+	startSampler(nodeID)
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(Payload(nodeID))
+		p, age := snapshot()
+		if p == nil { // sampler not ready yet (should not happen after startSampler)
+			p = Payload(nodeID)
+			age = 0
+		}
+		p["age_ms"] = age // how stale this snapshot is; pollers can show it
+		_ = json.NewEncoder(w).Encode(p)
 	}
 }
