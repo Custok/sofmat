@@ -419,3 +419,32 @@ func TestPickRefusesOnOccupancyAlone(t *testing.T) {
 		t.Fatalf("must refuse: %v", err)
 	}
 }
+
+// Two clients with the SAME (long) system prompt but different questions are
+// different conversations and must be able to land on different engines.
+// Hashing the head of the messages array hashed only the system prompt, so the
+// three VS Code windows collapsed into one key and one engine.
+func TestSessionKeySkipsTheSystemPrompt(t *testing.T) {
+	sys := map[string]any{"role": "system", "content": strings.Repeat("eres un asistente muy detallado. ", 200)}
+	mk := func(q string) gateway.Body {
+		return gateway.Body{"messages": []any{sys, map[string]any{"role": "user", "content": q}}}
+	}
+	a, b := sessionKey(mk("arregla el balanceador")), sessionKey(mk("revisa el frigate"))
+	if a == b {
+		t.Fatal("two conversations sharing a system prompt must not share a key")
+	}
+	// the same conversation keeps its key as turns are appended
+	cont := gateway.Body{"messages": []any{sys,
+		map[string]any{"role": "user", "content": "arregla el balanceador"},
+		map[string]any{"role": "assistant", "content": "hecho"},
+		map[string]any{"role": "user", "content": "y ahora publica"},
+	}}
+	if sessionKey(cont) != a {
+		t.Fatal("appending turns must not move the conversation to another engine")
+	}
+	// a bare system prompt still yields a stable key
+	only := gateway.Body{"messages": []any{sys}}
+	if sessionKey(only) == "" || sessionKey(only) != sessionKey(only) {
+		t.Fatal("a system-only request needs a stable key")
+	}
+}

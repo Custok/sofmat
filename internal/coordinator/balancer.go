@@ -210,15 +210,42 @@ func (b *decodeBalancer) probeBudgets(get func(url string) (map[string]any, erro
 	}
 }
 
-// sessionKey identifies a conversation from the head of its messages: the
-// system prompt plus the start of the first user turn. Stable across the turns
-// that append to it, different between two clients working on different things.
+// sessionKey identifies a conversation by its first NON-system turn.
+//
+// It deliberately skips the system prompt. Copilot-style clients send a system
+// prompt of several thousand characters, so hashing the head of the messages
+// array hashed only that — identical across every client — and the three VS
+// Code windows collapsed into ONE key, pinned to ONE engine, leaving the second
+// engine idle (observed 2026-09-07: 13 requests, all on the primary, decode2 at
+// zero). The first user turn is what actually differs between conversations,
+// and it stays put as later turns are appended.
 func sessionKey(body gateway.Body) string {
-	raw, _ := body["messages"]
-	b, err := json.Marshal(raw)
+	msgs, _ := body["messages"].([]any)
+	var head []byte
+	for _, m := range msgs {
+		mm, _ := m.(map[string]any)
+		if mm == nil {
+			continue
+		}
+		switch role, _ := mm["role"].(string); role {
+		case "system", "developer":
+			continue
+		}
+		if b, err := json.Marshal(mm); err == nil && len(b) > 0 {
+			head = b
+			return hashKey(head)
+		}
+	}
+	// no user turn yet (a bare system prompt): fall back to the whole head, which
+	// at least keeps such a request stable across retries
+	b, err := json.Marshal(body["messages"])
 	if err != nil || len(b) == 0 {
 		return "default"
 	}
+	return hashKey(b)
+}
+
+func hashKey(b []byte) string {
 	if len(b) > sessionKeyChars {
 		b = b[:sessionKeyChars]
 	}
@@ -333,14 +360,29 @@ func (b *decodeBalancer) touchLocked(key string) {
 	b.order = append(b.order, key)
 }
 
+// sessionsOn counts the conversations currently assigned to an engine: the
+// number that shows whether the spread is actually happening.
+func (b *decodeBalancer) sessionsOn(idx int) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, i := range b.sticky {
+		if i == idx {
+			n++
+		}
+	}
+	return n
+}
+
 // stats is what the panel/request log reports about the spread.
 func (b *decodeBalancer) stats() []map[string]any {
 	out := make([]map[string]any, 0, len(b.nodes))
-	for _, n := range b.nodes {
+	for idx, n := range b.nodes {
 		i, t := n.load()
 		out = append(out, map[string]any{
 			"name": n.name, "url": n.url, "budget": n.budget,
 			"inflight": i, "tokens_inflight": t, "tokens_held": n.heldTokens(),
+			"sessions": b.sessionsOn(idx),
 		})
 	}
 	return out
