@@ -55,6 +55,22 @@ func (l *lastPrompts) commonPrefix(key string, ids []int) int {
 	return i
 }
 
+// bestPrefix is the longest prefix either record can vouch for: the
+// conversation's own last prompt (precise for a client that resends its
+// history) and the one keyed on the shared system prompt (what a stateless
+// client actually reuses). Taking the max means the per-conversation record
+// never loses ground the shared record already had.
+func (l *lastPrompts) bestPrefix(ckey, pkey string, ids []int) int {
+	n := l.commonPrefix(ckey, ids)
+	if ckey == pkey {
+		return n
+	}
+	if m := l.commonPrefix(pkey, ids); m > n {
+		return m
+	}
+	return n
+}
+
 func (l *lastPrompts) remember(key string, ids []int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

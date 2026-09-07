@@ -14,6 +14,7 @@ package gateway
 // Finish (engine timings → request record). Chat is Prepare + backend + Finish.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -215,7 +216,7 @@ func New(o Options) (*Gateway, error) {
 		alpha:      alpha,
 		log:        NewRequestLog(500, o.KeepContent),
 		known:      known,
-		last:       newLastPrompts(n),
+		last:       newLastPrompts(8 * n),
 		cost:       newCostModel(),
 	}, nil
 }
@@ -259,6 +260,7 @@ type Plan struct {
 
 	fields     Record
 	pkey       string
+	ckey       string
 	prefixToks int
 	alphaKey   string
 	viaPrefill bool
@@ -282,6 +284,42 @@ func (g *Gateway) Chat(h Headers, body Body) (Body, error) {
 	return resp, nil
 }
 
+// conversationSeed is the first non-system turn of a conversation: what tells
+// two clients apart when they share a system prompt, and what stays put as
+// later turns are appended.
+func conversationSeed(body Body) string {
+	msgs, _ := body["messages"].([]any)
+	first, turns := "", 0
+	for _, m := range msgs {
+		mm, _ := m.(map[string]any)
+		if mm == nil {
+			continue
+		}
+		switch role, _ := mm["role"].(string); role {
+		case "system", "developer":
+			continue
+		}
+		turns++
+		if first != "" {
+			continue
+		}
+		b, err := json.Marshal(mm["content"])
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		if len(b) > conversationSeedChars {
+			b = b[:conversationSeedChars]
+		}
+		first = string(b)
+	}
+	_ = turns
+	return first
+}
+
+// conversationSeedChars is how much of that first turn identifies it: enough to
+// tell two conversations apart, bounded so the key stays cheap.
+const conversationSeedChars = 2048
+
 // Prepare runs everything BEFORE the decode call: auth, slot affinity,
 // admission, and — for a large new prompt with a prefill node wired — the
 // prefill + KV handoff. Any prefill/handoff problem degrades to decode-direct
@@ -297,8 +335,25 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		tenant = h["X-Sofmat-Tenant"]
 	}
 	systemPrompt := systemPromptOf(body)
-	// slot affinity: same-prefix requests to the same slot to reuse KV.
+	// slot affinity: the same CONVERSATION to the same slot, so its KV survives
+	// to the next turn. The key must include the first real turn: several
+	// clients of the same product send byte-identical system prompts, so keying
+	// on the system prompt alone gave all of them one key — one slot on the
+	// engine, each turn evicting the previous client's cache — and one shared
+	// last-prompt record, so a request was judged "cache-hot" against ANOTHER
+	// conversation's prompt and the decode then reprocessed everything
+	// (measured 2026-09-07: admission cache-hot with prompt_n = 73 536, 67.6 s).
 	pkey := PrefixKey(systemPrompt, tenant)
+	// ckey identifies the CONVERSATION, not just the shared system prompt.
+	// Several clients of the same product send byte-identical system prompts, so
+	// under pkey alone they overwrite each other's last-prompt record and every
+	// turn is then measured against ANOTHER conversation's prompt: the cache the
+	// engine really holds becomes invisible and a 6 s turn is sent off to a 60 s
+	// prefill (measured 2026-09-07 with three VS Code clients, median 29.5 s).
+	ckey := pkey
+	if seed := conversationSeed(body); seed != "" {
+		ckey = PrefixKey(systemPrompt+"\x00"+seed, tenant)
+	}
 	slot, err := g.ring.Route(pkey)
 	if err != nil {
 		return nil, err
@@ -388,7 +443,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 				n = len(ids)
 				// tokens the decode already holds for this prefix (lower bound: the
 				// common prefix with the previous prompt routed under the same key)
-				newExact = n - g.last.commonPrefix(pkey, ids)
+				newExact = n - g.last.bestPrefix(ckey, pkey, ids)
 			}
 		case g.count != nil:
 			var err error
@@ -472,7 +527,12 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	if ids != nil {
 		// whichever path ran, the decode slot now holds this prompt (either it
 		// processed it or the restored state carries it).
-		g.last.remember(pkey, ids)
+		g.last.remember(ckey, ids)
+		if ckey != pkey {
+			// a stateless client sends system + the current question every time:
+			// what it reuses is the system prefix, and this record is what sees it
+			g.last.remember(pkey, ids)
+		}
 	}
 
 	return &Plan{
@@ -480,6 +540,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		Headers:    decodeHeaders,
 		fields:     fields,
 		pkey:       pkey,
+		ckey:       ckey,
 		prefixToks: prefixToks,
 		alphaKey:   alphaKey,
 		viaPrefill: viaPrefill,
@@ -500,6 +561,9 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 	if cn, ok := timingInt(resp, "cache_n"); ok && !p.viaPrefill && p.prefixToks > 0 && cn < p.prefixToks/2 {
 		g.known.Forget(p.pkey)
 		g.last.forget(p.pkey)
+		if p.ckey != "" && p.ckey != p.pkey {
+			g.last.forget(p.ckey)
+		}
 		p.fields["prefix_cold"] = true
 	}
 	// feed the cost model with what the engines just measured.

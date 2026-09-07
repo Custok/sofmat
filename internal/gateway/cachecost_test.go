@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -288,5 +289,92 @@ func TestHandoffVetoForOtherEngine(t *testing.T) {
 	gw.Chat(Headers{"x-sofmat-tenant": "otro"}, chatBody(bigPrompt, "hola"))
 	if len(c.prefill) != 1 {
 		t.Fatal("without the veto the prefill runs as usual")
+	}
+}
+
+// Several clients of the same product send byte-identical system prompts. If
+// the prefix key ignores the first real turn they all collapse into ONE key:
+// one slot on the engine (each turn evicting the previous client's cache) and
+// one shared last-prompt record, so a request reads as "cache-hot" against
+// ANOTHER conversation's prompt and the decode reprocesses the whole thing.
+func TestPrefixKeySeparatesConversationsSharingASystemPrompt(t *testing.T) {
+	sys := strings.Repeat("eres un asistente muy detallado. ", 200)
+	mk := func(q string) Body {
+		return Body{"messages": []any{
+			map[string]any{"role": "system", "content": sys},
+			map[string]any{"role": "user", "content": q},
+		}}
+	}
+	a := PrefixKey(sys+"\x00"+conversationSeed(mk("arregla el balanceador")), "")
+	b := PrefixKey(sys+"\x00"+conversationSeed(mk("revisa el frigate")), "")
+	if a == b {
+		t.Fatal("two conversations sharing a system prompt must not share a slot")
+	}
+	// appending turns keeps the conversation on its slot
+	cont := Body{"messages": []any{
+		map[string]any{"role": "system", "content": sys},
+		map[string]any{"role": "user", "content": "arregla el balanceador"},
+		map[string]any{"role": "assistant", "content": "hecho"},
+		map[string]any{"role": "user", "content": "y ahora publica"},
+	}}
+	if PrefixKey(sys+"\x00"+conversationSeed(cont), "") != a {
+		t.Fatal("a later turn must stay on the same slot")
+	}
+	// and the tenant still separates
+	if PrefixKey(sys+"\x00"+conversationSeed(mk("x")), "t1") == PrefixKey(sys+"\x00"+conversationSeed(mk("x")), "t2") {
+		t.Fatal("tenants must stay separate")
+	}
+}
+
+// Two clients of the same product share a byte-identical system prompt. Keyed
+// on that alone they overwrite each other's last-prompt record, so a turn that
+// the engine could continue in 6 s is measured against the OTHER conversation
+// and shipped off to a 60 s prefill. Each conversation must keep its own record.
+func TestConversationsDoNotPolluteEachOthersCache(t *testing.T) {
+	sys := bigPrompt + " system compartido por los tres clientes"
+	conv := func(first string, turns int) Body {
+		// every turn carries a long tail so the cheap estimate never short-circuits
+		// and the exact, cache-aware recount is what routes it (that recount is
+		// also what writes the last-prompt record we are testing)
+		msgs := []any{map[string]any{"role": "system", "content": sys},
+			map[string]any{"role": "user", "content": first + ": " + bigPrompt}}
+		for i := 0; i < turns; i++ {
+			msgs = append(msgs,
+				map[string]any{"role": "assistant", "content": "ok"},
+				// a long tail (a tool result) so the cheap estimate cannot decide and
+				// the exact, cache-aware recount is what routes the turn
+				map[string]any{"role": "user", "content": fmt.Sprintf("resultado %d: %s", i, bigPrompt)})
+		}
+		return Body{"messages": msgs}
+	}
+	idsA1, idsB1 := append(seq(10000, 0), seq(20000, 100000)...), append(seq(10000, 0), seq(20000, 500000)...)
+	idsA2 := append(append([]int{}, idsA1...), seq(600, 900000)...)
+
+	gw, c := newTestGW(t, func(o *Options) {
+		o.Tokens = func(b Body) ([]int, error) {
+			raw, _ := json.Marshal(b["messages"])
+			switch {
+			case strings.Contains(string(raw), "conversacion A") && strings.Contains(string(raw), "resultado 0"):
+				return idsA2, nil
+			case strings.Contains(string(raw), "conversacion A"):
+				return idsA1, nil
+			default:
+				return idsB1, nil
+			}
+		}
+	})
+	gw.Chat(Headers{}, conv("conversacion A", 0))
+	gw.Chat(Headers{}, conv("conversacion B", 0)) // B's turn overwrites the shared record
+	before := len(c.prefill)
+
+	// A continues: 600 new tokens on top of ITS OWN previous prompt. Measured
+	// against B's it would look like 20 000 new and be shipped to the prefill.
+	gw.Chat(Headers{}, conv("conversacion A", 1))
+	rec := lastRecord(t, gw)
+	if rec["admission"] != "cache-hot" || rec["new_tokens"] != 600 {
+		t.Fatalf("A's turn must ride ITS OWN cache, not be measured against B: %v", rec)
+	}
+	if len(c.prefill) != before {
+		t.Fatalf("a 600-token continuation must not prefill again: %d → %d", before, len(c.prefill))
 	}
 }

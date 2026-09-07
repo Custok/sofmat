@@ -86,10 +86,12 @@ func (n *decodeNode) heldTokens() int {
 	if time.Since(n.heldAt) < time.Second {
 		return n.held
 	}
+	// a failed probe (-1) keeps the last reading, but the timestamp is stamped
+	// either way: otherwise an unreachable engine is dialled on every call.
 	if v := n.occupancy(n.url); v >= 0 {
 		n.held = v
-		n.heldAt = time.Now()
 	}
+	n.heldAt = time.Now()
 	return n.held
 }
 

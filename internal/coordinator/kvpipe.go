@@ -410,7 +410,11 @@ func (k *kvPipe) prefillHeld() int {
 	}
 	slots := k.slotsAt(k.prefillURL)
 	if slots == nil {
-		return k.pHeld // unreadable: keep the last reading, never assume empty
+		// unreadable: keep the last reading (never assume empty) but stamp the
+		// time anyway, or a dead engine gets dialled on every poll of the wait
+		// loop instead of once a second.
+		k.pHeldAt = time.Now()
+		return k.pHeld
 	}
 	held := 0
 	for _, s := range slots {
