@@ -697,11 +697,36 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(resp.StatusCode)
 	const tailKeep = 16 << 10
-	var tail []byte
+	var tail, head []byte
+	streamed := 0
+	var readErr error
+	// A stream that produces nothing used to be recorded as a request with no
+	// timings and no cause — the exact shape of the failures that took longest
+	// to diagnose. Say what the engine actually answered.
 	defer func() {
 		fin := gateway.Body{}
-		if tm := sseTimings(tail); tm != nil {
+		tm := sseTimings(tail)
+		if tm != nil {
 			fin["timings"] = tm
+		}
+		if node != nil {
+			plan.Note("engine", node.name)
+		}
+		if resp.StatusCode != http.StatusOK {
+			plan.Note("engine_status", resp.StatusCode)
+		}
+		if tm == nil {
+			// no timings: either the engine said nothing, or it said something
+			// that was not a stream. The byte count alone separates the two.
+			plan.Note("engine_bytes", streamed)
+			if readErr != nil {
+				plan.Note("engine_read_error", readErr.Error())
+			}
+			// The body is only quoted when the engine ERRORED. On a 200 the bytes
+			// are the model's answer and the request log is metrics-only.
+			if resp.StatusCode != http.StatusOK && len(head) > 0 {
+				plan.Note("engine_said", strings.TrimSpace(string(head)))
+			}
 		}
 		s.gw.Finish(plan, fin)
 	}()
@@ -709,7 +734,12 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
+			streamed += n
+			if len(head) < 400 {
+				head = append(head, buf[:min(n, 400-len(head))]...)
+			}
 			if _, werr := w.Write(buf[:n]); werr != nil {
+				readErr = werr
 				return
 			}
 			flusher.Flush()
@@ -719,9 +749,19 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 			}
 		}
 		if rerr != nil {
+			if rerr != io.EOF {
+				readErr = rerr
+			}
 			return
 		}
 	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

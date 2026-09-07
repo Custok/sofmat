@@ -596,6 +596,17 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	}, nil
 }
 
+// Note attaches a diagnostic to this request's record. The coordinator uses it
+// to say what the engine actually answered: without it, a stream that produced
+// nothing is recorded as a request with no timings and no cause, which is
+// exactly the shape of the failures that took longest to diagnose.
+func (p *Plan) Note(key string, v any) {
+	if p == nil || p.fields == nil || key == "" {
+		return
+	}
+	p.fields[key] = v
+}
+
 // Finish runs everything AFTER the decode call: prefix bookkeeping, the alpha
 // EMA feed and the request record (engine timings included). resp may carry
 // only {"timings": ...} — the streaming path reconstructs that from the last
