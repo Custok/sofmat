@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -36,10 +37,10 @@ func TestSessionSticksToItsEngine(t *testing.T) {
 	body := bodyWith("eres un asistente", strings.Repeat("contexto del repo A. ", 200))
 	k := sessionKey(body)
 
-	first, done := b.pick(k, 1000)
+	first, done, _ := b.pick(k, 1000)
 	done()
 	for i := 0; i < 5; i++ {
-		n, d := b.pick(k, 1000)
+		n, d, _ := b.pick(k, 1000)
 		d()
 		if n != first {
 			t.Fatalf("turn %d moved to another engine (%s != %s)", i, n.name, first.name)
@@ -55,8 +56,8 @@ func TestSessionSticksToItsEngine(t *testing.T) {
 // Two different clients must not stack on the same engine.
 func TestNewSessionsSpreadAcrossEngines(t *testing.T) {
 	b := newDecodeBalancer(balTestNodes(2))
-	a, doneA := b.pick(sessionKey(bodyWith("s", "proyecto A "+strings.Repeat("x", 500))), 40000)
-	c, doneC := b.pick(sessionKey(bodyWith("s", "proyecto B "+strings.Repeat("y", 500))), 40000)
+	a, doneA, _ := b.pick(sessionKey(bodyWith("s", "proyecto A "+strings.Repeat("x", 500))), 40000)
+	c, doneC, _ := b.pick(sessionKey(bodyWith("s", "proyecto B "+strings.Repeat("y", 500))), 40000)
 	if a == c {
 		t.Fatalf("two fresh conversations landed on the same engine (%s)", a.name)
 	}
@@ -77,7 +78,7 @@ func TestBudgetGuardPrefersTheEngineWithRoom(t *testing.T) {
 	b.nodes[0].claim(int(float64(b.nodes[0].budget) * budgetUse))
 	key := sessionKey(bodyWith("s", "conversacion pegada al motor 0"))
 	b.remember(key, b.nodes[0]) // sticky to the full engine
-	n, done := b.pick(key, 30000)
+	n, done, _ := b.pick(key, 30000)
 	defer done()
 	if n != b.nodes[1] {
 		t.Fatalf("a request that does not fit must move to the engine with room, got %s", n.name)
@@ -107,7 +108,7 @@ func TestConcurrentPicksAccountCorrectly(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			n, done := b.pick(fmt.Sprintf("k%d", i), 500)
+			n, done, _ := b.pick(fmt.Sprintf("k%d", i), 500)
 			_ = n
 			done()
 		}(i)
@@ -315,5 +316,46 @@ func TestHandoffSkippedWhenDecodeHasNoRoom(t *testing.T) {
 	// cheapest eviction is slot 1, so a 50k state does not fit
 	if free >= 50000 {
 		t.Fatal("a 50k state must not be considered to fit")
+	}
+}
+
+// When no engine has room the request is REFUSED, not sent: sending it blows
+// the unified budget and llama-server then fails every concurrent request.
+func TestFullEngineRefusesInsteadOfOverloading(t *testing.T) {
+	b := newDecodeBalancer(balTestNodes(1))
+	b.nodes[0].claim(int(float64(b.nodes[0].budget) * budgetUse)) // engine full
+	orig := waitBudgetForTest
+	waitBudgetForTest = 300 * time.Millisecond
+	defer func() { waitBudgetForTest = orig }()
+
+	n, done, err := b.pick("k", 40000)
+	done()
+	if err == nil || n != nil {
+		t.Fatalf("a full engine must refuse, got node=%v err=%v", n, err)
+	}
+	if !errors.Is(err, ErrEngineFull) {
+		t.Fatalf("the refusal must be identifiable: %v", err)
+	}
+	// once there is room again it is admitted
+	b.nodes[0].release(int(float64(b.nodes[0].budget) * budgetUse))
+	if _, d, err := b.pick("k", 40000); err != nil {
+		t.Fatalf("with room free it must be admitted: %v", err)
+	} else {
+		d()
+	}
+}
+
+// Copilot asks for 16k of output it rarely uses; reserving all of it would let
+// a single client fill the engine.
+func TestReplyReserveIsCapped(t *testing.T) {
+	big := gateway.Body{"messages": []any{map[string]any{"role": "user", "content": strings.Repeat("x", 40000)}},
+		"max_tokens": float64(16000)}
+	got := estBodyTokens(big)
+	if got > 10000+replyReserve+200 {
+		t.Fatalf("reservation must cap the reply at %d tokens, got %d", replyReserve, got)
+	}
+	small := gateway.Body{"messages": []any{map[string]any{"role": "user", "content": "hola"}}, "max_tokens": float64(100)}
+	if estBodyTokens(small) > 200 {
+		t.Fatalf("a small request must reserve little: %d", estBodyTokens(small))
 	}
 }

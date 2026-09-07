@@ -17,13 +17,17 @@ package coordinator
 //     budgets, and new sessions land on the emptier one.
 //
 // The budget guard closes the remaining gap: a request that does not fit the
-// chosen engine's budget waits for room instead of being rejected, and after
-// waitBudget it is sent anyway (fail-open — never worse than before).
+// chosen engine's budget waits for room, and if none appears within waitBudget
+// it is REFUSED. Refusing one request is the right trade: sending it blows the
+// unified budget and llama-server then fails every concurrent request at once
+// (measured: three clients erroring together, working again ~10 s later).
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -35,8 +39,15 @@ const (
 	// budgetUse is the share of an engine's context we let in-flight requests
 	// claim. The rest absorbs what they generate (a reply is KV too).
 	budgetUse = 0.80
-	// waitBudget is how long a request waits for room before going anyway.
-	waitBudget = 20 * time.Second
+	// waitBudget is how long a request waits for room in the engine. A 46k
+	// request takes ~40 s end to end, so three clients need a generous queue;
+	// when it expires the request is REFUSED rather than sent, because sending
+	// it blows the unified budget and llama-server then fails every concurrent
+	// request at once (measured: three clients erroring together).
+	waitBudget = 180 * time.Second // ver waitBudgetForTest
+	// replyReserve caps how much of max_tokens is reserved as KV. Copilot asks
+	// for 16k it almost never uses; reserving all of it would admit one client.
+	replyReserve = 4096
 	// stickyCap is how many conversations keep an engine assignment.
 	stickyCap = 256
 	// sessionKeyChars is how much of the conversation head identifies it: enough
@@ -153,15 +164,15 @@ func sessionKey(body gateway.Body) string {
 // pick returns the engine that serves this request plus the release function to
 // call once the reply is done. Sticky by conversation; new conversations go to
 // the emptiest engine; a request that does not fit waits for room (fail-open).
-func (b *decodeBalancer) pick(key string, estTokens int) (*decodeNode, func()) {
+func (b *decodeBalancer) pick(key string, estTokens int) (*decodeNode, func(), error) {
 	if len(b.nodes) == 0 {
-		return nil, func() {}
+		return nil, func() {}, nil
 	}
 	if estTokens < 0 {
 		estTokens = 0
 	}
 	n := b.chooseNode(key, estTokens)
-	deadline := time.Now().Add(waitBudget)
+	deadline := time.Now().Add(waitBudgetForTest)
 	for !n.fits(estTokens) && time.Now().Before(deadline) {
 		// another engine with room right now beats waiting for this one
 		if alt := b.freeNode(estTokens); alt != nil && alt != n {
@@ -171,9 +182,23 @@ func (b *decodeBalancer) pick(key string, estTokens int) (*decodeNode, func()) {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+	if !n.fits(estTokens) {
+		// still no room: refuse THIS request instead of blowing the engine's
+		// budget and taking every other client's request down with it.
+		i, held := n.load()
+		return nil, func() {}, fmt.Errorf("%w: %s lleno (%d tokens en vuelo en %d peticiones, presupuesto %d); esta pide %d",
+			ErrEngineFull, n.name, held, i, n.budget, estTokens)
+	}
 	n.claim(estTokens)
-	return n, func() { n.release(estTokens) }
+	return n, func() { n.release(estTokens) }, nil
 }
+
+// ErrEngineFull says no decode engine had room for this request within
+// waitBudget. Refusing one request keeps the engine serving everyone else.
+var ErrEngineFull = errors.New("motor de decode sin contexto disponible")
+
+// waitBudgetForTest is the live queue deadline (a var so the tests can shorten it).
+var waitBudgetForTest = waitBudget
 
 // chooseNode applies the sticky assignment, or picks the least loaded engine.
 func (b *decodeBalancer) chooseNode(key string, estTokens int) *decodeNode {

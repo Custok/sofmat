@@ -142,7 +142,10 @@ func (s *Server) getJSONOr(url string) (map[string]any, error) {
 // A request whose KV was just handed off must stay on the primary engine — the
 // restored state lives in that engine's slot.
 func (s *Server) backendCall(body gateway.Body, extra gateway.Headers) (gateway.Body, error) {
-	node, done := s.pickDecode(body, extra)
+	node, done, err := s.pickDecode(body, extra)
+	if err != nil {
+		return nil, err
+	}
 	defer done()
 	url := s.bc.DecodeEntryURL
 	if node != nil {
@@ -152,15 +155,16 @@ func (s *Server) backendCall(body gateway.Body, extra gateway.Headers) (gateway.
 }
 
 // pickDecode resolves the engine for a request plus its release function.
-func (s *Server) pickDecode(body gateway.Body, extra gateway.Headers) (*decodeNode, func()) {
+func (s *Server) pickDecode(body gateway.Body, extra gateway.Headers) (*decodeNode, func(), error) {
 	if s.bal == nil || s.bal.Len() == 0 {
-		return nil, func() {}
+		return nil, func() {}, nil
 	}
 	if extra["x-sofmat-kv-handoff"] != "" {
+		// its state is already restored in the primary: it must go there
 		n := s.bal.Primary()
 		est := estBodyTokens(body)
 		n.claim(est)
-		return n, func() { n.release(est) }
+		return n, func() { n.release(est) }, nil
 	}
 	return s.bal.pick(sessionKey(body), estBodyTokens(body))
 }
@@ -172,13 +176,17 @@ func estBodyTokens(body gateway.Body) int {
 	if raw, err := json.Marshal(body["messages"]); err == nil {
 		n = len(raw) / 4
 	}
+	reply := 0
 	switch v := body["max_tokens"].(type) {
 	case float64:
-		n += int(v)
+		reply = int(v)
 	case int:
-		n += v
+		reply = v
 	}
-	return n
+	if reply > replyReserve {
+		reply = replyReserve
+	}
+	return n + reply
 }
 
 // agentOfNode returns the soflink agent base of a configured node ("" if none).
@@ -488,7 +496,12 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 	}
 	// same engine choice as the JSON path: sticky per conversation, least loaded
 	// for a new one, and pinned to the primary when a handoff just restored there.
-	node, doneNode := s.pickDecode(plan.Body, plan.Headers)
+	node, doneNode, perr := s.pickDecode(plan.Body, plan.Headers)
+	if perr != nil {
+		writeJSON(w, http.StatusServiceUnavailable, gateway.Body{"error": perr.Error()})
+		s.gw.Finish(plan, gateway.Body{})
+		return
+	}
 	defer doneNode()
 	decodeURL := s.bc.DecodeEntryURL
 	if node != nil {
