@@ -360,11 +360,24 @@ func TestFullEngineRefusesInsteadOfOverloading(t *testing.T) {
 // Copilot asks for 16k of output it rarely uses; reserving all of it would let
 // a single client fill the engine.
 func TestReplyReserveIsCapped(t *testing.T) {
-	big := gateway.Body{"messages": []any{map[string]any{"role": "user", "content": strings.Repeat("x", 40000)}},
-		"max_tokens": float64(16000)}
+	prompt := strings.Repeat("x", 40000)
+	big := gateway.Body{"messages": []any{map[string]any{"role": "user", "content": prompt}},
+		"max_tokens": float64(160000)} // absurd on purpose
 	got := estBodyTokens(big)
-	if got > 10000+replyReserve+200 {
+	// the reply is capped, so an absurd max_tokens cannot reserve the engine
+	if got > len(prompt)/2+replyReserve {
 		t.Fatalf("reservation must cap the reply at %d tokens, got %d", replyReserve, got)
+	}
+	// ...but a realistic max_tokens IS reserved in full: under-reserving is what
+	// left the engine with no room to generate and produced empty answers
+	real := gateway.Body{"messages": []any{map[string]any{"role": "user", "content": prompt}},
+		"max_tokens": float64(16000)}
+	if estBodyTokens(real)-estBodyTokens(gateway.Body{"messages": big["messages"], "max_tokens": float64(0)}) < 16000-replyDefault {
+		t.Fatalf("a declared 16k reply must be reserved, not trimmed: %d", estBodyTokens(real))
+	}
+	// the prompt estimate must not UNDER-count: bytes/4 missed by 2.6x live
+	if estBodyTokens(gateway.Body{"messages": big["messages"], "max_tokens": float64(0)}) < len(prompt)/4 {
+		t.Fatal("the prompt estimate must err on the pessimistic side")
 	}
 	small := gateway.Body{"messages": []any{map[string]any{"role": "user", "content": "hola"}}, "max_tokens": float64(100)}
 	if estBodyTokens(small) > 200 {

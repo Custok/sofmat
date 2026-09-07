@@ -291,12 +291,24 @@ func (s *Server) pickDecode(body gateway.Body, extra gateway.Headers) (*decodeNo
 	return s.bal.pick(sessionKey(body), estBodyTokens(body))
 }
 
-// estBodyTokens is the cheap chars/4 estimate of what a request will hold in
-// the engine's KV (prompt + the reply it is allowed to generate).
+// estBodyTokens is what a request will occupy in the engine's KV: the prompt
+// plus the reply it is allowed to generate.
+//
+// The reply is NOT trimmed to a token or two. A client that declares
+// max_tokens 16000 will use up to that, and the engine needs the room: with
+// the reply under-reserved, a prompt was admitted that left 3 046 free of
+// 100 096, the engine had nowhere to generate, and the answer came back with
+// no choices at all (measured 2026-09-07, three VS Code clients).
+//
+// The prompt estimate is deliberately pessimistic. bytes/4 under-counted by
+// 2.6x on real traffic (estimated 28 885 for a prompt of 75 618), and an
+// under-count admits a request that does not fit — which costs everyone on
+// that engine. bytes/3 errs the safe way: it may make a request wait that
+// would have fitted, and waiting is recoverable.
 func estBodyTokens(body gateway.Body) int {
 	n := 0
 	if raw, err := json.Marshal(body["messages"]); err == nil {
-		n = len(raw) / 4
+		n = len(raw) / 3
 	}
 	reply := 0
 	switch v := body["max_tokens"].(type) {
@@ -304,6 +316,9 @@ func estBodyTokens(body gateway.Body) int {
 		reply = int(v)
 	case int:
 		reply = v
+	}
+	if reply <= 0 {
+		reply = replyDefault
 	}
 	if reply > replyReserve {
 		reply = replyReserve

@@ -39,15 +39,22 @@ const (
 	// budgetUse is the share of an engine's context we let in-flight requests
 	// claim. The rest absorbs what they generate (a reply is KV too).
 	budgetUse = 0.80
-	// waitBudget is how long a request waits for room in the engine. A 46k
-	// request takes ~40 s end to end, so three clients need a generous queue;
-	// when it expires the request is REFUSED rather than sent, because sending
-	// it blows the unified budget and llama-server then fails every concurrent
-	// request at once (measured: three clients erroring together).
-	waitBudget = 75 * time.Second // ver waitBudgetForTest
-	// replyReserve caps how much of max_tokens is reserved as KV. Copilot asks
-	// for 16k it almost never uses; reserving all of it would admit one client.
-	replyReserve = 4096
+	// waitBudget is how long a request waits for room in the engine.
+	//
+	// It is deliberately long. The client declares the context it wants as if it
+	// were alone (that is the only setting that does not punish a lone user), so
+	// with several clients the engine is genuinely oversubscribed and the
+	// coordinator's job is to turn contention into WAITING, not into failure.
+	// Waiting is recoverable; a refused or empty answer is not. The real ceiling
+	// is the client's own timeout, not this number.
+	waitBudget = 240 * time.Second // ver waitBudgetForTest
+	// replyReserve caps how much of max_tokens is reserved as KV, and replyDefault
+	// is what a request that declares nothing is assumed to want. The cap is
+	// generous on purpose: under-reserving is what produced answers with no
+	// choices at all — the prompt was admitted and then the engine had no room
+	// left to generate into.
+	replyReserve = 16384
+	replyDefault = 2048
 	// stickyCap is how many conversations keep an engine assignment.
 	stickyCap = 256
 	// sessionKeyChars is how much of the conversation head identifies it: enough
