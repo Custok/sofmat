@@ -63,6 +63,10 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		BackendCall:    s.backendCall,
 		StatusProvider: func() gateway.Body { return gateway.Body{"status": "ok"} },
 		NSlots:         4,
+		NoThink:        cfg.NoThink,
+	}
+	if cfg.NoThink {
+		log.Printf("gateway: razonamiento DESACTIVADO por config (enable_thinking=false salvo que el cliente lo pida)")
 	}
 	// Disaggregated prefill→decode (F1): wired only when both roles are configured
 	// AND both main nodes expose a soflink agent (the KV state travels between the

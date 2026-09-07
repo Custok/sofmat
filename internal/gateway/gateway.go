@@ -101,6 +101,7 @@ type Gateway struct {
 	busy      DecodeBusy           // optional; nil = handoff whenever admitted
 	allowed   func(Body) bool      // optional; false = this request must not be handed off
 	resident  func(Body, int) bool // optional; false = the engine no longer holds that prefix
+	noThink   bool                 // ask the template to skip the chain-of-thought
 	mode      string               // ModeBusy / ModeAlways / ModeAuto
 	threshold int                  // admission threshold on the ESTIMATE
 	exactMin  int                  // floor on the EXACT count (when count != nil)
@@ -131,6 +132,12 @@ type Options struct {
 	CountTokens    CountTokens
 	Tokens         Tokens
 	DecodeBusy     DecodeBusy
+	// NoThink asks the chat template to skip the model's chain-of-thought. Those
+	// tokens cost decode time AND occupy KV while they are produced, so they
+	// push a long conversation towards the engine's ceiling twice over. A client
+	// that sets chat_template_kwargs itself is left alone.
+	NoThink bool
+
 	// CacheResident asks whether the engine that will serve this request still
 	// holds about that many tokens of its prefix. The bookkeeping here can only
 	// say what the gateway ROUTED; it cannot see the engine evicting a slot to
@@ -225,6 +232,7 @@ func New(o Options) (*Gateway, error) {
 		busy:       o.DecodeBusy,
 		allowed:    o.HandoffAllowed,
 		resident:   o.CacheResident,
+		noThink:    o.NoThink,
 		mode:       mode,
 		threshold:  th,
 		exactMin:   em,
@@ -420,6 +428,15 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	merged := Body{}
 	for k, v := range body {
 		merged[k] = v
+	}
+	// Skip the chain-of-thought unless the caller has an opinion. Injected here,
+	// before the prompt is tokenized, so the prefill and the decode build the
+	// SAME prompt — a template flag applied to only one of them would make the
+	// handoff restore a state the decode does not recognise.
+	if g.noThink {
+		if _, ok := merged["chat_template_kwargs"]; !ok {
+			merged["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
+		}
 	}
 	// do not override a caller who set it explicitly.
 	if _, ok := merged[SpeculativeNMaxKey]; !ok {

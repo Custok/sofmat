@@ -424,3 +424,44 @@ func TestEvictedCacheIsNotBelieved(t *testing.T) {
 		t.Fatal("the reprocess must go through the prefill node, not the decode")
 	}
 }
+
+// The chain-of-thought is not free twice over: those tokens are generated at
+// decode speed AND occupy KV while they are produced, so a long deliberation
+// both costs minutes and pushes the conversation towards the engine's ceiling.
+// Measured on the fleet: the same answer took 52 generated tokens with
+// reasoning and 4 without; live, one turn spent 124 s of its 126 s generating
+// 9 557 tokens.
+func TestNoThinkIsInjectedBeforeTokenizing(t *testing.T) {
+	var seenByTokenizer, seenByDecode Body
+	gw, c := newTestGW(t, func(o *Options) {
+		o.NoThink = true
+		o.Tokens = func(b Body) ([]int, error) { seenByTokenizer = b; return seq(20000, 0), nil }
+	})
+	gw.Chat(Headers{}, chatBody(bigPrompt, "hola"))
+	seenByDecode = c.bodies[len(c.bodies)-1]
+
+	want := map[string]any{"enable_thinking": false}
+	for name, b := range map[string]Body{"tokenizer": seenByTokenizer, "decode": seenByDecode} {
+		got, _ := b["chat_template_kwargs"].(map[string]any)
+		if got == nil || got["enable_thinking"] != want["enable_thinking"] {
+			t.Fatalf("%s must see the template flag: %v", name, b["chat_template_kwargs"])
+		}
+	}
+
+	// a client with an opinion keeps it
+	gw2, c2 := newTestGW(t, func(o *Options) { o.NoThink = true })
+	body := chatBody(bigPrompt, "hola")
+	body["chat_template_kwargs"] = map[string]any{"enable_thinking": true}
+	gw2.Chat(Headers{}, body)
+	got, _ := c2.bodies[0]["chat_template_kwargs"].(map[string]any)
+	if got["enable_thinking"] != true {
+		t.Fatalf("an explicit request must not be overridden: %v", got)
+	}
+
+	// and off by default, nothing is injected
+	gw3, c3 := newTestGW(t, nil)
+	gw3.Chat(Headers{}, chatBody(bigPrompt, "hola"))
+	if _, ok := c3.bodies[0]["chat_template_kwargs"]; ok {
+		t.Fatal("without the option the body must be left alone")
+	}
+}

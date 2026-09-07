@@ -96,6 +96,17 @@ type Config struct {
 	//   "always": offload every admitted prompt.
 	KVHandoff string `json:"kv_handoff"`
 
+	// NoThink turns the model's chain-of-thought OFF for every chat request
+	// (chat_template_kwargs.enable_thinking = false), unless the client sets
+	// that field itself.
+	//
+	// The reasoning is not free twice over: those tokens are generated at
+	// decode speed AND they occupy KV while they are produced, so a long
+	// deliberation both costs minutes and pushes the conversation towards the
+	// engine's ceiling. Measured on this fleet: the same answer ("391") took 52
+	// generated tokens with reasoning and 4 without.
+	NoThink bool `json:"no_think"`
+
 	// GitHubToken authenticates the auto-updater's GitHub API calls. The public
 	// API is 60 req/h per IP (a shared LAN egress exhausts it fast); with a token
 	// it's 5000 req/h, so the fleet never loses its update channel. Lives ONLY in
