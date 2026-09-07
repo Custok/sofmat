@@ -236,10 +236,10 @@ func TestSingleEngineUnchanged(t *testing.T) {
 // other while 3 of its 4 slots idled.
 func TestPrefillConcurrencyBoundedByBudget(t *testing.T) {
 	k := newKVPipe("http://p", "http://d", "http://pc", "http://dc")
-	k.setBudget(100096) // usable: 80 076
+	k.setEngineBudget("http://p", 100096) // usable: 80 076
 
-	s1, r1, ok1 := k.acquireSlot(40000)
-	s2, r2, ok2 := k.acquireSlot(40000)
+	s1, r1, ok1 := k.acquireSlot("http://p", 40000)
+	s2, r2, ok2 := k.acquireSlot("http://p", 40000)
 	if !ok1 || !ok2 {
 		t.Fatal("two 40k prompts must fit together in a 100k engine")
 	}
@@ -249,7 +249,7 @@ func TestPrefillConcurrencyBoundedByBudget(t *testing.T) {
 	// a third does not fit: it must wait, not pile on
 	done := make(chan bool, 1)
 	go func() {
-		_, r3, ok3 := k.acquireSlot(40000)
+		_, r3, ok3 := k.acquireSlot("http://p", 40000)
 		done <- ok3
 		r3()
 	}()
@@ -268,8 +268,8 @@ func TestPrefillConcurrencyBoundedByBudget(t *testing.T) {
 		t.Fatal("the waiting prompt was never woken up")
 	}
 	r2()
-	if len(k.freeSlot) != prefillSlots || k.inflight != 0 {
-		t.Fatalf("slots/tokens leaked: free=%d inflight=%d", len(k.freeSlot), k.inflight)
+	if len(k.poolOf("http://p").free) != prefillSlots || k.poolOf("http://p").inflight != 0 {
+		t.Fatalf("slots/tokens leaked: free=%d inflight=%d", len(k.poolOf("http://p").free), k.poolOf("http://p").inflight)
 	}
 }
 
@@ -277,8 +277,8 @@ func TestPrefillConcurrencyBoundedByBudget(t *testing.T) {
 // being rejected for ever.
 func TestOversizedPrefillRunsAlone(t *testing.T) {
 	k := newKVPipe("http://p", "http://d", "http://pc", "http://dc")
-	k.setBudget(100096)
-	_, rel, ok := k.acquireSlot(95000)
+	k.setEngineBudget("http://p", 100096)
+	_, rel, ok := k.acquireSlot("http://p", 95000)
 	if !ok {
 		t.Fatal("a prompt larger than the usable budget must still run when the engine is free")
 	}
@@ -309,10 +309,10 @@ func TestDecodeRoomCountsOnlyGeneratingSlots(t *testing.T) {
 	defer dec.Close()
 
 	k := newKVPipe("http://prefill", dec.URL, "http://pc", "http://dc")
-	k.setDecodeBudget(100096)
+	k.setEngineBudget(dec.URL, 100096)
 
 	// 90k sitting in an IDLE slot is reclaimable: the whole budget is free
-	free, evict, _, ok := k.decodeRoom()
+	free, evict, _, ok := k.decodeRoom(k.decodeURL)
 	if !ok || free != 100096 {
 		t.Fatalf("idle cache must not count: free = %d (ok=%v)", free, ok)
 	}
@@ -322,7 +322,7 @@ func TestDecodeRoomCountsOnlyGeneratingSlots(t *testing.T) {
 
 	// the same 90k while that slot GENERATES is committed KV: no room for 50k
 	busy = true
-	free, _, _, ok = k.decodeRoom()
+	free, _, _, ok = k.decodeRoom(k.decodeURL)
 	if !ok || free != 10096 {
 		t.Fatalf("a generating slot holds its KV: free = %d (ok=%v), want 10096", free, ok)
 	}
@@ -458,17 +458,86 @@ func TestPrefillGivesUpFastWhenTheEngineIsBusy(t *testing.T) {
 		t.Fatalf("the prefill queue (%s) must stay below what the handoff saves", prefillWait)
 	}
 	k := newKVPipe("http://p", "http://d", "http://pc", "http://dc")
-	k.setBudget(100096)
-	_, rel, ok := k.acquireSlot(80000) // engine effectively full
+	k.setEngineBudget("http://p", 100096)
+	_, rel, ok := k.acquireSlot("http://p", 80000) // engine effectively full
 	if !ok {
 		t.Fatal("the first prompt must be admitted")
 	}
 	defer rel()
 	t0 := time.Now()
-	if _, _, ok := k.acquireSlot(40000); ok {
+	if _, _, ok := k.acquireSlot("http://p", 40000); ok {
 		t.Fatal("a prompt that does not fit must not be admitted")
 	}
 	if el := time.Since(t0); el > prefillWait+3*time.Second {
 		t.Fatalf("giving up took %s, expected about %s", el, prefillWait)
+	}
+}
+
+// Symmetric routing: the prefill runs on the engine where the conversation does
+// NOT live, and the state is restored into the engine that will serve it — in
+// both directions. With the roles nailed to the config, conversations living in
+// the second engine could not take the handoff at all: they were served direct
+// on the very engine that was prefilling for everyone else (3 of 4 such
+// requests came back empty, 52-160 s — live, 2026-09-07).
+func TestPrefillRunsOnTheEngineTheConversationDoesNotLiveIn(t *testing.T) {
+	b := newDecodeBalancer([]struct{ Name, URL string }{
+		{"decode", "http://a"}, {"decode2", "http://b"}})
+	b.setOccupancy(func(string) int { return 0 })
+	ctl := map[string]string{"http://a": "http://actl", "http://b": "http://bctl"}
+
+	k := newKVPipe("http://b", "http://a", "http://bctl", "http://actl")
+	k.resolve = func(body gateway.Body) (kvRoute, bool) {
+		dec := b.stickyNode(sessionKey(body))
+		pre := b.otherThan(dec)
+		if dec == nil || pre == nil {
+			return kvRoute{}, false
+		}
+		return kvRoute{prefillURL: pre.url, prefillCtl: ctl[pre.url],
+			decodeURL: dec.url, decodeCtl: ctl[dec.url]}, true
+	}
+
+	mk := func(q string) gateway.Body {
+		return gateway.Body{"messages": []any{map[string]any{"role": "user", "content": q}}}
+	}
+	seen := map[string]bool{}
+	for _, q := range []string{"conversacion uno", "conversacion dos"} {
+		body := mk(q)
+		rt, err := k.routeFor(body)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		if rt.prefillURL == rt.decodeURL {
+			t.Fatalf("%s: prefill and decode must be different engines (%s)", q, rt.decodeURL)
+		}
+		if rt.prefillCtl != ctl[rt.prefillURL] || rt.decodeCtl != ctl[rt.decodeURL] {
+			t.Fatalf("%s: each engine must carry its own agent: %+v", q, rt)
+		}
+		// the route must be stable for the same conversation
+		if again, _ := k.routeFor(body); again != rt {
+			t.Fatalf("%s: the route must not move between turns", q)
+		}
+		seen[rt.decodeURL] = true
+	}
+	if len(seen) != 2 {
+		t.Fatalf("two new conversations must land in different engines, got %v", seen)
+	}
+
+	// and the handoff remembers where it restored, so the request is served there
+	rt, _ := k.routeFor(mk("conversacion uno"))
+	k.noteRoute("sf-x.bin", rt, 1000)
+	if got := k.DecodeURLFor("sf-x.bin"); got != rt.decodeURL {
+		t.Fatalf("a handed-off request must be served by the engine that restored it: %s vs %s", got, rt.decodeURL)
+	}
+	if got := k.DecodeURLFor("sf-desconocido.bin"); got != k.decodeURL {
+		t.Fatal("an unknown state falls back to the configured decode")
+	}
+}
+
+// A single engine has nobody to hand off to: saying so is better than shipping
+// the state to the very engine that is going to serve the request.
+func TestNoHandoffWhenBothEndsAreTheSameEngine(t *testing.T) {
+	k := newKVPipe("http://same", "http://same", "http://c1", "http://c2")
+	if _, err := k.routeFor(gateway.Body{}); !errors.Is(err, gateway.ErrSkipHandoff) {
+		t.Fatalf("must skip, got %v", err)
 	}
 }

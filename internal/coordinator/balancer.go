@@ -171,18 +171,45 @@ func (b *decodeBalancer) Primary() *decodeNode {
 
 func (b *decodeBalancer) Len() int { return len(b.nodes) }
 
-// stickyIsPrimary reports whether this conversation is already assigned to an
-// engine OTHER than the primary. A KV handoff restores into the primary, so
-// such a conversation must not take that route: it would leave its cache
-// behind and reprocess the whole prompt on the other engine.
-func (b *decodeBalancer) stickyIsPrimary(key string) bool {
-	if len(b.nodes) < 2 {
-		return true
+// stickyNode is the engine this conversation lives in, assigning one if it is
+// new. Used to route a handoff: the state must be restored into the engine that
+// will serve the request, whichever that is.
+func (b *decodeBalancer) stickyNode(key string) *decodeNode {
+	if len(b.nodes) == 0 {
+		return nil
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	i, ok := b.sticky[key]
-	return !ok || i == 0
+	return b.chooseNode(key, 0)
+}
+
+// otherThan picks the engine that should do the PREFILL for a conversation
+// living in n: any engine but that one, preferring the one that is not
+// generating right now (a prefill on a generating engine drags its stream down
+// 9.2x — measured 2026-09-07: 75.2 tok/s alone, 8.2 tok/s under a 47k prefill).
+// nil when there is no other engine.
+func (b *decodeBalancer) otherThan(n *decodeNode) *decodeNode {
+	var best *decodeNode
+	bestHeld := 0
+	for _, c := range b.nodes {
+		if c == n {
+			continue
+		}
+		h := c.heldTokens()
+		if best == nil || h < bestHeld {
+			best, bestHeld = c, h
+		}
+	}
+	return best
+}
+
+// nodeByURL finds the engine serving that endpoint.
+func (b *decodeBalancer) nodeByURL(url string) *decodeNode {
+	url = strings.TrimRight(url, "/")
+	for _, n := range b.nodes {
+		if n.url == url {
+			return n
+		}
+	}
+	return nil
 }
 
 // setOccupancy gives every engine the probe that reads what its slots hold.

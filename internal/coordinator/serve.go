@@ -36,6 +36,11 @@ type Server struct {
 	// bal spreads chat traffic across the configured decode engines, pinning a
 	// conversation to the engine that holds its prompt cache (balancer.go).
 	bal *decodeBalancer
+
+	// kp drives the disaggregated prefill→decode handoff; nil when the fleet is
+	// not disaggregated. Kept so a handed-off request can be sent to the engine
+	// its state was actually restored into.
+	kp *kvPipe
 }
 
 // NewServer wires the config's instances into a gateway.
@@ -63,15 +68,32 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	// AND both main nodes expose a soflink agent (the KV state travels between the
 	// two agents). Otherwise the gateway stays decode-only (fail-soft).
 	if kp := kvPipeFrom(cfg, bc); kp != nil {
+		s.kp = kp
 		opts.PrefillCall = kp.Prefill
 		opts.Handoff = kp.Handoff
 		opts.CountTokens = kp.Count
 		opts.Tokens = kp.Tokens
 		opts.DecodeBusy = kp.DecodeBusy
-		// with a second decode engine, only conversations living in the primary
-		// may take the handoff (the restore lands there)
-		opts.HandoffAllowed = func(b gateway.Body) bool {
-			return s.bal == nil || s.bal.stickyIsPrimary(sessionKey(b))
+		// symmetric routing: the prefill runs on the engine where the conversation
+		// does NOT live, and the state is restored into the engine that will serve
+		// it. So every conversation can take the handoff — no veto needed.
+		ctlOf := ctlByEndpoint(cfg)
+		kp.resolve = func(b gateway.Body) (kvRoute, bool) {
+			if s.bal == nil || s.bal.Len() < 2 {
+				return kvRoute{}, false
+			}
+			dec := s.bal.stickyNode(sessionKey(b))
+			if dec == nil {
+				return kvRoute{}, false
+			}
+			pre := s.bal.otherThan(dec)
+			if pre == nil || ctlOf[pre.url] == "" || ctlOf[dec.url] == "" {
+				return kvRoute{}, false
+			}
+			return kvRoute{
+				prefillURL: pre.url, prefillCtl: ctlOf[pre.url],
+				decodeURL: dec.url, decodeCtl: ctlOf[dec.url],
+			}, true
 		}
 		mode := cfg.KVHandoff
 		if mode == "" {
@@ -94,8 +116,14 @@ func NewServer(cfg *config.Config) (*Server, error) {
 				v, _ := gs["n_ctx"].(float64)
 				return int(v)
 			}
-			kp.setBudget(ctxOf(kp.prefillURL))
-			kp.setDecodeBudget(ctxOf(kp.decodeURL))
+			seen := map[string]bool{}
+			for _, u := range append(engineURLs(cfg), kp.prefillURL, kp.decodeURL) {
+				if u == "" || seen[u] {
+					continue
+				}
+				seen[u] = true
+				kp.setEngineBudget(u, ctxOf(u))
+			}
 		}()
 	} else {
 		log.Printf("gateway: decode-only (sin prefill configurado o sin agent soflink en los nodos main)")
@@ -106,6 +134,36 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	}
 	s.gw = gw
 	return s, nil
+}
+
+// ctlByEndpoint maps each engine endpoint to the soflink agent of its main node
+// (the agent is what ships the KV state between engines).
+func ctlByEndpoint(cfg *config.Config) map[string]string {
+	out := map[string]string{}
+	for _, in := range cfg.Instances {
+		if in.Endpoint == "" {
+			continue
+		}
+		if a := agentOfNode(cfg, in.Main); a != "" {
+			out[strings.TrimRight(in.Endpoint, "/")] = a
+		}
+	}
+	return out
+}
+
+// engineURLs lists every configured engine endpoint, once.
+func engineURLs(cfg *config.Config) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, in := range cfg.Instances {
+		u := strings.TrimRight(in.Endpoint, "/")
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	return out
 }
 
 // decodeEndpointsFrom lists every configured decode engine, the first one being
@@ -216,10 +274,15 @@ func (s *Server) pickDecode(body gateway.Body, extra gateway.Headers) (*decodeNo
 	if s.bal == nil || s.bal.Len() == 0 {
 		return nil, func() {}, nil
 	}
-	if extra["x-sofmat-kv-handoff"] != "" {
-		// its state is already restored in the primary: it must go there, and the
-		// conversation must STAY there — its cache lives in that engine now.
+	if hid := extra["x-sofmat-kv-handoff"]; hid != "" {
+		// its state was restored into a specific engine (symmetric routing picks
+		// the conversation's own): it must go there, and STAY there.
 		n := s.bal.Primary()
+		if s.kp != nil {
+			if m := s.bal.nodeByURL(s.kp.DecodeURLFor(hid)); m != nil {
+				n = m
+			}
+		}
 		est := estBodyTokens(body)
 		n.claim(est)
 		s.bal.remember(sessionKey(body), n)
