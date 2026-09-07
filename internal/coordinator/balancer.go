@@ -36,9 +36,18 @@ import (
 )
 
 const (
-	// budgetUse is the share of an engine's context we let in-flight requests
-	// claim. The rest absorbs what they generate (a reply is KV too).
-	budgetUse = 0.80
+	// budgetUse is the share of an engine's context admitted requests may claim.
+	//
+	// It used to be 0.80, to leave room for what the requests would generate.
+	// That reservation is now explicit — estBodyTokens counts prompt + reply —
+	// so keeping the 20% on top charged the reply twice and refused work that
+	// fit. Live consequence with a SINGLE idle client: "decode2 lleno (0 tokens
+	// en vuelo en 0 peticiones, presupuesto 100096); esta pide 80126" — refused
+	// by 50 tokens against an empty engine, because 100 096 x 0.80 = 80 076.
+	//
+	// What is left is a genuine safety margin: the chat template's own tokens,
+	// and the fact that the size estimate is bytes/3 and not the tokenizer.
+	budgetUse = 0.97
 	// waitBudget is how long a request waits for room in the engine.
 	//
 	// It is deliberately long. The client declares the context it wants as if it
@@ -313,9 +322,11 @@ func (b *decodeBalancer) pick(key string, estTokens int) (*decodeNode, func(), e
 	if !n.fits(estTokens) {
 		// still no room: refuse THIS request instead of blowing the engine's
 		// budget and taking every other client's request down with it.
-		i, held := n.load()
-		return nil, func() {}, fmt.Errorf("%w: %s lleno (%d tokens en vuelo en %d peticiones, presupuesto %d); esta pide %d",
-			ErrEngineFull, n.name, held, i, n.budget, estTokens)
+		i, mine := n.load()
+		return nil, func() {}, fmt.Errorf(
+			"%w: %s sin hueco para %d tokens (KV comprometido %d, en vuelo %d en %d peticiones, utilizable %d de %d)",
+			ErrEngineFull, n.name, estTokens, n.heldTokens(), mine, i,
+			int(float64(n.budget)*budgetUse), n.budget)
 	}
 	n.claim(estTokens)
 	n.invalidateHeld()

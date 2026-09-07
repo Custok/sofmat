@@ -564,3 +564,25 @@ func TestNoHandoffWhenBothEndsAreTheSameEngine(t *testing.T) {
 		t.Fatalf("must skip, got %v", err)
 	}
 }
+
+// A lone client asking for the context it declared must be served. The reply is
+// reserved explicitly by estBodyTokens, so charging another 20% on top of it
+// refused work that fit: live, "decode2 lleno (0 tokens en vuelo en 0
+// peticiones, presupuesto 100096); esta pide 80126" — turned away by 50 tokens
+// against a completely idle engine.
+func TestLoneClientGetsTheContextItDeclared(t *testing.T) {
+	b := newDecodeBalancer(balTestNodes(1))
+	b.setOccupancy(func(string) int { return 0 })
+	n, done, err := b.pick("sola", 80126)
+	if err != nil || n == nil {
+		t.Fatalf("an idle engine of %d must take a request of 80126: %v", b.nodes[0].budget, err)
+	}
+	done()
+	// ...but a request that genuinely does not fit is still refused
+	orig := waitBudgetForTest
+	waitBudgetForTest = 200 * time.Millisecond
+	defer func() { waitBudgetForTest = orig }()
+	if _, _, err := b.pick("enorme", 120000); !errors.Is(err, ErrEngineFull) {
+		t.Fatalf("a request bigger than the engine must be refused: %v", err)
+	}
+}
