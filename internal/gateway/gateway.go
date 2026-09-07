@@ -102,6 +102,7 @@ type Gateway struct {
 	allowed   func(Body) bool      // optional; false = this request must not be handed off
 	resident  func(Body, int) bool // optional; false = the engine no longer holds that prefix
 	noThink   bool                 // ask the template to skip the chain-of-thought
+	replyRoom func(int) int        // how big a reply the engine can still host
 	mode      string               // ModeBusy / ModeAlways / ModeAuto
 	threshold int                  // admission threshold on the ESTIMATE
 	exactMin  int                  // floor on the EXACT count (when count != nil)
@@ -132,6 +133,14 @@ type Options struct {
 	CountTokens    CountTokens
 	Tokens         Tokens
 	DecodeBusy     DecodeBusy
+	// ReplyRoom answers how many tokens of reply the engine can still host for a
+	// prompt of that many tokens. The client declares a max_tokens as if it were
+	// alone, and it has no way to know how much of the engine its own prompt just
+	// took; asking for more than what is left makes llama-server abort the
+	// connection outright — 0 bytes, "unexpected EOF", and the client reports an
+	// answer with no choices. Returning 0 disables the clamp.
+	ReplyRoom func(promptTokens int) int
+
 	// NoThink asks the chat template to skip the model's chain-of-thought. Those
 	// tokens cost decode time AND occupy KV while they are produced, so they
 	// push a long conversation towards the engine's ceiling twice over. A client
@@ -233,6 +242,7 @@ func New(o Options) (*Gateway, error) {
 		allowed:    o.HandoffAllowed,
 		resident:   o.CacheResident,
 		noThink:    o.NoThink,
+		replyRoom:  o.ReplyRoom,
 		mode:       mode,
 		threshold:  th,
 		exactMin:   em,
@@ -328,6 +338,17 @@ func (g *Gateway) residentHot(body Body, hot int) int {
 		return 0
 	}
 	return hot
+}
+
+// intField reads a numeric body field however the client encoded it.
+func intField(b Body, key string) int {
+	switch v := b[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	}
+	return 0
 }
 
 // conversationSeed is the first non-system turn of a conversation: what tells
@@ -524,6 +545,18 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 			// recorded AFTER the eviction check: the log must show the number the
 			// routing decision was actually made on
 			fields["new_tokens"] = newExact
+			// The prompt is measured: cap the reply to what the engine can still
+			// host. The client sized max_tokens as if it were alone and cannot
+			// know how much of the engine its own prompt just took.
+			if g.replyRoom != nil {
+				if room := g.replyRoom(n); room > 0 {
+					if want := intField(merged, "max_tokens"); want > room {
+						merged["max_tokens"] = room
+						fields["max_tokens_clamped"] = room
+						fields["max_tokens_asked"] = want
+					}
+				}
+			}
 			if newExact < g.exactMin {
 				if newExact < n {
 					fields["admission"] = "cache-hot"

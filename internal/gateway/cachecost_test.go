@@ -465,3 +465,45 @@ func TestNoThinkIsInjectedBeforeTokenizing(t *testing.T) {
 		t.Fatal("without the option the body must be left alone")
 	}
 }
+
+// The client sizes max_tokens as if it were alone and cannot know how much of
+// the engine its own prompt just took. Asking for more than what is left makes
+// llama-server abort the connection outright: 0 bytes, "unexpected EOF", and
+// the client reports an answer with no choices. Live: a prompt of 82 296
+// tokens plus a declared reply of 16 384 = 98 680 of a 100 096 engine.
+func TestReplyIsClampedToWhatTheEngineHasLeft(t *testing.T) {
+	const budget = 100096
+	gw, c := newTestGW(t, func(o *Options) {
+		o.Tokens = func(Body) ([]int, error) { return seq(82296, 0), nil }
+		o.ReplyRoom = func(n int) int { return budget - n - 3072 }
+	})
+	body := chatBody(bigPrompt, "hola")
+	body["max_tokens"] = float64(16384)
+	gw.Chat(Headers{}, body)
+
+	sent := c.bodies[len(c.bodies)-1]
+	got := intField(sent, "max_tokens")
+	want := budget - 82296 - 3072 // 14 728
+	if got != want {
+		t.Fatalf("the reply must be clamped to the room left: got %d, want %d", got, want)
+	}
+	if got+82296+3072 > budget {
+		t.Fatalf("prompt + reply + template must fit the engine: %d", got+82296+3072)
+	}
+	rec := lastRecord(t, gw)
+	if rec["max_tokens_clamped"] != want || rec["max_tokens_asked"] != 16384 {
+		t.Fatalf("the clamp must be visible in the record: %v", rec)
+	}
+
+	// a reply that already fits is left alone
+	gw2, c2 := newTestGW(t, func(o *Options) {
+		o.Tokens = func(Body) ([]int, error) { return seq(20000, 0), nil }
+		o.ReplyRoom = func(n int) int { return budget - n - 3072 }
+	})
+	small := chatBody(bigPrompt, "hola")
+	small["max_tokens"] = float64(4096)
+	gw2.Chat(Headers{}, small)
+	if intField(c2.bodies[len(c2.bodies)-1], "max_tokens") != 4096 {
+		t.Fatal("a reply that fits must not be touched")
+	}
+}

@@ -64,6 +64,20 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		StatusProvider: func() gateway.Body { return gateway.Body{"status": "ok"} },
 		NSlots:         4,
 		NoThink:        cfg.NoThink,
+		// A prompt of n tokens leaves the engine's context minus n, minus a margin
+		// for the chat template and the tool definitions, which are counted by the
+		// engine and not by us.
+		ReplyRoom: func(n int) int {
+			if s.bal == nil || s.bal.Len() == 0 || n <= 0 {
+				return 0
+			}
+			budget := s.bal.Primary().budget
+			room := budget - n - templateMargin
+			if room < 0 {
+				room = 0
+			}
+			return room
+		},
 	}
 	if cfg.NoThink {
 		log.Printf("gateway: razonamiento DESACTIVADO por config (enable_thinking=false salvo que el cliente lo pida)")
@@ -152,6 +166,11 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	s.gw = gw
 	return s, nil
 }
+
+// templateMargin is what the chat template and the tool definitions add on top
+// of the prompt we measured. Observed on the fleet: a client declaring 80 000
+// input tokens produced a prompt of 82 296.
+const templateMargin = 3072
 
 // ctlByEndpoint maps each engine endpoint to the soflink agent of its main node
 // (the agent is what ships the KV state between engines).
