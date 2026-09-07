@@ -94,15 +94,16 @@ type Gateway struct {
 	verify    Verify
 	backend   BackendCall
 	status    StatusProvider
-	prefill   PrefillCall     // optional; nil = no disaggregation
-	handoff   Handoff         // optional; nil = no disaggregation
-	count     CountTokens     // optional; nil = estimate only
-	tokens    Tokens          // optional; supersedes count, enables the cache-aware estimate
-	busy      DecodeBusy      // optional; nil = handoff whenever admitted
-	allowed   func(Body) bool // optional; false = this request must not be handed off
-	mode      string          // ModeBusy / ModeAlways / ModeAuto
-	threshold int             // admission threshold on the ESTIMATE
-	exactMin  int             // floor on the EXACT count (when count != nil)
+	prefill   PrefillCall          // optional; nil = no disaggregation
+	handoff   Handoff              // optional; nil = no disaggregation
+	count     CountTokens          // optional; nil = estimate only
+	tokens    Tokens               // optional; supersedes count, enables the cache-aware estimate
+	busy      DecodeBusy           // optional; nil = handoff whenever admitted
+	allowed   func(Body) bool      // optional; false = this request must not be handed off
+	resident  func(Body, int) bool // optional; false = the engine no longer holds that prefix
+	mode      string               // ModeBusy / ModeAlways / ModeAuto
+	threshold int                  // admission threshold on the ESTIMATE
+	exactMin  int                  // floor on the EXACT count (when count != nil)
 	ring      *Ring
 	alpha     *AlphaEma
 	log       *RequestLog
@@ -130,6 +131,15 @@ type Options struct {
 	CountTokens    CountTokens
 	Tokens         Tokens
 	DecodeBusy     DecodeBusy
+	// CacheResident asks whether the engine that will serve this request still
+	// holds about that many tokens of its prefix. The bookkeeping here can only
+	// say what the gateway ROUTED; it cannot see the engine evicting a slot to
+	// make room for somebody else. Without this check a conversation whose cache
+	// was evicted is admitted as cache-hot and the decode silently reprocesses
+	// the whole prompt (measured 2026-09-07: 78 329 tokens, 184.5 s).
+	// nil = assume resident (previous behaviour).
+	CacheResident func(Body, int) bool
+
 	// HandoffAllowed vetoes the handoff for a request the caller knows must not
 	// take it. With more than one decode engine the restored state lands in the
 	// primary, so a conversation whose cache lives in ANOTHER engine must not be
@@ -214,6 +224,7 @@ func New(o Options) (*Gateway, error) {
 		tokens:     o.Tokens,
 		busy:       o.DecodeBusy,
 		allowed:    o.HandoffAllowed,
+		resident:   o.CacheResident,
 		mode:       mode,
 		threshold:  th,
 		exactMin:   em,
@@ -287,6 +298,28 @@ func (g *Gateway) Chat(h Headers, body Body) (Body, error) {
 	}
 	g.Finish(p, resp)
 	return resp, nil
+}
+
+// residentFor reports whether the engine that will serve this request still
+// holds about expect tokens of its prefix. Unknown (no probe) = assume yes.
+func (g *Gateway) residentFor(body Body, expect int) bool {
+	if g.resident == nil || expect <= 0 {
+		return true
+	}
+	ok := true
+	func() {
+		defer func() { _ = recover() }() // a probe must never take the request down
+		ok = g.resident(body, expect)
+	}()
+	return ok
+}
+
+// residentHot zeroes a "hot prefix" the engine no longer holds.
+func (g *Gateway) residentHot(body Body, hot int) int {
+	if hot > 0 && !g.residentFor(body, hot) {
+		return 0
+	}
+	return hot
 }
 
 // conversationSeed is the first non-system turn of a conversation: what tells
@@ -370,7 +403,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	decision := ClassifyAdmission(AdmissionInput{
 		PrefixTokens:     prefixToks,
 		TailTokens:       tailToks,
-		HotPrefixTokens:  g.known.HotTokens(pkey),
+		HotPrefixTokens:  g.residentHot(body, g.known.HotTokens(pkey)),
 		Threshold:        g.threshold,
 		PrefillAvailable: g.Disaggregated(),
 	})
@@ -463,6 +496,16 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		}
 		if goPrefill && n > 0 {
 			fields["tokens"] = n
+			if newExact < g.exactMin && !g.residentFor(merged, n-newExact) {
+				// the engine no longer holds the prefix we were counting on: this
+				// prompt is cold, whatever the bookkeeping says. Say so out loud
+				// and let the cost model route it (the prefill node can chew it
+				// without stalling whoever is generating on the decode).
+				fields["cache_evicted"] = true
+				newExact = n
+			}
+			// recorded AFTER the eviction check: the log must show the number the
+			// routing decision was actually made on
 			fields["new_tokens"] = newExact
 			if newExact < g.exactMin {
 				if newExact < n {

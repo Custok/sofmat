@@ -74,6 +74,19 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		opts.CountTokens = kp.Count
 		opts.Tokens = kp.Tokens
 		opts.DecodeBusy = kp.DecodeBusy
+		// the engine itself is the only honest source on whether a conversation's
+		// prefix survived: the gateway records what it routed, not what the engine
+		// evicted to make room for somebody else.
+		opts.CacheResident = func(b gateway.Body, expect int) bool {
+			if s.bal == nil || s.bal.Len() == 0 {
+				return true
+			}
+			n := s.bal.stickyNode(sessionKey(b))
+			if n == nil {
+				return true
+			}
+			return kp.holdsAtLeast(n.url, expect)
+		}
 		// symmetric routing: the prefill runs on the engine where the conversation
 		// does NOT live, and the state is restored into the engine that will serve
 		// it. So every conversation can take the handoff — no veto needed.

@@ -503,6 +503,33 @@ func (k *kvPipe) tokens(body gateway.Body) ([]int, error) {
 // decodeSlots reads the decode engine's /slots (nil on any failure).
 func (k *kvPipe) decodeSlots() []map[string]any { return k.slotsAt(k.decodeURL) }
 
+// holdsAtLeast reports whether any single slot of that engine still holds about
+// want tokens: the cheapest way to ask "is this conversation's prefix still
+// there?". The gateway's own bookkeeping cannot know — it records what it
+// ROUTED, not what the engine evicted to make room for somebody else.
+//
+// A tolerance of 20% absorbs the turn's own growth and the template. It is a
+// lower bound, not an identity check: another conversation of a similar size
+// would pass. That is fine — what it catches is the expensive case, an engine
+// that no longer holds anything like this prompt, where believing the cache
+// costs a full reprocess (measured: 78 329 tokens, 184.5 s).
+func (k *kvPipe) holdsAtLeast(engine string, want int) bool {
+	if want <= 0 {
+		return true
+	}
+	slots := k.slotsAt(engine)
+	if slots == nil {
+		return true // unreadable: do not turn a probe failure into extra work
+	}
+	need := int(float64(want) * 0.8)
+	for _, s := range slots {
+		if v, ok := s["n_prompt_tokens"].(float64); ok && int(v) >= need {
+			return true
+		}
+	}
+	return false
+}
+
 // engineHeld is what an engine's slots hold that a new prompt cannot have,
 // re-read at most once a second per engine. Any engine can be asked to prefill
 // AND to decode, and both share ONE unified KV budget, so reserving prefill

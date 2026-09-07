@@ -30,6 +30,7 @@ type fakeEngine struct {
 	completions []int  // prompt token counts received by /completion
 	saved       []string
 	erased      int
+	held        int // tokens the engine reports it is holding (slot 0)
 	restored    []string
 	restoreSlot string
 	chats       []map[string]any // bodies received by /v1/chat/completions
@@ -50,9 +51,14 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 		e.mu.Lock()
 		busy := e.busy
 		e.mu.Unlock()
-		// busy: slots 0-2 generating, only slot 3 idle (so a handoff must land in 3)
+		e.mu.Lock()
+		held := float64(e.held)
+		e.mu.Unlock()
+		// busy: slots 0-2 generating, only slot 3 idle (so a handoff must land in 3).
+		// slot 0 reports what the engine last processed, the way a real
+		// llama-server does — the residency probe reads exactly this.
 		writeTestJSON(w, 200, []any{
-			map[string]any{"id": 0, "is_processing": busy},
+			map[string]any{"id": 0, "is_processing": busy, "n_prompt_tokens": held},
 			map[string]any{"id": 1, "is_processing": busy},
 			map[string]any{"id": 2, "is_processing": busy},
 			map[string]any{"id": 3, "is_processing": false},
@@ -149,6 +155,11 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		e.mu.Lock()
 		e.chats = append(e.chats, b)
+		// a real llama-server keeps what it just processed in the slot, and that is
+		// what the residency probe reads back on the next turn
+		if msgs, _ := json.Marshal(b["messages"]); len(msgs) > 0 {
+			e.held = len(msgs) / 4
+		}
 		e.mu.Unlock()
 		// the engine reused the restored KV only when pinned to the slot that holds it
 		promptN := 8001.0

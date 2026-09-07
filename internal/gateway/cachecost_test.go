@@ -378,3 +378,49 @@ func TestConversationsDoNotPolluteEachOthersCache(t *testing.T) {
 		t.Fatalf("a 600-token continuation must not prefill again: %d → %d", before, len(c.prefill))
 	}
 }
+
+// The bookkeeping records what the gateway ROUTED; it cannot see the engine
+// evicting a slot to make room for somebody else. With 80k prompts only ONE
+// conversation fits per engine, so eviction is the normal case — and believing
+// the cache then costs a FULL reprocess on the decode (measured 2026-09-07:
+// admission cache-hot, prompt_n 78 329, 184.5 s). Asking the engine turns that
+// into a prefill on the other card instead.
+func TestEvictedCacheIsNotBelieved(t *testing.T) {
+	resident := true
+	ids := append(seq(40000, 0), seq(300, 90000)...)
+	gw, c := newTestGW(t, func(o *Options) {
+		o.Tokens = func(Body) ([]int, error) { return ids, nil }
+		o.CacheResident = func(_ Body, expect int) bool { return resident }
+	})
+	// first turn: cold, goes through the prefill and is recorded
+	gw.Chat(Headers{}, chatBody(bigPrompt, "primera "+bigPrompt))
+	before := len(c.prefill)
+
+	// second turn while the engine still holds it: rides the cache
+	// long tails throughout, so the cheap estimate never short-circuits and the
+	// exact, cache-aware recount is what routes the turn
+	gw.Chat(Headers{}, chatBody(bigPrompt, "segunda "+bigPrompt))
+	if rec := lastRecord(t, gw); rec["admission"] != "cache-hot" {
+		t.Fatalf("with the prefix resident the turn must ride the cache: %v", rec)
+	}
+	if len(c.prefill) != before {
+		t.Fatal("a resident prefix must not be prefilled again")
+	}
+
+	// now the engine evicted it: the same turn must NOT be called cache-hot
+	resident = false
+	gw.Chat(Headers{}, chatBody(bigPrompt, "tercera "+bigPrompt))
+	rec := lastRecord(t, gw)
+	if rec["cache_evicted"] != true {
+		t.Fatalf("an evicted prefix must be recorded as such: %v", rec)
+	}
+	if rec["admission"] == "cache-hot" {
+		t.Fatalf("an evicted prefix must not read as cache-hot: %v", rec)
+	}
+	if rec["new_tokens"] != len(ids) {
+		t.Fatalf("an evicted prefix makes the WHOLE prompt new: %v", rec["new_tokens"])
+	}
+	if len(c.prefill) == before {
+		t.Fatal("the reprocess must go through the prefill node, not the decode")
+	}
+}
