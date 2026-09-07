@@ -205,14 +205,16 @@ func (k *kvPipe) makeDecodeRoom(need int, want string) (string, error) {
 		if v, isNum := s["n_prompt_tokens"].(float64); isNum {
 			n = int(v)
 		}
-		held += n
 		id := ""
 		if v, isNum := s["id"].(float64); isNum {
 			id = fmt.Sprintf("%d", int(v))
 		}
-		if busy, _ := s["is_processing"].(bool); !busy && id != "" {
-			idle = append(idle, slotInfo{id, n})
+		if busy, _ := s["is_processing"].(bool); busy || id == "" {
+			held += n // generating: untouchable
+			continue
 		}
+		held += n // erasable below, and subtracted as we erase
+		idle = append(idle, slotInfo{id, n})
 	}
 	if len(idle) == 0 {
 		return "", fmt.Errorf("%w: todos los slots del decode están generando", gateway.ErrSkipHandoff)
@@ -412,6 +414,9 @@ func (k *kvPipe) prefillHeld() int {
 	}
 	held := 0
 	for _, s := range slots {
+		if busy, _ := s["is_processing"].(bool); !busy {
+			continue // idle slot: llama.cpp reclaims that cache on reuse
+		}
 		if v, ok := s["n_prompt_tokens"].(float64); ok {
 			held += int(v)
 		}
@@ -451,24 +456,31 @@ func (k *kvPipe) decodeRoom() (free int, evict string, evictHeld int, ok bool) {
 	if slots == nil {
 		return 0, "", 0, false
 	}
+	// only the slots that are GENERATING hold KV we cannot take: the idle ones
+	// are erased by makeDecodeRoom right before the restore.
 	held := 0
 	evictHeld = -1
+	idle := 0
 	for _, s := range slots {
 		n := 0
 		if v, isNum := s["n_prompt_tokens"].(float64); isNum {
 			n = int(v)
 		}
-		held += n
 		busy, _ := s["is_processing"].(bool)
 		if busy {
+			held += n
 			continue
 		}
+		idle++
 		if evictHeld < 0 || n < evictHeld {
 			evictHeld = n
 			if v, isNum := s["id"].(float64); isNum {
 				evict = fmt.Sprintf("%d", int(v))
 			}
 		}
+	}
+	if idle == 0 {
+		return 0, "", 0, true // every slot generating: no room for a restore
 	}
 	if evictHeld < 0 {
 		evictHeld = 0
@@ -479,7 +491,7 @@ func (k *kvPipe) decodeRoom() (free int, evict string, evictHeld int, ok bool) {
 	if budget <= 0 {
 		budget = defaultCtx
 	}
-	return budget - held + evictHeld, evict, evictHeld, true
+	return budget - held, evict, evictHeld, true
 }
 
 // DecodeBusy probes the decode engine's /slots: true when any slot is

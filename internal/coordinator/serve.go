@@ -129,9 +129,18 @@ func decodeEndpointsFrom(cfg *config.Config) []struct{ Name, URL string } {
 	return out
 }
 
-// engineHeldTokens is what an engine's slots currently hold (sum of
-// n_prompt_tokens). -1 when /slots cannot be read, so the caller keeps its last
-// reading instead of assuming the engine is empty.
+// engineHeldTokens is the KV an engine cannot give away: the tokens held by the
+// slots that are PROCESSING. -1 when /slots cannot be read, so the caller keeps
+// its last reading instead of assuming the engine is empty.
+//
+// Idle slots are deliberately NOT counted. Their prompt cache is reclaimable —
+// llama.cpp overwrites it the moment it assigns that slot to a new task — so
+// counting it as occupancy makes the gateway refuse work an engine could serve.
+// Measured the hard way (2026-09-07): two engines holding 54 840 and 56 708
+// tokens of FINISHED conversations, nothing generating, and every request
+// queued the full 180 s and got refused. The failure this guard exists for is
+// different: several LARGE requests generating at once (three concurrent 46k =
+// 138k > 100 096), which is exactly what the processing slots measure.
 func (s *Server) engineHeldTokens(url string) int {
 	req, err := http.NewRequest(http.MethodGet, url+"/slots", nil)
 	if err != nil {
@@ -152,6 +161,9 @@ func (s *Server) engineHeldTokens(url string) int {
 	}
 	held := 0
 	for _, sl := range slots {
+		if busy, _ := sl["is_processing"].(bool); !busy {
+			continue // reclaimable cache, not committed KV
+		}
 		if v, ok := sl["n_prompt_tokens"].(float64); ok {
 			held += int(v)
 		}

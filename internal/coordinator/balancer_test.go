@@ -288,12 +288,18 @@ func TestOversizedPrefillRunsAlone(t *testing.T) {
 // The decode must be able to host the state BEFORE the prefill is spent: the
 // live failure was 27 s of prefill thrown away by "No available space in KV
 // cache", after which the decode re-processed the whole 50k prompt.
-func TestHandoffSkippedWhenDecodeHasNoRoom(t *testing.T) {
-	var held float64 = 90000
+//
+// What counts as "no room" is only the KV the engine cannot give away — the
+// slots that are GENERATING. An idle slot's cache is erased right before the
+// restore, so counting it refuses work the engine could serve (measured
+// 2026-09-07: two engines holding ~55k each of FINISHED conversations, nothing
+// generating, and every request queued the full wait and got refused).
+func TestDecodeRoomCountsOnlyGeneratingSlots(t *testing.T) {
+	var busy bool
 	dec := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/slots" {
 			writeTestJSON(w, 200, []any{
-				map[string]any{"id": 0, "is_processing": false, "n_prompt_tokens": held},
+				map[string]any{"id": 0, "is_processing": busy, "n_prompt_tokens": 90000.0},
 				map[string]any{"id": 1, "is_processing": false, "n_prompt_tokens": 0.0},
 			})
 			return
@@ -304,16 +310,22 @@ func TestHandoffSkippedWhenDecodeHasNoRoom(t *testing.T) {
 
 	k := newKVPipe("http://prefill", dec.URL, "http://pc", "http://dc")
 	k.setDecodeBudget(100096)
-	// 90k held, the emptiest idle slot holds 0 → free = 10 096
+
+	// 90k sitting in an IDLE slot is reclaimable: the whole budget is free
 	free, evict, _, ok := k.decodeRoom()
-	if !ok || free != 10096 {
-		t.Fatalf("free = %d (ok=%v), want 10096", free, ok)
+	if !ok || free != 100096 {
+		t.Fatalf("idle cache must not count: free = %d (ok=%v)", free, ok)
 	}
 	if evict == "" {
 		t.Fatal("an idle slot must be offered for eviction")
 	}
-	// evicting the big slot is what makes room: with slot 0 idle and empty the
-	// cheapest eviction is slot 1, so a 50k state does not fit
+
+	// the same 90k while that slot GENERATES is committed KV: no room for 50k
+	busy = true
+	free, _, _, ok = k.decodeRoom()
+	if !ok || free != 10096 {
+		t.Fatalf("a generating slot holds its KV: free = %d (ok=%v), want 10096", free, ok)
+	}
 	if free >= 50000 {
 		t.Fatal("a 50k state must not be considered to fit")
 	}

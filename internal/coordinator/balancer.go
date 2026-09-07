@@ -44,7 +44,7 @@ const (
 	// when it expires the request is REFUSED rather than sent, because sending
 	// it blows the unified budget and llama-server then fails every concurrent
 	// request at once (measured: three clients erroring together).
-	waitBudget = 180 * time.Second // ver waitBudgetForTest
+	waitBudget = 75 * time.Second // ver waitBudgetForTest
 	// replyReserve caps how much of max_tokens is reserved as KV. Copilot asks
 	// for 16k it almost never uses; reserving all of it would admit one client.
 	replyReserve = 4096
@@ -66,11 +66,10 @@ type decodeNode struct {
 	inflight int
 	tokens   int // tokens claimed by in-flight requests
 
-	// held is what the engine's slots ACTUALLY hold, read from /slots. It is not
-	// the same as tokens: llama.cpp keeps a slot's prompt cache after the request
-	// ends, and that cache still occupies the unified budget. Counting only
-	// in-flight requests admitted a 75k prompt into an engine already holding
-	// 80k, and llama-server then failed it (and every concurrent request).
+	// held is the KV the engine cannot give away: the tokens of the slots that
+	// are GENERATING (see Server.engineHeldTokens). Counting only this gateway's
+	// in-flight requests under-counts when another client is streaming; counting
+	// idle slots' caches over-counts and refuses work the engine could serve.
 	heldMu    sync.Mutex
 	held      int
 	heldAt    time.Time
