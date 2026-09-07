@@ -462,14 +462,24 @@ func TestSessionKeySkipsTheSystemPrompt(t *testing.T) {
 	}
 }
 
-// Waiting for prefill room must never cost more than the prefill path saves.
-// Measured: a 34 409-token request waited the full 45 s queue for an engine
-// that was busy generating, gave up, and the decode did the work in 22 s — 76 s
-// total for 31 s of work, chasing a ~4 s saving.
-func TestPrefillGivesUpFastWhenTheEngineIsBusy(t *testing.T) {
-	if prefillWait > 8*time.Second {
-		t.Fatalf("the prefill queue (%s) must stay below what the handoff saves", prefillWait)
+// Waiting for prefill room is worth about what the alternative costs: going
+// direct means the decode chews the whole prompt itself and drags whatever else
+// that engine is generating down 9.2x. So the deadline scales with the prompt.
+//
+// A flat 45 s cost 76 s on a 34 409-token request (waited the lot, gave up, the
+// decode did it in 22 s). A flat 5 s cost 98.6 s on a 46 697-token one (gave up
+// on a moment's contention and the decode reprocessed everything).
+func TestPrefillWaitScalesWithThePrompt(t *testing.T) {
+	if got := prefillWaitFor(1000); got != prefillWaitFloor {
+		t.Fatalf("a small prompt waits the floor, got %s", got)
 	}
+	if got := prefillWaitFor(46697); got < 25*time.Second || got > 40*time.Second {
+		t.Fatalf("a 46.7k prompt should wait about as long as the decode would take on it (~33 s), got %s", got)
+	}
+	if got := prefillWaitFor(1 << 20); got != prefillWaitCap {
+		t.Fatalf("an enormous prompt is capped, got %s", got)
+	}
+
 	k := newKVPipe("http://p", "http://d", "http://pc", "http://dc")
 	k.setEngineBudget("http://p", 100096)
 	_, rel, ok := k.acquireSlot("http://p", 80000) // engine effectively full
@@ -478,11 +488,11 @@ func TestPrefillGivesUpFastWhenTheEngineIsBusy(t *testing.T) {
 	}
 	defer rel()
 	t0 := time.Now()
-	if _, _, ok := k.acquireSlot("http://p", 40000); ok {
+	if _, _, ok := k.acquireSlot("http://p", 1000); ok {
 		t.Fatal("a prompt that does not fit must not be admitted")
 	}
-	if el := time.Since(t0); el > prefillWait+3*time.Second {
-		t.Fatalf("giving up took %s, expected about %s", el, prefillWait)
+	if el := time.Since(t0); el > prefillWaitFloor+3*time.Second {
+		t.Fatalf("a small prompt must give up quickly: %s", el)
 	}
 }
 

@@ -46,18 +46,20 @@ const (
 	// prefillBudgetUse below — two 40k prompts fit in 100k, three do not.
 	prefillSlots     = 4
 	prefillBudgetUse = 0.80
-	// prefillWait is how long a prompt waits for room on the prefill engine
-	// before the gateway gives up on the handoff (and serves it decode-direct).
+	// prefillWaitCap bounds how long a prompt waits for room on the prefill
+	// engine. The wait itself is proportional to what the alternative costs:
+	// going direct means the DECODE engine chews the whole prompt at ~ppDirect
+	// tokens/s, and while it does, whatever else that engine is generating drops
+	// to an eighth of its speed (measured 9.2x interference). So waiting is worth
+	// roughly as long as the direct path would take, and no longer.
 	//
-	// It must stay SMALLER than what the prefill path saves, or waiting is a
-	// guaranteed loss. At these sizes the saving is a few seconds (34k tokens:
-	// ~25 s direct vs ~21 s through the prefill), so a long queue can only make
-	// things worse. Measured with 45 s here: a 34 409-token request waited the
-	// full 45 s for room on an engine that was busy generating, gave up, and the
-	// decode then did the work in 22 s — 76 s total for 31 s of actual work, to
-	// chase a 4 s saving. Five seconds absorbs a transient blip; beyond that,
-	// going direct is simply the better trade.
-	prefillWait = 5 * time.Second
+	// A flat 5 s was too little and cost 98.6 s on a live 46 697-token request:
+	// the prefill engine was busy for a moment, the queue gave up, and the decode
+	// reprocessed everything. A flat 45 s was too much for small prompts. The
+	// deadline is now sized per prompt.
+	ppDirect         = 1400.0 // tokens/s the decode chews a cold prompt at
+	prefillWaitCap   = 60 * time.Second
+	prefillWaitFloor = 5 * time.Second
 )
 
 // kvTransport bounds the DIAL to the prefill/decode nodes: a host that is down
@@ -215,8 +217,21 @@ func (k *kvPipe) DecodeURLFor(hid string) string {
 // acquireSlot reserves a prefill slot and room in the engine's KV budget for a
 // prompt of estTokens. Returns the slot and its release; ok=false when no room
 // came free within prefillWait (the caller then falls back to decode-direct).
+// prefillWaitFor is how long a prompt of this size may wait for the prefill:
+// about what the decode would spend chewing it directly.
+func prefillWaitFor(tokens int) time.Duration {
+	d := time.Duration(float64(tokens) / ppDirect * float64(time.Second))
+	if d < prefillWaitFloor {
+		return prefillWaitFloor
+	}
+	if d > prefillWaitCap {
+		return prefillWaitCap
+	}
+	return d
+}
+
 func (k *kvPipe) acquireSlot(engine string, estTokens int) (slot int, release func(), ok bool) {
-	deadline := time.Now().Add(prefillWait)
+	deadline := time.Now().Add(prefillWaitFor(estTokens))
 	for {
 		held := k.engineHeld(engine) // HTTP: never under slotMu
 		k.slotMu.Lock()
@@ -686,7 +701,7 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 	slot, releaseSlot, ok := k.acquireSlot(rt.prefillURL, len(ids))
 	if !ok {
 		return nil, fmt.Errorf("%w: el prefill no tiene sitio para %d tokens en %s",
-			gateway.ErrSkipHandoff, len(ids), prefillWait)
+			gateway.ErrSkipHandoff, len(ids), prefillWaitFor(len(ids)))
 	}
 	defer releaseSlot()
 
