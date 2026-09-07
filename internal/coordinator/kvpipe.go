@@ -48,7 +48,16 @@ const (
 	prefillBudgetUse = 0.80
 	// prefillWait is how long a prompt waits for room on the prefill engine
 	// before the gateway gives up on the handoff (and serves it decode-direct).
-	prefillWait = 45 * time.Second
+	//
+	// It must stay SMALLER than what the prefill path saves, or waiting is a
+	// guaranteed loss. At these sizes the saving is a few seconds (34k tokens:
+	// ~25 s direct vs ~21 s through the prefill), so a long queue can only make
+	// things worse. Measured with 45 s here: a 34 409-token request waited the
+	// full 45 s for room on an engine that was busy generating, gave up, and the
+	// decode then did the work in 22 s — 76 s total for 31 s of actual work, to
+	// chase a 4 s saving. Five seconds absorbs a transient blip; beyond that,
+	// going direct is simply the better trade.
+	prefillWait = 5 * time.Second
 )
 
 // kvTransport bounds the DIAL to the prefill/decode nodes: a host that is down

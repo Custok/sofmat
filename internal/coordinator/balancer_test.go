@@ -448,3 +448,27 @@ func TestSessionKeySkipsTheSystemPrompt(t *testing.T) {
 		t.Fatal("a system-only request needs a stable key")
 	}
 }
+
+// Waiting for prefill room must never cost more than the prefill path saves.
+// Measured: a 34 409-token request waited the full 45 s queue for an engine
+// that was busy generating, gave up, and the decode did the work in 22 s — 76 s
+// total for 31 s of work, chasing a ~4 s saving.
+func TestPrefillGivesUpFastWhenTheEngineIsBusy(t *testing.T) {
+	if prefillWait > 8*time.Second {
+		t.Fatalf("the prefill queue (%s) must stay below what the handoff saves", prefillWait)
+	}
+	k := newKVPipe("http://p", "http://d", "http://pc", "http://dc")
+	k.setBudget(100096)
+	_, rel, ok := k.acquireSlot(80000) // engine effectively full
+	if !ok {
+		t.Fatal("the first prompt must be admitted")
+	}
+	defer rel()
+	t0 := time.Now()
+	if _, _, ok := k.acquireSlot(40000); ok {
+		t.Fatal("a prompt that does not fit must not be admitted")
+	}
+	if el := time.Since(t0); el > prefillWait+3*time.Second {
+		t.Fatalf("giving up took %s, expected about %s", el, prefillWait)
+	}
+}
