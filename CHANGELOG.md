@@ -2,6 +2,15 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609071520 (2026-09-07)
+El traspaso ya no se gasta en balde: se comprueba el sitio del decode ANTES del prefill.
+
+- Fallo reproducido con carga real (3 clientes, prompts de 50k): el prefill procesaba 26,5 s y al entregar, el decode respondia `Unable to restore slot: No available space in KV cache` (su KV unificada ya tenia 57k de otra conversacion). El gateway degradaba a directo y el decode REPROCESABA los 50 019 tokens: 72 s de pared y el trabajo del prefill a la basura. Ademas el fallo abria el cortacircuitos, asi que la siguiente vuelta ni lo intentaba (`prefill-down`).
+- Ahora `Prefill` mira lo que los slots del decode SOSTIENEN de verdad (`GET /slots`, `n_prompt_tokens`; llama.cpp mantiene la cache del prompt cuando la peticion acaba, asi que "ocupado" no es lo mismo que "en vuelo") y si el estado no cabe, NO gasta el prefill: la peticion va directa con `admission: handoff-skipped` y el motivo en el registro.
+- Un "no cabe" ya NO es un fallo del prefill: nuevo `gateway.ErrSkipHandoff`, que no abre el cortacircuitos, asi que la siguiente peticion vuelve a intentar el traspaso.
+- Antes del `restore`, el driver vacia el slot destino (`action=erase`): el restore necesita hueco en el presupuesto unificado y llama.cpp no desaloja por su cuenta.
+- El presupuesto real de los dos motores se lee de su `/props` al arrancar.
+
 ## v202609071345 (2026-09-07)
 Prefill y decode de verdad en paralelo: el prefill ingiere varios prompts a la vez y el decode deja de bloquearse.
 

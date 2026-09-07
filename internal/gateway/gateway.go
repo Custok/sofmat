@@ -17,11 +17,18 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 var ErrUnauthorized = errors.New("unauthorized")
+
+// ErrSkipHandoff says the handoff was not attempted for a reason that is NOT a
+// prefill failure (typically: the decode has no room for the state right now).
+// The request is served decode-direct without opening the prefill breaker, so
+// the next request tries the prefill again straight away.
+var ErrSkipHandoff = errors.New("handoff skipped")
 
 type Headers map[string]string
 type Body map[string]any
@@ -401,7 +408,12 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		if goPrefill {
 			t0 := time.Now()
 			pre, err := g.callPrefillSafe(merged, Headers{"x-sofmat-slot": slot})
-			if err != nil {
+			if errors.Is(err, ErrSkipHandoff) {
+				// not a prefill problem: serve direct now, retry the handoff next time
+				fields["admission"] = "handoff-skipped"
+				fields["handoff_skipped"] = strings.TrimPrefix(err.Error(), ErrSkipHandoff.Error()+": ")
+				admittedVia = "decode"
+			} else if err != nil {
 				fields["prefill_error"] = err.Error()
 				g.tripBreaker()
 			} else {

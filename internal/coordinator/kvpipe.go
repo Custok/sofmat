@@ -73,7 +73,8 @@ type kvPipe struct {
 	slotMu   sync.Mutex
 	slotCond *sync.Cond
 	freeSlot []int // prefill slot ids available
-	budget   int   // prefill n_ctx (probed; defaultCtx until then)
+	budget       int // prefill n_ctx (probed; defaultCtx until then)
+	decodeBudget int // decode n_ctx (probed; defaultCtx until then)
 	inflight int   // tokens claimed by prefills in progress
 
 	tokMu sync.Mutex
@@ -92,8 +93,9 @@ func newKVPipe(prefillURL, decodeURL, prefillCtl, decodeCtl string) *kvPipe {
 		prefillCtl: strings.TrimRight(prefillCtl, "/"),
 		decodeCtl:  strings.TrimRight(decodeCtl, "/"),
 		client:     &http.Client{Timeout: 600 * time.Second, Transport: kvTransport},
-		toks:       map[string]tokEntry{},
-		budget:     defaultCtx,
+		toks:         map[string]tokEntry{},
+		budget:       defaultCtx,
+		decodeBudget: defaultCtx,
 	}
 	for i := 0; i < prefillSlots; i++ {
 		k.freeSlot = append(k.freeSlot, i)
@@ -142,6 +144,16 @@ func (k *kvPipe) setBudget(n int) {
 	}
 	k.slotMu.Lock()
 	k.budget = n
+	k.slotMu.Unlock()
+}
+
+// setDecodeBudget records the decode engine's real context size.
+func (k *kvPipe) setDecodeBudget(n int) {
+	if n <= 0 {
+		return
+	}
+	k.slotMu.Lock()
+	k.decodeBudget = n
 	k.slotMu.Unlock()
 }
 
@@ -279,6 +291,51 @@ func (k *kvPipe) decodeSlots() []map[string]any {
 	return slots
 }
 
+// decodeRoom reads what the decode engine's slots actually HOLD (llama.cpp keeps
+// a slot's prompt cache after the request ends, so occupancy is not the same as
+// "requests in flight") and returns the tokens still free once the cheapest idle
+// slot is evicted, plus that slot. Returns ok=false when /slots cannot be read.
+//
+// Why it matters: a restore needs room in the engine's UNIFIED budget. Without
+// this check the gateway spent a full prefill (27 s for 50k tokens) and only
+// then got "Unable to restore slot: No available space in KV cache", so the
+// decode re-processed the whole prompt: the worst of both paths.
+func (k *kvPipe) decodeRoom() (free int, evict string, evictHeld int, ok bool) {
+	slots := k.decodeSlots()
+	if slots == nil {
+		return 0, "", 0, false
+	}
+	held := 0
+	evictHeld = -1
+	for _, s := range slots {
+		n := 0
+		if v, isNum := s["n_prompt_tokens"].(float64); isNum {
+			n = int(v)
+		}
+		held += n
+		busy, _ := s["is_processing"].(bool)
+		if busy {
+			continue
+		}
+		if evictHeld < 0 || n < evictHeld {
+			evictHeld = n
+			if v, isNum := s["id"].(float64); isNum {
+				evict = fmt.Sprintf("%d", int(v))
+			}
+		}
+	}
+	if evictHeld < 0 {
+		evictHeld = 0
+	}
+	k.slotMu.Lock()
+	budget := k.decodeBudget
+	k.slotMu.Unlock()
+	if budget <= 0 {
+		budget = defaultCtx
+	}
+	return budget - held + evictHeld, evict, evictHeld, true
+}
+
 // DecodeBusy probes the decode engine's /slots: true when any slot is
 // processing (a live request the handoff should protect). A failed probe reads
 // as idle so a monitoring hiccup never forces the slower path.
@@ -369,6 +426,13 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 	if len(ids) < 2 {
 		return nil, fmt.Errorf("prompt too short for a handoff (%d tokens)", len(ids))
 	}
+	// the decode must be able to host the restored state; checking AFTER the
+	// prefill throws away all of that work (see decodeRoom).
+	if free, _, _, ok := k.decodeRoom(); ok && free < len(ids) {
+		return nil, fmt.Errorf("%w: el decode no tiene sitio (%d libres, hacen falta %d)",
+			gateway.ErrSkipHandoff, free, len(ids))
+	}
+
 	name := fmt.Sprintf("sf-%s-%d.bin", bodyHash(body)[:12], time.Now().UnixMilli())
 
 	slot, releaseSlot, ok := k.acquireSlot(len(ids))
@@ -451,6 +515,12 @@ func (k *kvPipe) Handoff(hid, slot string) (gateway.Body, error) {
 	// 31 s instead of 0.2 s for a 32k state) — prefer an idle slot.
 	slot = k.pickIdleSlot(slot)
 	out["slot"] = slot
+	// free what that slot still holds: the restore needs room in the engine's
+	// unified budget, and llama.cpp does not evict on its own for a restore.
+	if _, err := k.postJSON(fmt.Sprintf("%s/slots/%s?action=erase", k.decodeURL, slot),
+		map[string]any{}, 30*time.Second); err != nil {
+		log.Printf("kvpipe: erase previo al restore (slot %s): %v", slot, err)
+	}
 	t1 := time.Now()
 	rs, err := k.postJSON(fmt.Sprintf("%s/slots/%s?action=restore", k.decodeURL, slot),
 		map[string]any{"filename": hid}, 120*time.Second)

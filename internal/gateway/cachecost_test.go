@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -233,5 +234,37 @@ func TestAutoModeDecisions(t *testing.T) {
 	gw.Chat(Headers{}, chatBody(bigPrompt, "hola"))
 	if len(c.prefill) != 1 {
 		t.Fatalf("idle cold 46k must go through the prefill: %v", lastRecord(t, gw))
+	}
+}
+
+// "No room in the decode" is not a prefill failure: the request goes direct,
+// the reason is recorded, and the breaker stays CLOSED so the very next request
+// tries the prefill again.
+func TestSkipHandoffDoesNotOpenTheBreaker(t *testing.T) {
+	calls := 0
+	gw, c := newTestGW(t, func(o *Options) {
+		o.PrefillCall = func(Body, Headers) (Body, error) {
+			calls++
+			return nil, fmt.Errorf("%w: el decode no tiene sitio (10096 libres, hacen falta 50019)", ErrSkipHandoff)
+		}
+	})
+	gw.Chat(Headers{}, chatBody(bigPrompt, "uno"))
+	rec := lastRecord(t, gw)
+	if rec["admitted_via"] != "decode" || rec["admission"] != "handoff-skipped" {
+		t.Fatalf("a skip must read as a plain decode request: %v", rec)
+	}
+	if rec["prefill_error"] != nil {
+		t.Fatalf("a skip is not a prefill error: %v", rec["prefill_error"])
+	}
+	if s, _ := rec["handoff_skipped"].(string); !strings.Contains(s, "no tiene sitio") {
+		t.Fatalf("the reason must be recorded: %v", rec["handoff_skipped"])
+	}
+	// breaker closed: the next request tries the prefill again
+	gw.Chat(Headers{"x-sofmat-tenant": "otro"}, chatBody(bigPrompt, "dos"))
+	if calls != 2 {
+		t.Fatalf("the prefill must be retried immediately after a skip (calls=%d)", calls)
+	}
+	if len(c.decode) != 2 {
+		t.Fatalf("both requests must reach the decode: %d", len(c.decode))
 	}
 }

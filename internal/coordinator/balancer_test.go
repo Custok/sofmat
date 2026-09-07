@@ -283,3 +283,37 @@ func TestOversizedPrefillRunsAlone(t *testing.T) {
 	}
 	rel()
 }
+
+// The decode must be able to host the state BEFORE the prefill is spent: the
+// live failure was 27 s of prefill thrown away by "No available space in KV
+// cache", after which the decode re-processed the whole 50k prompt.
+func TestHandoffSkippedWhenDecodeHasNoRoom(t *testing.T) {
+	var held float64 = 90000
+	dec := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slots" {
+			writeTestJSON(w, 200, []any{
+				map[string]any{"id": 0, "is_processing": false, "n_prompt_tokens": held},
+				map[string]any{"id": 1, "is_processing": false, "n_prompt_tokens": 0.0},
+			})
+			return
+		}
+		writeTestJSON(w, 200, map[string]any{})
+	}))
+	defer dec.Close()
+
+	k := newKVPipe("http://prefill", dec.URL, "http://pc", "http://dc")
+	k.setDecodeBudget(100096)
+	// 90k held, the emptiest idle slot holds 0 → free = 10 096
+	free, evict, _, ok := k.decodeRoom()
+	if !ok || free != 10096 {
+		t.Fatalf("free = %d (ok=%v), want 10096", free, ok)
+	}
+	if evict == "" {
+		t.Fatal("an idle slot must be offered for eviction")
+	}
+	// evicting the big slot is what makes room: with slot 0 idle and empty the
+	// cheapest eviction is slot 1, so a 50k state does not fit
+	if free >= 50000 {
+		t.Fatal("a 50k state must not be considered to fit")
+	}
+}

@@ -76,13 +76,20 @@ func NewServer(cfg *config.Config) (*Server, error) {
 			mode, kp.prefillURL, kp.prefillCtl, kp.decodeURL, kp.decodeCtl, gateway.PrefillExactMinTokens)
 		// el prefill ingiere varios prompts a la vez hasta su presupuesto real de KV
 		go func() {
-			if d, err := s.getJSONOr(kp.prefillURL + "/props"); err == nil {
-				if gs, ok := d["default_generation_settings"].(map[string]any); ok {
-					if v, ok := gs["n_ctx"].(float64); ok {
-						kp.setBudget(int(v))
-					}
+			ctxOf := func(u string) int {
+				d, err := s.getJSONOr(u + "/props")
+				if err != nil {
+					return 0
 				}
+				gs, _ := d["default_generation_settings"].(map[string]any)
+				if gs == nil {
+					return 0
+				}
+				v, _ := gs["n_ctx"].(float64)
+				return int(v)
 			}
+			kp.setBudget(ctxOf(kp.prefillURL))
+			kp.setDecodeBudget(ctxOf(kp.decodeURL))
 		}()
 	} else {
 		log.Printf("gateway: decode-only (sin prefill configurado o sin agent soflink en los nodos main)")
