@@ -255,7 +255,7 @@ var longUser = strings.Repeat("La flota LocalStation sirve modelos Qwen con llam
 func TestHandoffEndToEnd(t *testing.T) {
 	r := newRig(t, func(e *fakeEngine) string { return e.dir })
 	code, data := postChat(t, r.gateway.URL, map[string]any{
-		"messages": []any{map[string]any{"role": "user", "content": longUser}},
+		"messages":   []any{map[string]any{"role": "user", "content": longUser}},
 		"max_tokens": 64, "chat_template_kwargs": map[string]any{"enable_thinking": false},
 	})
 	if code != 200 || !bytes.Contains(data, []byte("resumen")) {
@@ -270,7 +270,7 @@ func TestHandoffEndToEnd(t *testing.T) {
 		t.Fatalf("prefill must run exactly one completion + save + erase: %+v", pre)
 	}
 	// the last token is held back (recurrent cache can't be truncated)
-	wantTokens := (len(longUser)+len("<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n")) / 4
+	wantTokens := (len(longUser) + len("<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n")) / 4
 	if pre.completions[0] != wantTokens-1 {
 		t.Fatalf("prefill must process tokens[:-1]: got %d, want %d", pre.completions[0], wantTokens-1)
 	}

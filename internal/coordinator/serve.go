@@ -43,6 +43,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	bc := backendConfigFrom(cfg)
 	s := &Server{cfg: cfg, bc: bc, client: &http.Client{Timeout: 600 * time.Second}}
 	s.bal = newDecodeBalancer(decodeEndpointsFrom(cfg))
+	s.bal.setOccupancy(s.engineHeldTokens)
 	if s.bal.Len() > 1 {
 		names := []string{}
 		for _, st := range s.bal.stats() {
@@ -67,6 +68,11 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		opts.CountTokens = kp.Count
 		opts.Tokens = kp.Tokens
 		opts.DecodeBusy = kp.DecodeBusy
+		// with a second decode engine, only conversations living in the primary
+		// may take the handoff (the restore lands there)
+		opts.HandoffAllowed = func(b gateway.Body) bool {
+			return s.bal == nil || s.bal.stickyIsPrimary(sessionKey(b))
+		}
 		mode := cfg.KVHandoff
 		if mode == "" {
 			mode = gateway.ModeAuto
@@ -123,6 +129,36 @@ func decodeEndpointsFrom(cfg *config.Config) []struct{ Name, URL string } {
 	return out
 }
 
+// engineHeldTokens is what an engine's slots currently hold (sum of
+// n_prompt_tokens). -1 when /slots cannot be read, so the caller keeps its last
+// reading instead of assuming the engine is empty.
+func (s *Server) engineHeldTokens(url string) int {
+	req, err := http.NewRequest(http.MethodGet, url+"/slots", nil)
+	if err != nil {
+		return -1
+	}
+	c := &http.Client{Timeout: 1500 * time.Millisecond, Transport: gateway.PooledTransport()}
+	resp, err := c.Do(req)
+	if err != nil {
+		return -1
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return -1
+	}
+	var slots []map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&slots); err != nil {
+		return -1
+	}
+	held := 0
+	for _, sl := range slots {
+		if v, ok := sl["n_prompt_tokens"].(float64); ok {
+			held += int(v)
+		}
+	}
+	return held
+}
+
 // getJSONOr fetches a JSON document (used to probe each engine's context size).
 func (s *Server) getJSONOr(url string) (map[string]any, error) {
 	resp, err := s.client.Get(url)
@@ -160,11 +196,13 @@ func (s *Server) pickDecode(body gateway.Body, extra gateway.Headers) (*decodeNo
 		return nil, func() {}, nil
 	}
 	if extra["x-sofmat-kv-handoff"] != "" {
-		// its state is already restored in the primary: it must go there
+		// its state is already restored in the primary: it must go there, and the
+		// conversation must STAY there — its cache lives in that engine now.
 		n := s.bal.Primary()
 		est := estBodyTokens(body)
 		n.claim(est)
-		return n, func() { n.release(est) }, nil
+		s.bal.remember(sessionKey(body), n)
+		return n, func() { n.release(est); n.invalidateHeld() }, nil
 	}
 	return s.bal.pick(sessionKey(body), estBodyTokens(body))
 }
@@ -346,7 +384,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/kv/", s.kvFile)
 	// Live request log (routing decisions + engine timings per request).
 	mux.HandleFunc("/api/requests", s.panelRequests)
-	mux.HandleFunc("/", s.panelPage)                // dashboard home (catch-all last)
+	mux.HandleFunc("/", s.panelPage) // dashboard home (catch-all last)
 	return mux
 }
 

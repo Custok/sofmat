@@ -66,11 +66,12 @@ type Tokens func(body Body) ([]int, error)
 
 // Modes for the disaggregation decision once a prompt is admitted (exact new
 // tokens ≥ the floor):
-//   ModeBusy:   offload only while the decode is generating for others.
-//   ModeAlways: offload every admitted prompt.
-//   ModeAuto:   offload while busy (protect the streams); when idle, offload
-//               only if the cost model says the prefill path is faster
-//               (total/pp_prefill + handoff < new/pp_decode, EMAs per size).
+//
+//	ModeBusy:   offload only while the decode is generating for others.
+//	ModeAlways: offload every admitted prompt.
+//	ModeAuto:   offload while busy (protect the streams); when idle, offload
+//	            only if the cost model says the prefill path is faster
+//	            (total/pp_prefill + handoff < new/pp_decode, EMAs per size).
 const (
 	ModeBusy   = "busy"
 	ModeAlways = "always"
@@ -92,14 +93,15 @@ type Gateway struct {
 	verify    Verify
 	backend   BackendCall
 	status    StatusProvider
-	prefill   PrefillCall // optional; nil = no disaggregation
-	handoff   Handoff     // optional; nil = no disaggregation
-	count     CountTokens // optional; nil = estimate only
-	tokens    Tokens      // optional; supersedes count, enables the cache-aware estimate
-	busy      DecodeBusy  // optional; nil = handoff whenever admitted
-	mode      string      // ModeBusy / ModeAlways / ModeAuto
-	threshold int         // admission threshold on the ESTIMATE
-	exactMin  int         // floor on the EXACT count (when count != nil)
+	prefill   PrefillCall     // optional; nil = no disaggregation
+	handoff   Handoff         // optional; nil = no disaggregation
+	count     CountTokens     // optional; nil = estimate only
+	tokens    Tokens          // optional; supersedes count, enables the cache-aware estimate
+	busy      DecodeBusy      // optional; nil = handoff whenever admitted
+	allowed   func(Body) bool // optional; false = this request must not be handed off
+	mode      string          // ModeBusy / ModeAlways / ModeAuto
+	threshold int             // admission threshold on the ESTIMATE
+	exactMin  int             // floor on the EXACT count (when count != nil)
 	ring      *Ring
 	alpha     *AlphaEma
 	log       *RequestLog
@@ -127,6 +129,11 @@ type Options struct {
 	CountTokens    CountTokens
 	Tokens         Tokens
 	DecodeBusy     DecodeBusy
+	// HandoffAllowed vetoes the handoff for a request the caller knows must not
+	// take it. With more than one decode engine the restored state lands in the
+	// primary, so a conversation whose cache lives in ANOTHER engine must not be
+	// handed off: it would be dragged across engines and lose its whole prefix.
+	HandoffAllowed func(Body) bool
 	Mode           string // ModeBusy (default when DecodeBusy is set), ModeAlways, ModeAuto
 	Threshold      int
 	ExactMinTokens int
@@ -192,23 +199,24 @@ func New(o Options) (*Gateway, error) {
 	}
 	return &Gateway{
 		breakerFor: breaker,
-		verify:    o.Verify,
-		backend:   o.BackendCall,
-		status:    o.StatusProvider,
-		prefill:   o.PrefillCall,
-		handoff:   o.Handoff,
-		count:     o.CountTokens,
-		tokens:    o.Tokens,
-		busy:      o.DecodeBusy,
-		mode:      mode,
-		threshold: th,
-		exactMin:  em,
-		ring:      NewRing(members, 64),
-		alpha:     alpha,
-		log:       NewRequestLog(500, o.KeepContent),
-		known:     known,
-		last:      newLastPrompts(n),
-		cost:      newCostModel(),
+		verify:     o.Verify,
+		backend:    o.BackendCall,
+		status:     o.StatusProvider,
+		prefill:    o.PrefillCall,
+		handoff:    o.Handoff,
+		count:      o.CountTokens,
+		tokens:     o.Tokens,
+		busy:       o.DecodeBusy,
+		allowed:    o.HandoffAllowed,
+		mode:       mode,
+		threshold:  th,
+		exactMin:   em,
+		ring:       NewRing(members, 64),
+		alpha:      alpha,
+		log:        NewRequestLog(500, o.KeepContent),
+		known:      known,
+		last:       newLastPrompts(n),
+		cost:       newCostModel(),
 	}, nil
 }
 
@@ -347,6 +355,13 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 			admittedVia = "decode"
 			goPrefill = false
 		}
+		if goPrefill && g.allowed != nil && !g.allowed(merged) {
+			// its cache lives in another decode engine: serving it there is free,
+			// dragging it to the primary would cost a full reprocess.
+			fields["admission"] = "other-engine"
+			admittedVia = "decode"
+			goPrefill = false
+		}
 		busy := false
 		if goPrefill && g.mode != ModeAlways {
 			busy = g.busySafe()
@@ -421,7 +436,13 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 				hid, _ := pre["handoff_id"].(string)
 				if hid == "" {
 					fields["prefill_error"] = "no handoff_id"
-				} else if hm, err := g.driveHandoffSafe(hid, slot); err != nil {
+				} else if hm, err := g.driveHandoffSafe(hid, slot); errors.Is(err, ErrSkipHandoff) {
+					// no room in the decode at restore time: serve direct. The prefill
+					// work is lost but the request is not, and the breaker stays closed.
+					fields["admission"] = "handoff-skipped"
+					fields["handoff_skipped"] = strings.TrimPrefix(err.Error(), ErrSkipHandoff.Error()+": ")
+					admittedVia = "decode"
+				} else if err != nil {
 					fields["handoff_error"] = err.Error()
 					g.tripBreaker()
 				} else {

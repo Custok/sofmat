@@ -268,3 +268,25 @@ func TestSkipHandoffDoesNotOpenTheBreaker(t *testing.T) {
 		t.Fatalf("both requests must reach the decode: %d", len(c.decode))
 	}
 }
+
+// With two decode engines the restored state lands in the primary, so a
+// conversation whose cache lives in the OTHER engine must not be handed off:
+// it would leave its prefix behind and reprocess the whole prompt.
+func TestHandoffVetoForOtherEngine(t *testing.T) {
+	allowed := false
+	gw, c := newTestGW(t, func(o *Options) {
+		o.HandoffAllowed = func(Body) bool { return allowed }
+	})
+	gw.Chat(Headers{}, chatBody(bigPrompt, "hola"))
+	if len(c.prefill) != 0 || len(c.decode) != 1 {
+		t.Fatalf("a vetoed request goes straight to its own engine: %+v", c)
+	}
+	if rec := lastRecord(t, gw); rec["admission"] != "other-engine" || rec["admitted_via"] != "decode" {
+		t.Fatalf("the veto must be visible in the record: %v", rec)
+	}
+	allowed = true
+	gw.Chat(Headers{"x-sofmat-tenant": "otro"}, chatBody(bigPrompt, "hola"))
+	if len(c.prefill) != 1 {
+		t.Fatal("without the veto the prefill runs as usual")
+	}
+}

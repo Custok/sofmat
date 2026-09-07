@@ -359,3 +359,51 @@ func TestReplyReserveIsCapped(t *testing.T) {
 		t.Fatalf("a small request must reserve little: %d", estBodyTokens(small))
 	}
 }
+
+// The admission guard must count what the engine's slots HOLD, not only what
+// this gateway has in flight. Measured 2026-09-07: the decode held 84 021 of
+// 100 096 tokens with a single 36k request in flight; counting only the request
+// admitted a second 40k prompt, llama-server ran out of unified KV and failed
+// every concurrent request at once.
+func TestFitsCountsRealOccupancy(t *testing.T) {
+	b := newDecodeBalancer([]struct{ Name, URL string }{{"decode", "http://x"}})
+	held := 84021
+	b.setOccupancy(func(string) int { return held })
+	n := b.nodes[0]
+	if n.fits(40000) {
+		t.Fatalf("84k held + 40k must not fit in %d", n.budget)
+	}
+	held = 60000
+	n.invalidateHeld()
+	if !n.fits(10000) {
+		t.Fatal("60k held + 10k stays under 80% of the budget")
+	}
+	held = 0
+	n.invalidateHeld()
+	if !n.fits(40000) {
+		t.Fatal("an empty engine takes the 40k")
+	}
+	// a probe that cannot read /slots (-1) keeps the last reading instead of
+	// declaring the engine empty
+	held = 70000
+	n.invalidateHeld()
+	n.heldTokens()
+	b.setOccupancy(func(string) int { return -1 })
+	n.invalidateHeld()
+	if n.fits(40000) {
+		t.Fatal("an unreadable /slots must not reset the occupancy to zero")
+	}
+}
+
+// pick must refuse when the engine is full by occupancy alone (nothing in
+// flight): that is precisely the state that was admitting the failing requests.
+func TestPickRefusesOnOccupancyAlone(t *testing.T) {
+	old := waitBudgetForTest
+	waitBudgetForTest = 200 * time.Millisecond
+	defer func() { waitBudgetForTest = old }()
+	b := newDecodeBalancer([]struct{ Name, URL string }{{"decode", "http://x"}})
+	b.setOccupancy(func(string) int { return 84021 })
+	if _, _, err := b.pick("s", 40000); !errors.Is(err, ErrEngineFull) {
+		t.Fatalf("must refuse: %v", err)
+	}
+}

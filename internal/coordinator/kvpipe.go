@@ -30,6 +30,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -70,15 +71,16 @@ type kvPipe struct {
 	// The prefill engine ingests several prompts at once, bounded by its slots
 	// AND by its unified KV budget: serializing everything (the first design)
 	// made three cold prompts queue 25 s each while 3 of its 4 slots idled.
-	slotMu   sync.Mutex
-	slotCond *sync.Cond
-	freeSlot []int // prefill slot ids available
-	budget       int // prefill n_ctx (probed; defaultCtx until then)
-	decodeBudget int // decode n_ctx (probed; defaultCtx until then)
-	inflight int   // tokens claimed by prefills in progress
+	slotMu       sync.Mutex
+	slotCond     *sync.Cond
+	freeSlot     []int // prefill slot ids available
+	budget       int   // prefill n_ctx (probed; defaultCtx until then)
+	decodeBudget int   // decode n_ctx (probed; defaultCtx until then)
+	inflight     int   // tokens claimed by prefills in progress
 
 	tokMu sync.Mutex
 	toks  map[string]tokEntry // body hash → prompt token ids (Count → Prefill reuse)
+	pend  map[string]int      // handoff_id → tokens of the saved state (room to free)
 }
 
 type tokEntry struct {
@@ -88,12 +90,13 @@ type tokEntry struct {
 
 func newKVPipe(prefillURL, decodeURL, prefillCtl, decodeCtl string) *kvPipe {
 	k := &kvPipe{
-		prefillURL: strings.TrimRight(prefillURL, "/"),
-		decodeURL:  strings.TrimRight(decodeURL, "/"),
-		prefillCtl: strings.TrimRight(prefillCtl, "/"),
-		decodeCtl:  strings.TrimRight(decodeCtl, "/"),
-		client:     &http.Client{Timeout: 600 * time.Second, Transport: kvTransport},
+		prefillURL:   strings.TrimRight(prefillURL, "/"),
+		decodeURL:    strings.TrimRight(decodeURL, "/"),
+		prefillCtl:   strings.TrimRight(prefillCtl, "/"),
+		decodeCtl:    strings.TrimRight(decodeCtl, "/"),
+		client:       &http.Client{Timeout: 600 * time.Second, Transport: kvTransport},
 		toks:         map[string]tokEntry{},
+		pend:         map[string]int{},
 		budget:       defaultCtx,
 		decodeBudget: defaultCtx,
 	}
@@ -135,6 +138,108 @@ func (k *kvPipe) acquireSlot(estTokens int) (slot int, release func(), ok bool) 
 		go func() { time.Sleep(250 * time.Millisecond); k.slotCond.Broadcast() }()
 		k.slotCond.Wait()
 	}
+}
+
+// notePending records how many tokens a saved state carries, so the handoff can
+// make room for exactly that much in the decode before restoring it.
+func (k *kvPipe) notePending(name string, tokens int) {
+	k.slotMu.Lock()
+	if len(k.pend) > 32 {
+		k.pend = map[string]int{}
+	}
+	k.pend[name] = tokens
+	k.slotMu.Unlock()
+}
+
+func (k *kvPipe) takePending(name string) int {
+	k.slotMu.Lock()
+	defer k.slotMu.Unlock()
+	n := k.pend[name]
+	delete(k.pend, name)
+	return n
+}
+
+// makeDecodeRoom frees room in the decode's UNIFIED budget for a state of need
+// tokens and returns the slot to restore into.
+//
+// Why it exists: decodeRoom() is checked BEFORE the prefill, but the prefill
+// takes ~30 s and the other clients keep filling the decode meanwhile. Record
+// id 15 (2026-09-07) paid 26 s of prefill, got "No available space in KV cache"
+// at the restore and the decode then reprocessed 58 102 tokens: 113 s for a
+// request that should have taken 30. So the room is re-made here, at the last
+// possible moment, evicting idle slots cheapest-first (least valuable cache) —
+// and when even that is not enough the handoff is SKIPPED cleanly instead of
+// failing, so the request is served direct and the breaker stays closed.
+func (k *kvPipe) makeDecodeRoom(need int, want string) (string, error) {
+	slots := k.decodeSlots()
+	if slots == nil {
+		return want, nil // cannot read: behave as before
+	}
+	k.slotMu.Lock()
+	budget := k.decodeBudget
+	k.slotMu.Unlock()
+	if budget <= 0 {
+		budget = defaultCtx
+	}
+	type slotInfo struct {
+		id   string
+		held int
+	}
+	held, idle := 0, []slotInfo(nil)
+	for _, s := range slots {
+		n := 0
+		if v, isNum := s["n_prompt_tokens"].(float64); isNum {
+			n = int(v)
+		}
+		held += n
+		id := ""
+		if v, isNum := s["id"].(float64); isNum {
+			id = fmt.Sprintf("%d", int(v))
+		}
+		if busy, _ := s["is_processing"].(bool); !busy && id != "" {
+			idle = append(idle, slotInfo{id, n})
+		}
+	}
+	if len(idle) == 0 {
+		return "", fmt.Errorf("%w: todos los slots del decode están generando", gateway.ErrSkipHandoff)
+	}
+	sort.Slice(idle, func(i, j int) bool { return idle[i].held < idle[j].held })
+	// restore into the wanted slot when it is idle, else into the cheapest one
+	target := idle[0]
+	for _, s := range idle {
+		if s.id == want {
+			target = s
+			break
+		}
+	}
+	erase := func(id string) {
+		if _, err := k.postJSON(fmt.Sprintf("%s/slots/%s?action=erase", k.decodeURL, id),
+			map[string]any{}, 30*time.Second); err != nil {
+			log.Printf("kvpipe: erase slot %s: %v", id, err)
+			return
+		}
+		for i := range idle {
+			if idle[i].id == id {
+				held -= idle[i].held
+				idle[i].held = 0
+			}
+		}
+	}
+	erase(target.id) // always: the restore needs its own slot empty
+	for _, s := range idle {
+		if held+need <= budget {
+			break
+		}
+		if s.id == target.id || s.held == 0 {
+			continue
+		}
+		erase(s.id)
+	}
+	if held+need > budget {
+		return "", fmt.Errorf("%w: el decode sigue lleno tras vaciar los slots libres (%d ocupados + %d que hacen falta > %d)",
+			gateway.ErrSkipHandoff, held, need, budget)
+	}
+	return target.id, nil
 }
 
 // setBudget records the prefill engine's real context size (probed at startup).
@@ -478,6 +583,7 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 	if v, ok := sv["n_saved"].(float64); ok {
 		out["n_saved"] = int(v)
 	}
+	k.notePending(name, len(ids))
 	return out, nil
 }
 
@@ -512,15 +618,16 @@ func (k *kvPipe) Handoff(hid, slot string) (gateway.Body, error) {
 		}
 	}
 	// a restore into a slot that is generating queues behind that stream (measured:
-	// 31 s instead of 0.2 s for a 32k state) — prefer an idle slot.
-	slot = k.pickIdleSlot(slot)
-	out["slot"] = slot
-	// free what that slot still holds: the restore needs room in the engine's
-	// unified budget, and llama.cpp does not evict on its own for a restore.
-	if _, err := k.postJSON(fmt.Sprintf("%s/slots/%s?action=erase", k.decodeURL, slot),
-		map[string]any{}, 30*time.Second); err != nil {
-		log.Printf("kvpipe: erase previo al restore (slot %s): %v", slot, err)
+	// 31 s instead of 0.2 s for a 32k state) — prefer an idle slot, and free
+	// enough of the unified budget for the state RIGHT NOW (the decode filled up
+	// while the prefill ran; llama.cpp does not evict on its own for a restore).
+	need := k.takePending(hid)
+	slot, err = k.makeDecodeRoom(need, k.pickIdleSlot(slot))
+	if err != nil {
+		k.cleanup(hid)
+		return nil, err
 	}
+	out["slot"] = slot
 	t1 := time.Now()
 	rs, err := k.postJSON(fmt.Sprintf("%s/slots/%s?action=restore", k.decodeURL, slot),
 		map[string]any{"filename": hid}, 120*time.Second)

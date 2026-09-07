@@ -65,6 +65,41 @@ type decodeNode struct {
 	mu       sync.Mutex
 	inflight int
 	tokens   int // tokens claimed by in-flight requests
+
+	// held is what the engine's slots ACTUALLY hold, read from /slots. It is not
+	// the same as tokens: llama.cpp keeps a slot's prompt cache after the request
+	// ends, and that cache still occupies the unified budget. Counting only
+	// in-flight requests admitted a 75k prompt into an engine already holding
+	// 80k, and llama-server then failed it (and every concurrent request).
+	heldMu    sync.Mutex
+	held      int
+	heldAt    time.Time
+	occupancy func(url string) int
+}
+
+// heldTokens returns the engine's real occupancy, re-read at most every second.
+func (n *decodeNode) heldTokens() int {
+	n.heldMu.Lock()
+	defer n.heldMu.Unlock()
+	if n.occupancy == nil {
+		return 0
+	}
+	if time.Since(n.heldAt) < time.Second {
+		return n.held
+	}
+	if v := n.occupancy(n.url); v >= 0 {
+		n.held = v
+		n.heldAt = time.Now()
+	}
+	return n.held
+}
+
+// invalidateHeld forces the next heldTokens to re-read (after claiming or
+// releasing, the picture changed).
+func (n *decodeNode) invalidateHeld() {
+	n.heldMu.Lock()
+	n.heldAt = time.Time{}
+	n.heldMu.Unlock()
 }
 
 func (n *decodeNode) claim(tok int) {
@@ -93,10 +128,18 @@ func (n *decodeNode) load() (inflight, tokens int) {
 	return n.inflight, n.tokens
 }
 
-// fits reports whether tok more tokens stay inside the usable budget.
+// fits reports whether tok more tokens stay inside the usable budget, counting
+// BOTH what this gateway has in flight and what the engine's slots still hold
+// from finished conversations (that cache occupies the unified budget too; a
+// slot the engine can reuse is only freed when it actually reuses it).
 func (n *decodeNode) fits(tok int) bool {
-	_, cur := n.load()
-	return float64(cur+tok) <= float64(n.budget)*budgetUse
+	_, mine := n.load()
+	used := mine
+	if held := n.heldTokens(); held > used {
+		// held already includes the prompts of my in-flight requests
+		used = held
+	}
+	return float64(used+tok) <= float64(n.budget)*budgetUse
 }
 
 type decodeBalancer struct {
@@ -126,6 +169,29 @@ func (b *decodeBalancer) Primary() *decodeNode {
 }
 
 func (b *decodeBalancer) Len() int { return len(b.nodes) }
+
+// stickyIsPrimary reports whether this conversation is already assigned to an
+// engine OTHER than the primary. A KV handoff restores into the primary, so
+// such a conversation must not take that route: it would leave its cache
+// behind and reprocess the whole prompt on the other engine.
+func (b *decodeBalancer) stickyIsPrimary(key string) bool {
+	if len(b.nodes) < 2 {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	i, ok := b.sticky[key]
+	return !ok || i == 0
+}
+
+// setOccupancy gives every engine the probe that reads what its slots hold.
+func (b *decodeBalancer) setOccupancy(f func(url string) int) {
+	for _, n := range b.nodes {
+		n.heldMu.Lock()
+		n.occupancy = f
+		n.heldMu.Unlock()
+	}
+}
 
 // probeBudgets reads each engine's real context size once (fail-soft: keeps the
 // default when /props does not answer).
@@ -190,7 +256,8 @@ func (b *decodeBalancer) pick(key string, estTokens int) (*decodeNode, func(), e
 			ErrEngineFull, n.name, held, i, n.budget, estTokens)
 	}
 	n.claim(estTokens)
-	return n, func() { n.release(estTokens) }, nil
+	n.invalidateHeld()
+	return n, func() { n.release(estTokens); n.invalidateHeld() }, nil
 }
 
 // ErrEngineFull says no decode engine had room for this request within
@@ -274,7 +341,7 @@ func (b *decodeBalancer) stats() []map[string]any {
 		i, t := n.load()
 		out = append(out, map[string]any{
 			"name": n.name, "url": n.url, "budget": n.budget,
-			"inflight": i, "tokens_inflight": t,
+			"inflight": i, "tokens_inflight": t, "tokens_held": n.heldTokens(),
 		})
 	}
 	return out

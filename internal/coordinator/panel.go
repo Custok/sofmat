@@ -536,12 +536,12 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 	// remote node reaching another host's closed port must not chain into a
 	// multi-second stall that blanks the whole dashboard.
 	var (
-		loaded              bool
+		loaded                  bool
 		model, quant, modelPath string
-		nctx, slots         int
-		sizeGB              float64
-		cn                  map[string]map[string]any
-		prefillUp           bool
+		nctx, slots             int
+		sizeGB                  float64
+		cn                      map[string]map[string]any
+		prefillUp               bool
 	)
 	pstate.mu.Lock()
 	renames := copyStr(pstate.renames)
@@ -552,7 +552,11 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 
 	var pwg sync.WaitGroup
 	pwg.Add(3)
-	go func() { defer pwg.Done(); defer recoverProbe(); loaded, model, quant, nctx, slots, sizeGB, modelPath = s.servedModel() }()
+	go func() {
+		defer pwg.Done()
+		defer recoverProbe()
+		loaded, model, quant, nctx, slots, sizeGB, modelPath = s.servedModel()
+	}()
 	go func() { defer pwg.Done(); defer recoverProbe(); cn = s.aggregateNodes() }()
 	go func() {
 		defer pwg.Done()
@@ -1100,7 +1104,7 @@ func pnum(v any) float64 {
 	}
 	return 0
 }
-func pint(v any) int { return int(pnum(v)) }
+func pint(v any) int           { return int(pnum(v)) }
 func round1(f float64) float64 { return float64(int(f*10+0.5)) / 10 }
 
 func asMaps(v any) []map[string]any {

@@ -34,7 +34,7 @@ func init() { autoUpdate.Store(true) }
 
 // SetAutoUpdate / AutoUpdateOn let main seed the flag and the update loop read it.
 func SetAutoUpdate(on bool) { autoUpdate.Store(on) }
-func AutoUpdateOn() bool     { return autoUpdate.Load() }
+func AutoUpdateOn() bool    { return autoUpdate.Load() }
 
 // latest-release cache so the panel can show "versión disponible" without hitting
 // the GitHub API on every status tick. Refreshed asynchronously (never blocks a
