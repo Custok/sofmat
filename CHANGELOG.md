@@ -2,6 +2,15 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609071345 (2026-09-07)
+Prefill y decode de verdad en paralelo: el prefill ingiere varios prompts a la vez y el decode deja de bloquearse.
+
+- **Prefill concurrente (antes serializado).** El driver usaba un mutex global y un unico slot: con tres prompts frios de 40k se encolaban 25 s cada uno mientras 3 de los 4 slots del motor estaban ociosos. Ahora reserva slot + hueco en el presupuesto de KV del propio motor (`/props` al arrancar), asi que dos prompts de 40k entran a la vez en un motor de 100k; el tercero espera hasta 45 s y, si no hay sitio, esa peticion se sirve directa (fail-soft). Cada prefill usa su slot y lo libera al guardar.
+- **Guarda de contexto en el decode.** El gateway lleva la cuenta de los tokens en vuelo por motor y hace esperar a la peticion que no cabe en lugar de dejar que el motor la rechace. Ataca el fallo visto en produccion con 3 VS Code: al agotarse la KV unificada, llama-server rechaza TODAS las peticiones concurrentes a la vez (el usuario ve `Response contained no choices` en los tres clientes y funciona 10 s despues).
+- **Varios motores de decode (opcional).** Cualquier instancia con `role: "decode"` o clave `decode*` entra en el reparto; la conversacion queda pegada al motor que tiene su cache de prompt (una vuelta reenvia 44k tokens de mediana pero solo ~650 son nuevos: cambiar de motor convierte 1 s en 30 s de reproceso) y una conversacion nueva va al motor con menos carga. El primero de la lista es el primario: una peticion con KV traspasado se sirve ahi. Con un solo decode configurado, el comportamiento es el de siempre.
+- `GET /api/requests` incluye `decode_engines` con el reparto en vivo (motor, presupuesto, peticiones y tokens en vuelo).
+- Tasas por defecto del modelo de coste al dia: prefill 2 080 tok/s (recuperado tras el arreglo de la tarjeta; estaba en 1 424) y decode 2 270 tok/s, medidos hoy con un prompt de 13k.
+
 ## v202609062345 (2026-09-06)
 Handoff: comprobar los soflink de los dos nodos ANTES de gastar el prefill.
 

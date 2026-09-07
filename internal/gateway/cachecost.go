@@ -110,8 +110,8 @@ type costModel struct {
 // overwritten by live observations as they come.
 func newCostModel() *costModel {
 	return &costModel{
-		ppDecode:     [3]float64{2200, 1400, 1200},
-		ppPrefill:    [3]float64{2050, 1830, 1440},
+		ppDecode:     [3]float64{2270, 1400, 1200},
+		ppPrefill:    [3]float64{2080, 1830, 1440},
 		handoffPerTk: 0.045, // ≈ 0.5 s at 11k, 2 s at 46k
 		handoffFixed: 200,
 	}

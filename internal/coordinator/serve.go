@@ -32,14 +32,29 @@ type Server struct {
 
 	peerMu sync.Mutex
 	peers  []discovery.Peer // soflink nodes found on the LAN (background sweep)
+
+	// bal spreads chat traffic across the configured decode engines, pinning a
+	// conversation to the engine that holds its prompt cache (balancer.go).
+	bal *decodeBalancer
 }
 
 // NewServer wires the config's instances into a gateway.
 func NewServer(cfg *config.Config) (*Server, error) {
 	bc := backendConfigFrom(cfg)
+	s := &Server{cfg: cfg, bc: bc, client: &http.Client{Timeout: 600 * time.Second}}
+	s.bal = newDecodeBalancer(decodeEndpointsFrom(cfg))
+	if s.bal.Len() > 1 {
+		names := []string{}
+		for _, st := range s.bal.stats() {
+			names = append(names, st["name"].(string)+"="+st["url"].(string))
+		}
+		log.Printf("gateway: %d motores de decode con reparto por conversación: %s",
+			s.bal.Len(), strings.Join(names, ", "))
+		go s.bal.probeBudgets(func(u string) (map[string]any, error) { return s.getJSONOr(u) })
+	}
 	opts := gateway.Options{
 		Verify:         func(gateway.Headers) bool { return true }, // TODO: real auth (internal/auth)
-		BackendCall:    httpBackend(bc.DecodeEntryURL),
+		BackendCall:    s.backendCall,
 		StatusProvider: func() gateway.Body { return gateway.Body{"status": "ok"} },
 		NSlots:         4,
 	}
@@ -59,6 +74,16 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		opts.Mode = mode
 		log.Printf("gateway: KV handoff prefill→decode ACTIVO modo %s (prefill %s via %s → decode %s via %s; umbral exacto %d tokens)",
 			mode, kp.prefillURL, kp.prefillCtl, kp.decodeURL, kp.decodeCtl, gateway.PrefillExactMinTokens)
+		// el prefill ingiere varios prompts a la vez hasta su presupuesto real de KV
+		go func() {
+			if d, err := s.getJSONOr(kp.prefillURL + "/props"); err == nil {
+				if gs, ok := d["default_generation_settings"].(map[string]any); ok {
+					if v, ok := gs["n_ctx"].(float64); ok {
+						kp.setBudget(int(v))
+					}
+				}
+			}
+		}()
 	} else {
 		log.Printf("gateway: decode-only (sin prefill configurado o sin agent soflink en los nodos main)")
 	}
@@ -66,7 +91,87 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, gw: gw, bc: bc, client: &http.Client{Timeout: 600 * time.Second}}, nil
+	s.gw = gw
+	return s, nil
+}
+
+// decodeEndpointsFrom lists every configured decode engine, the first one being
+// the primary (the engine a KV handoff restores into). An instance is a decode
+// when its role says so, or when its key starts with "decode" (decode, decode2…).
+func decodeEndpointsFrom(cfg *config.Config) []struct{ Name, URL string } {
+	var out []struct{ Name, URL string }
+	seen := map[string]bool{}
+	for _, in := range cfg.Instances {
+		isDecode := in.Role == "decode" || strings.HasPrefix(in.Key, "decode")
+		if !isDecode || in.Endpoint == "" || seen[in.Endpoint] {
+			continue
+		}
+		seen[in.Endpoint] = true
+		name := in.Key
+		if name == "" {
+			name = in.Main
+		}
+		out = append(out, struct{ Name, URL string }{name, in.Endpoint})
+	}
+	return out
+}
+
+// getJSONOr fetches a JSON document (used to probe each engine's context size).
+func (s *Server) getJSONOr(url string) (map[string]any, error) {
+	resp, err := s.client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// backendCall is the gateway's BackendCall: it chooses the decode engine for
+// this conversation (sticky + least loaded + budget guard) and proxies there.
+// A request whose KV was just handed off must stay on the primary engine — the
+// restored state lives in that engine's slot.
+func (s *Server) backendCall(body gateway.Body, extra gateway.Headers) (gateway.Body, error) {
+	node, done := s.pickDecode(body, extra)
+	defer done()
+	url := s.bc.DecodeEntryURL
+	if node != nil {
+		url = node.url
+	}
+	return httpBackend(url)(body, extra)
+}
+
+// pickDecode resolves the engine for a request plus its release function.
+func (s *Server) pickDecode(body gateway.Body, extra gateway.Headers) (*decodeNode, func()) {
+	if s.bal == nil || s.bal.Len() == 0 {
+		return nil, func() {}
+	}
+	if extra["x-sofmat-kv-handoff"] != "" {
+		n := s.bal.Primary()
+		est := estBodyTokens(body)
+		n.claim(est)
+		return n, func() { n.release(est) }
+	}
+	return s.bal.pick(sessionKey(body), estBodyTokens(body))
+}
+
+// estBodyTokens is the cheap chars/4 estimate of what a request will hold in
+// the engine's KV (prompt + the reply it is allowed to generate).
+func estBodyTokens(body gateway.Body) int {
+	n := 0
+	if raw, err := json.Marshal(body["messages"]); err == nil {
+		n = len(raw) / 4
+	}
+	switch v := body["max_tokens"].(type) {
+	case float64:
+		n += int(v)
+	case int:
+		n += v
+	}
+	return n
 }
 
 // agentOfNode returns the soflink agent base of a configured node ("" if none).
@@ -114,9 +219,13 @@ func backendConfigFrom(cfg *config.Config) gateway.BackendConfig {
 	return bc
 }
 
+// backendClient is shared by every decode call so balancing across engines
+// reuses keep-alive connections instead of opening one per request.
+var backendClient = &http.Client{Timeout: 600 * time.Second, Transport: gateway.PooledTransport()}
+
 // httpBackend proxies a request body to endpoint's OpenAI chat endpoint.
 func httpBackend(endpoint string) gateway.BackendCall {
-	client := &http.Client{Timeout: 600 * time.Second}
+	client := backendClient
 	return func(body gateway.Body, extra gateway.Headers) (gateway.Body, error) {
 		b, err := json.Marshal(body)
 		if err != nil {
@@ -347,7 +456,11 @@ func (s *Server) panelRequests(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, gateway.Body{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, gateway.Body{"requests": rows, "disaggregated": s.gw.Disaggregated()})
+	out := gateway.Body{"requests": rows, "disaggregated": s.gw.Disaggregated()}
+	if s.bal != nil && s.bal.Len() > 0 {
+		out["decode_engines"] = s.bal.stats()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // streamRequested reports whether the body asked for an SSE stream.
@@ -366,6 +479,14 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 		writeJSON(w, http.StatusServiceUnavailable, gateway.Body{"error": "no decode backend"})
 		return
 	}
+	// same engine choice as the JSON path: sticky per conversation, least loaded
+	// for a new one, and pinned to the primary when a handoff just restored there.
+	node, doneNode := s.pickDecode(plan.Body, plan.Headers)
+	defer doneNode()
+	decodeURL := s.bc.DecodeEntryURL
+	if node != nil {
+		decodeURL = node.url
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, gateway.Body{"error": "streaming unsupported by server"})
@@ -377,7 +498,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 		return
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-		s.bc.DecodeEntryURL+"/v1/chat/completions", bytes.NewReader(raw))
+		decodeURL+"/v1/chat/completions", bytes.NewReader(raw))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, gateway.Body{"error": err.Error()})
 		return

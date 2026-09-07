@@ -10,7 +10,7 @@ package coordinator
 //	         The last token is held back because a hybrid (recurrent) cache
 //	         cannot be truncated: the decode must then receive the IDENTICAL
 //	         prompt and only process that one token (timings.prompt_n = 1).
-//	         Serialized: the prefill's KV budget is unified across its slots.
+//	         Concurrent up to its slots AND its unified KV budget (acquireSlot).
 //	Handoff: the DECODE node's soflink pulls the state straight from the prefill
 //	         node's soflink (/kv/<name>, one hop over the LAN) into the decode
 //	         engine's --slot-save-path → slots/<slot> restore → both copies
@@ -38,9 +38,16 @@ import (
 )
 
 const (
-	kvPrefillSlot = 0 // the prefill engine's slot used for every handoff (serialized)
-	tokCacheTTL   = 3 * time.Minute
-	tokCacheCap   = 64
+	tokCacheTTL = 3 * time.Minute
+	tokCacheCap = 64
+	// prefillSlots: how many prompts the prefill engine may ingest at once. Its
+	// KV budget is unified across slots, so concurrency is ALSO capped by
+	// prefillBudgetUse below — two 40k prompts fit in 100k, three do not.
+	prefillSlots     = 4
+	prefillBudgetUse = 0.80
+	// prefillWait is how long a prompt waits for room on the prefill engine
+	// before the gateway gives up on the handoff (and serves it decode-direct).
+	prefillWait = 45 * time.Second
 )
 
 // kvTransport bounds the DIAL to the prefill/decode nodes: a host that is down
@@ -60,7 +67,14 @@ type kvPipe struct {
 	decodeCtl  string // soflink on the decode node (POST /control/kv-fetch)
 	client     *http.Client
 
-	mu sync.Mutex // one prefill at a time: unified KV budget on the prefill engine
+	// The prefill engine ingests several prompts at once, bounded by its slots
+	// AND by its unified KV budget: serializing everything (the first design)
+	// made three cold prompts queue 25 s each while 3 of its 4 slots idled.
+	slotMu   sync.Mutex
+	slotCond *sync.Cond
+	freeSlot []int // prefill slot ids available
+	budget   int   // prefill n_ctx (probed; defaultCtx until then)
+	inflight int   // tokens claimed by prefills in progress
 
 	tokMu sync.Mutex
 	toks  map[string]tokEntry // body hash → prompt token ids (Count → Prefill reuse)
@@ -72,14 +86,63 @@ type tokEntry struct {
 }
 
 func newKVPipe(prefillURL, decodeURL, prefillCtl, decodeCtl string) *kvPipe {
-	return &kvPipe{
+	k := &kvPipe{
 		prefillURL: strings.TrimRight(prefillURL, "/"),
 		decodeURL:  strings.TrimRight(decodeURL, "/"),
 		prefillCtl: strings.TrimRight(prefillCtl, "/"),
 		decodeCtl:  strings.TrimRight(decodeCtl, "/"),
 		client:     &http.Client{Timeout: 600 * time.Second, Transport: kvTransport},
 		toks:       map[string]tokEntry{},
+		budget:     defaultCtx,
 	}
+	for i := 0; i < prefillSlots; i++ {
+		k.freeSlot = append(k.freeSlot, i)
+	}
+	k.slotCond = sync.NewCond(&k.slotMu)
+	return k
+}
+
+// acquireSlot reserves a prefill slot and room in the engine's KV budget for a
+// prompt of estTokens. Returns the slot and its release; ok=false when no room
+// came free within prefillWait (the caller then falls back to decode-direct).
+func (k *kvPipe) acquireSlot(estTokens int) (slot int, release func(), ok bool) {
+	deadline := time.Now().Add(prefillWait)
+	k.slotMu.Lock()
+	defer k.slotMu.Unlock()
+	for {
+		cap := int(float64(k.budget) * prefillBudgetUse)
+		if len(k.freeSlot) > 0 && (k.inflight+estTokens <= cap || k.inflight == 0) {
+			slot = k.freeSlot[0]
+			k.freeSlot = k.freeSlot[1:]
+			k.inflight += estTokens
+			return slot, func() {
+				k.slotMu.Lock()
+				k.freeSlot = append(k.freeSlot, slot)
+				k.inflight -= estTokens
+				if k.inflight < 0 {
+					k.inflight = 0
+				}
+				k.slotCond.Broadcast()
+				k.slotMu.Unlock()
+			}, true
+		}
+		if time.Now().After(deadline) {
+			return 0, func() {}, false
+		}
+		// wake up even if nobody releases, so the deadline is honoured
+		go func() { time.Sleep(250 * time.Millisecond); k.slotCond.Broadcast() }()
+		k.slotCond.Wait()
+	}
+}
+
+// setBudget records the prefill engine's real context size (probed at startup).
+func (k *kvPipe) setBudget(n int) {
+	if n <= 0 {
+		return
+	}
+	k.slotMu.Lock()
+	k.budget = n
+	k.slotMu.Unlock()
 }
 
 // templateFields are the chat fields that shape the templated prompt; the same
@@ -308,11 +371,14 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 	}
 	name := fmt.Sprintf("sf-%s-%d.bin", bodyHash(body)[:12], time.Now().UnixMilli())
 
-	k.mu.Lock()
-	defer k.mu.Unlock()
+	slot, releaseSlot, ok := k.acquireSlot(len(ids))
+	if !ok {
+		return nil, fmt.Errorf("prefill busy: no room for %d tokens within %s", len(ids), prefillWait)
+	}
+	defer releaseSlot()
 
 	t0 := time.Now()
-	slotURL := fmt.Sprintf("%s/slots/%d", k.prefillURL, kvPrefillSlot)
+	slotURL := fmt.Sprintf("%s/slots/%d", k.prefillURL, slot)
 	// whatever happens next, the prefill slot must not keep the sequence: its KV
 	// budget is unified and a leftover would starve the following prefill.
 	defer func() {
@@ -321,7 +387,7 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 		}
 	}()
 	comp, err := k.postJSON(k.prefillURL+"/completion", map[string]any{
-		"prompt": ids[:len(ids)-1], "n_predict": 0, "id_slot": kvPrefillSlot, "cache_prompt": true,
+		"prompt": ids[:len(ids)-1], "n_predict": 0, "id_slot": slot, "cache_prompt": true,
 	}, 0)
 	if err != nil {
 		return nil, fmt.Errorf("prefill completion: %w", err)
