@@ -167,28 +167,28 @@ type Stage struct {
 // Preset is a loadable model layout shown in the panel's Load picker. `Layers`
 // in Topology is a per-node layer COUNT (the pipeline share), not a range.
 type Preset struct {
-	Key       string        `json:"key"`
-	Label     string        `json:"label"`
-	ModelName string        `json:"model_name"`
-	Model     string        `json:"model"` // gguf path (local main only)
+	Key       string `json:"key"`
+	Label     string `json:"label"`
+	ModelName string `json:"model_name"`
+	Model     string `json:"model"` // gguf path (local main only)
 
 	// Exe is the launcher binary for THIS preset's main node, when it differs from
 	// the coordinator host's llama_exe — e.g. a remote decode whose main is a Linux
 	// node using a bundle wrapper (llama-server.sh) at its own path. Empty = the
 	// main node's own llama_exe (llamaExePath). Only *llama-server* basenames (incl.
 	// a llama-server.sh wrapper) are allowlisted by the control plane.
-	Exe string `json:"exe"`
-	Quant     string        `json:"quant"`
-	Ctx       string        `json:"ctx"`
-	KV        string        `json:"kv"`
-	Main      string        `json:"main"`     // node id running the main process
-	Endpoint  string        `json:"endpoint"` // where the served API answers
-	Remote    bool          `json:"remote"`
-	Note      string        `json:"note"`
-	SizeGB    float64       `json:"size_gb"`
-	RPC       string        `json:"rpc"`
-	Args      []string      `json:"args"`
-	Topology  []PresetStage `json:"topology"`
+	Exe      string        `json:"exe"`
+	Quant    string        `json:"quant"`
+	Ctx      string        `json:"ctx"`
+	KV       string        `json:"kv"`
+	Main     string        `json:"main"`     // node id running the main process
+	Endpoint string        `json:"endpoint"` // where the served API answers
+	Remote   bool          `json:"remote"`
+	Note     string        `json:"note"`
+	SizeGB   float64       `json:"size_gb"`
+	RPC      string        `json:"rpc"`
+	Args     []string      `json:"args"`
+	Topology []PresetStage `json:"topology"`
 
 	// Group ties presets that run TOGETHER as one deployment (e.g. a disaggregated
 	// decode+prefill unión): the panel renders them as a single card with one

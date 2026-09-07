@@ -425,15 +425,9 @@ func (k *kvPipe) prefillHeld() int {
 		k.pHeldAt = time.Now()
 		return k.pHeld
 	}
-	held := 0
-	for _, s := range slots {
-		if busy, _ := s["is_processing"].(bool); !busy {
-			continue // idle slot: llama.cpp reclaims that cache on reuse
-		}
-		if v, ok := s["n_prompt_tokens"].(float64); ok {
-			held += int(v)
-		}
-	}
+	// same formula as the decode side: one slot's cache is reclaimable, the rest
+	// of the unified cache is not (see committedKV).
+	held := committedKV(slots)
 	k.pHeld, k.pHeldAt = held, time.Now()
 	return held
 }
@@ -622,6 +616,12 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 			log.Printf("kvpipe: prefill erase: %v", err)
 		}
 	}()
+	// empty the slot before processing: the KV is unified, so its leftover cells
+	// count against this prompt (llama-server answers HTTP 500 "Context size has
+	// been exceeded" when they do).
+	if _, err := k.postJSON(slotURL+"?action=erase", map[string]any{}, 30*time.Second); err != nil {
+		log.Printf("kvpipe: erase previo al prefill (slot %d): %v", slot, err)
+	}
 	comp, err := k.postJSON(k.prefillURL+"/completion", map[string]any{
 		"prompt": ids[:len(ids)-1], "n_predict": 0, "id_slot": slot, "cache_prompt": true,
 	}, 0)

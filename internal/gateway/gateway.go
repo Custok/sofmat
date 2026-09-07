@@ -168,6 +168,11 @@ func New(o Options) (*Gateway, error) {
 	// can be hot: a larger registry claims reuse the engine evicted long ago and
 	// then routes a cold 16k prompt to the decode as "small-new-prefill"
 	// (observed 2026-09-06: est 3.7k new, the engine processed 16.8k).
+	// NOTE: keyed on the shared system prefix, NOT per conversation. Per
+	// conversation is only right once the registry also knows WHICH engine holds
+	// the prefix — hot in one engine is cold in the other — and the engine is
+	// picked after admission today. Until then this stays shared and the
+	// Forget-on-miss below corrects it after one bad guess.
 	known, err := NewKnownPrefixes(n)
 	if err != nil {
 		return nil, err

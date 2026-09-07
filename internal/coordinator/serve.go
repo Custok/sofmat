@@ -129,18 +129,8 @@ func decodeEndpointsFrom(cfg *config.Config) []struct{ Name, URL string } {
 	return out
 }
 
-// engineHeldTokens is the KV an engine cannot give away: the tokens held by the
-// slots that are PROCESSING. -1 when /slots cannot be read, so the caller keeps
+// engineHeldTokens is the KV an engine cannot give away for ONE more request. -1 when /slots cannot be read, so the caller keeps
 // its last reading instead of assuming the engine is empty.
-//
-// Idle slots are deliberately NOT counted. Their prompt cache is reclaimable —
-// llama.cpp overwrites it the moment it assigns that slot to a new task — so
-// counting it as occupancy makes the gateway refuse work an engine could serve.
-// Measured the hard way (2026-09-07): two engines holding 54 840 and 56 708
-// tokens of FINISHED conversations, nothing generating, and every request
-// queued the full 180 s and got refused. The failure this guard exists for is
-// different: several LARGE requests generating at once (three concurrent 46k =
-// 138k > 100 096), which is exactly what the processing slots measure.
 func (s *Server) engineHeldTokens(url string) int {
 	req, err := http.NewRequest(http.MethodGet, url+"/slots", nil)
 	if err != nil {
@@ -159,16 +149,35 @@ func (s *Server) engineHeldTokens(url string) int {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&slots); err != nil {
 		return -1
 	}
-	held := 0
+	return committedKV(slots)
+}
+
+// committedKV is the shared occupancy formula for a UNIFIED KV cache: the
+// engine holds n_ctx cells in TOTAL, not per slot. A new request can displace
+// the cache of the one slot it lands in, but not the others'. So what it cannot
+// have is everything held minus the biggest reclaimable (idle) slot.
+//
+// Both extremes were tried on the live fleet on 2026-09-07 and both broke:
+//   - counting every slot (nothing reclaimable): two engines holding ~55k of
+//     FINISHED conversations, nothing generating, and every request queued the
+//     full wait and was refused. The gateway stopped answering.
+//   - counting only the slots that GENERATE (everything idle reclaimable): a
+//     50 462-token prefill was admitted into an engine whose idle slots already
+//     held the rest, and llama-server answered HTTP 500 "Context size has been
+//     exceeded".
+func committedKV(slots []map[string]any) int {
+	held, reclaimable := 0, 0
 	for _, sl := range slots {
-		if busy, _ := sl["is_processing"].(bool); !busy {
-			continue // reclaimable cache, not committed KV
-		}
+		n := 0
 		if v, ok := sl["n_prompt_tokens"].(float64); ok {
-			held += int(v)
+			n = int(v)
+		}
+		held += n
+		if busy, _ := sl["is_processing"].(bool); !busy && n > reclaimable {
+			reclaimable = n
 		}
 	}
-	return held
+	return held - reclaimable
 }
 
 // getJSONOr fetches a JSON document (used to probe each engine's context size).

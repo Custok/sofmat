@@ -266,7 +266,11 @@ func TestHandoffEndToEnd(t *testing.T) {
 	defer pre.mu.Unlock()
 	dec.mu.Lock()
 	defer dec.mu.Unlock()
-	if len(pre.completions) != 1 || len(pre.saved) != 1 || pre.erased != 1 {
+	// erased twice on purpose: BEFORE the completion, because the KV is unified
+	// and the slot's leftover cells would count against this prompt (the engine
+	// answers HTTP 500 "Context size has been exceeded"), and AFTER the save so
+	// the sequence does not linger in the budget.
+	if len(pre.completions) != 1 || len(pre.saved) != 1 || pre.erased != 2 {
 		t.Fatalf("prefill must run exactly one completion + save + erase: %+v", pre)
 	}
 	// the last token is held back (recurrent cache can't be truncated)
@@ -512,8 +516,8 @@ func TestHandoffFailureDegradesToDecode(t *testing.T) {
 	// the prefill slot was still released
 	r.prefill.mu.Lock()
 	defer r.prefill.mu.Unlock()
-	if r.prefill.erased != 1 {
-		t.Fatalf("prefill slot must be erased even when the handoff fails: %+v", r.prefill)
+	if r.prefill.erased != 2 {
+		t.Fatalf("prefill slot must be erased before AND after, even when the handoff fails: %+v", r.prefill)
 	}
 }
 
