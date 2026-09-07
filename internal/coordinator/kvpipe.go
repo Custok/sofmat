@@ -72,11 +72,18 @@ type kvPipe struct {
 	// AND by its unified KV budget: serializing everything (the first design)
 	// made three cold prompts queue 25 s each while 3 of its 4 slots idled.
 	slotMu       sync.Mutex
-	slotCond     *sync.Cond
 	freeSlot     []int // prefill slot ids available
 	budget       int   // prefill n_ctx (probed; defaultCtx until then)
 	decodeBudget int   // decode n_ctx (probed; defaultCtx until then)
 	inflight     int   // tokens claimed by prefills in progress
+
+	// what the prefill ENGINE's slots really hold. It also serves decode traffic
+	// (decode2 and prefill are the same llama-server with two roles) and both
+	// share ONE unified budget, so reserving prefill room without counting the
+	// decode side overshoots exactly like the decode-side bug did.
+	heldMu  sync.Mutex
+	pHeld   int
+	pHeldAt time.Time
 
 	tokMu sync.Mutex
 	toks  map[string]tokEntry // body hash → prompt token ids (Count → Prefill reuse)
@@ -103,7 +110,6 @@ func newKVPipe(prefillURL, decodeURL, prefillCtl, decodeCtl string) *kvPipe {
 	for i := 0; i < prefillSlots; i++ {
 		k.freeSlot = append(k.freeSlot, i)
 	}
-	k.slotCond = sync.NewCond(&k.slotMu)
 	return k
 }
 
@@ -112,14 +118,21 @@ func newKVPipe(prefillURL, decodeURL, prefillCtl, decodeCtl string) *kvPipe {
 // came free within prefillWait (the caller then falls back to decode-direct).
 func (k *kvPipe) acquireSlot(estTokens int) (slot int, release func(), ok bool) {
 	deadline := time.Now().Add(prefillWait)
-	k.slotMu.Lock()
-	defer k.slotMu.Unlock()
 	for {
-		cap := int(float64(k.budget) * prefillBudgetUse)
-		if len(k.freeSlot) > 0 && (k.inflight+estTokens <= cap || k.inflight == 0) {
+		held := k.prefillHeld() // HTTP: never under slotMu
+		k.slotMu.Lock()
+		room := int(float64(k.budget) * prefillBudgetUse)
+		used := k.inflight
+		if held > used {
+			// the engine also serves decode traffic; that cache occupies the same
+			// unified budget as the prefill sequences
+			used = held
+		}
+		if len(k.freeSlot) > 0 && (used+estTokens <= room || used == 0) {
 			slot = k.freeSlot[0]
 			k.freeSlot = k.freeSlot[1:]
 			k.inflight += estTokens
+			k.slotMu.Unlock()
 			return slot, func() {
 				k.slotMu.Lock()
 				k.freeSlot = append(k.freeSlot, slot)
@@ -127,16 +140,17 @@ func (k *kvPipe) acquireSlot(estTokens int) (slot int, release func(), ok bool) 
 				if k.inflight < 0 {
 					k.inflight = 0
 				}
-				k.slotCond.Broadcast()
 				k.slotMu.Unlock()
+				k.heldMu.Lock()
+				k.pHeldAt = time.Time{} // the picture changed: re-read
+				k.heldMu.Unlock()
 			}, true
 		}
+		k.slotMu.Unlock()
 		if time.Now().After(deadline) {
 			return 0, func() {}, false
 		}
-		// wake up even if nobody releases, so the deadline is honoured
-		go func() { time.Sleep(250 * time.Millisecond); k.slotCond.Broadcast() }()
-		k.slotCond.Wait()
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 
@@ -379,9 +393,36 @@ func (k *kvPipe) tokens(body gateway.Body) ([]int, error) {
 }
 
 // decodeSlots reads the decode engine's /slots (nil on any failure).
-func (k *kvPipe) decodeSlots() []map[string]any {
+func (k *kvPipe) decodeSlots() []map[string]any { return k.slotsAt(k.decodeURL) }
+
+// prefillHeld is what the PREFILL engine's slots hold right now, re-read at most
+// once a second. It matters because that engine also serves decode traffic
+// (decode2 and prefill are the same llama-server with two roles) and both share
+// ONE unified KV budget: reserving prefill room without counting what the decode
+// side retains overshoots the budget exactly like the decode bug did.
+func (k *kvPipe) prefillHeld() int {
+	k.heldMu.Lock()
+	defer k.heldMu.Unlock()
+	if time.Since(k.pHeldAt) < time.Second {
+		return k.pHeld
+	}
+	slots := k.slotsAt(k.prefillURL)
+	if slots == nil {
+		return k.pHeld // unreadable: keep the last reading, never assume empty
+	}
+	held := 0
+	for _, s := range slots {
+		if v, ok := s["n_prompt_tokens"].(float64); ok {
+			held += int(v)
+		}
+	}
+	k.pHeld, k.pHeldAt = held, time.Now()
+	return held
+}
+
+func (k *kvPipe) slotsAt(base string) []map[string]any {
 	c := &http.Client{Timeout: 1500 * time.Millisecond, Transport: kvTransport}
-	resp, err := c.Get(k.decodeURL + "/slots")
+	resp, err := c.Get(base + "/slots")
 	if err != nil {
 		return nil
 	}
@@ -542,7 +583,8 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 
 	slot, releaseSlot, ok := k.acquireSlot(len(ids))
 	if !ok {
-		return nil, fmt.Errorf("prefill busy: no room for %d tokens within %s", len(ids), prefillWait)
+		return nil, fmt.Errorf("%w: el prefill no tiene sitio para %d tokens en %s (comparte presupuesto con decode2)",
+			gateway.ErrSkipHandoff, len(ids), prefillWait)
 	}
 	defer releaseSlot()
 
