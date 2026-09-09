@@ -62,3 +62,6 @@ README.internal.md
 # backups locales / marcadores de build
 *.bak-*
 dist/.testver
+
+# nunca: credencial local del nodo
+.soflink-apikey
