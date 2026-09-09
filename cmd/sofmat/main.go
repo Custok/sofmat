@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/Custok/sofmat/internal/config"
@@ -80,7 +81,13 @@ func main() {
 func serve(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	cfgPath := fs.String("config", "config.local.json", "path to cluster config")
-	noBrowser := fs.Bool("no-browser", false, "do not open the panel in a browser (headless nodes)")
+	// Default ON everywhere but the desktop platforms. Measured 2026-09-09 on
+	// .51 and .63: every start ran xdg-open, which opened a Firefox tab on the
+	// host's desktop and left a zombie — 113 times in one night on .63. A
+	// coordinator on a server node must never pop a browser; on Windows and
+	// macOS the panel pop is the intended desktop behaviour and stays.
+	headless := runtime.GOOS != "windows" && runtime.GOOS != "darwin"
+	noBrowser := fs.Bool("no-browser", headless, "do not open the panel in a browser (default on server platforms)")
 	noAuth := fs.Bool("no-auth", false, "leave mutating routes (load/eject) open — skips fail-closed key")
 	noUpdate := fs.Bool("no-update", false, "skip the GitHub auto-update check on startup")
 	_ = fs.Parse(args)
@@ -119,6 +126,13 @@ func serve(args []string) {
 			} else {
 				fmt.Printf("API key generada y guardada en %s (enmascarada: %s)\n", keyPath, maskKey(cfg.APIKey))
 			}
+		}
+		// Say it when the file is not actually private. Checked by STATTING
+		// the file back, not by trusting the write that was supposed to make
+		// it so: os.WriteFile(0600) on Windows applies no ACL and returns no
+		// error, so the message "guardada" was itself the deception.
+		if warn := keyPermWarning(keyPath); warn != "" {
+			fmt.Println("  " + warn)
 		}
 		fmt.Println("  la clave completa se ve y se copia en el panel; no se escribe en el log")
 	}

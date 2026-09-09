@@ -2,9 +2,11 @@ package coordinator
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // TestOpenFDsCounts applies the fleet's rule of 2026-09-09 to the new
@@ -61,4 +63,46 @@ func TestGoroutineCountMoves(t *testing.T) {
 		t.Fatalf("%d parked goroutines moved the gauge only %d -> %d", n, before, during)
 	}
 	close(stop)
+}
+
+// TestChildCountsSeesAZombie is the same rule again, applied to the counter the
+// two node devs asked for: it must be able to say "one". A zombie counter stuck
+// at zero would report a clean daemon while orphans piled up — which is exactly
+// how 990 of them went unnoticed on .51 until they were measured from outside
+// with ps.
+func TestChildCountsSeesAZombie(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		if c, z := childCounts(); c != -1 || z != -1 {
+			t.Fatalf("off Linux childCounts must admit it cannot count, got %d/%d", c, z)
+		}
+		t.Skip("child accounting is Linux-only")
+	}
+	_, zBefore := childCounts()
+
+	// a child that exits and is deliberately NOT waited for: the zombie this
+	// endpoint exists to make visible
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("no /bin/sh here: %v", err)
+	}
+	var zAfter int
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, z := childCounts(); z > zBefore {
+			zAfter = z
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if zAfter <= zBefore {
+		_ = cmd.Wait()
+		t.Fatalf("an unreaped exited child did not show up: zombies %d -> %d", zBefore, zAfter)
+	}
+
+	// and reaping it must make the count fall again — otherwise the counter is
+	// only counting up and would never show a leak being FIXED
+	_ = cmd.Wait()
+	if _, z := childCounts(); z >= zAfter {
+		t.Fatalf("after reaping, zombies did not fall: %d -> %d", zAfter, z)
+	}
 }
