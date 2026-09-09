@@ -2,6 +2,25 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609091258 (2026-09-09)
+Los fallos dejan de ser mudos, y dos carreras de datos que decidian admisiones.
+
+**Lo que un usuario nota.** Una peticion que fallaba llegaba como exito. El gateway leia la respuesta del motor, se quedaba el cuerpo y estampaba HTTP 200 encima, asi que un error del motor —"the request exceeds the available context size", por ejemplo— aterrizaba como una respuesta correcta sin el campo `choices`, y todo cliente compatible con OpenAI informaba de lo unico que podia ver: *Response contained no choices*. El motivo venia dentro de la respuesta y un 200 le dice al cliente que no hay motivo que buscar. Ahora el estado del motor viaja intacto y el mensaje con el. La mitad en streaming del mismo gateway siempre habia reenviado el estado; las dos mitades discrepaban y solo la callada estaba mal.
+
+Y cuando el motor acepta la peticion y cierra el flujo sin enviar un solo byte, el gateway ya no cierra en silencio: la linea de estado ya salio y no se puede retirar, asi que el motivo viaja por el unico canal abierto, un evento con `finish_reason: "error"` y su causa. Medido en produccion: 75 peticiones de 2 358 murieron asi en un nodo, todas como silencio.
+
+**Dos carreras de datos, las dos en produccion.** El presupuesto de contexto de cada motor lo escribia la sonda de arranque mientras el gateway ya admitia trabajo, sin sincronizar, y es el numero con el que se decide si una peticion cabe: podia leerse a medias. Y el porcentaje de CPU del agente hace lectura-modificacion-escritura sobre dos variables globales desde el muestreador y desde la ruta de respaldo a la vez, lo que no solo es una carrera: dos llamadas simultaneas calculan su delta contra una base a medio actualizar y el numero que sale es plausible y falso.
+
+**Un zombi por arranque y un descriptor por lanzamiento.** El abridor del panel se lanzaba y no se recogia nunca, asi que en Linux quedaba un proceso zombi mientras viviera el demonio; y en un nodo servidor abria ademas una pestana del navegador en el escritorio en cada arranque. `-no-browser` pasa a ser el defecto fuera de Windows y macOS. El fichero de log de arranque del motor se duplicaba al hijo y la copia del padre no se cerraba jamas: un descriptor por lanzamiento, en los dos lanzadores. Y el agente suelto nunca recogia el motor que arrancaba.
+
+**Un motor lleno no es un motor roto.** El driver libera sitio en el decode a partir de una lectura de sus slots y la restauracion aterriza un instante despues, cuando otra peticion puede haber cogido el hueco. Esa negativa llegaba como averia de componente y abria el cortacircuitos del prefill 30 segundos, quitandole el traspaso a todas las demas peticiones. Ocho casos medidos: hasta cuatro minutos de rutado degradado que nadie podia ver, porque quien lo provoca sobrevive y las victimas son las siguientes.
+
+**Diagnostico que sobrevive a un reinicio.** Las notas de cada peticion vivian solo en memoria, asi que la evidencia de justo los fallos que existen para diagnosticar desaparecia al siguiente arranque. Ahora una peticion que acaba mal deja una linea en el log con el motor, el estado, los bytes y la causa. Una peticion sana no deja nada.
+
+**Nuevo `GET /api/runtime`**: goroutines, descriptores abiertos, hijos, hijos zombis, memoria y marca absoluta de arranque. Toda la caza de fugas de la vispera hubo que hacerla desde fuera del proceso, asi que una fuga solo se veia cuando ya era lo bastante grande para asomar en los numeros del sistema. Fuera de Linux los contadores que no se pueden leer devuelven -1, nunca 0: "he mirado y no hay" y "no puedo mirar" son cosas distintas.
+
+**La clave de API**: el guardian anti-fugas no tenia ninguna regla capaz de cazar un token pelado en una linea, ni por nombre de fichero ni por contenido. Los dos agujeros cerrados y probados por separado. Y el fichero avisa cuando sus permisos no son efectivos, comprobandolos con un `stat` posterior en vez de fiarse de la llamada que debia aplicarlos.
+
 ## v202609071520 (2026-09-07)
 Carga por triplicado: el traspaso ya no se gasta en balde y el motor no se ahoga.
 

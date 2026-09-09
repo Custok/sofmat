@@ -44,4 +44,21 @@ got=\$(APPIMAGE_EXTRACT_AND_RUN=1 /dist/soflink-x86_64.AppImage version 2>&1 | t
 [ \"\$fail\" = 0 ] || { echo 'NO PUBLICAR: hay artefactos que no declaran la version'; exit 1; }
 echo 'TODOS-COHERENTES'
 "
+echo "=== 4/4  el .exe TAMBIEN debe decirlo (es el que va al nodo Windows)"
+# El paso 3 verifica los artefactos Linux dentro de un contenedor y no puede
+# ejecutar el .exe. Pero el .exe es EL artefacto de produccion del nodo Windows,
+# asi que dejarlo sin verificar reabre justo el agujero que este script existe
+# para cerrar. Se comprueba en el host.
+got=$(cd "$SRC/dist" && ./soflink.exe version 2>&1 | tail -1 | awk '{print $NF}')
+if [ "$got" = "$V" ]; then
+  echo "  ok   soflink.exe -> $got"
+else
+  echo "  FALLO soflink.exe -> $got (esperaba $V)"
+  echo "NO PUBLICAR"
+  exit 1
+fi
+# Aviso honesto: soflink-aarch64.AppImage NO se verifica (no hay arm64 aqui y
+# ejecutarlo exigiria qemu). Los cuatro que si se verifican cubren los tres
+# nodos de la flota; el arm64 se publica sin comprobar y hay que decirlo.
+echo "  aviso: soflink-aarch64.AppImage se publica SIN verificar (sin arm64 en este host)"
 echo "listo: $V   (ahora .relver_pending + publish_release.ps1)"
