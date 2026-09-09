@@ -16,10 +16,43 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/Custok/sofmat/internal/config"
 	"github.com/Custok/sofmat/internal/coordinator"
 )
+
+// apiKeyPath is where a minted key is kept: beside the config, so it survives a
+// restart without rewriting the operator's config file (which would risk losing
+// anything the config struct does not model).
+func apiKeyPath(cfgPath string) string {
+	dir := filepath.Dir(cfgPath)
+	if dir == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, ".soflink-apikey")
+}
+
+func readAPIKey(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func writeAPIKey(path, key string) error {
+	return os.WriteFile(path, []byte(key+"\n"), 0o600)
+}
+
+// maskKey shows enough to tell two keys apart and not enough to use one.
+func maskKey(k string) string {
+	if len(k) < 16 {
+		return "sk-soflink-..."
+	}
+	return k[:14] + "..." + k[len(k)-4:]
+}
 
 // genAPIKey mints a random bearer key (Jupyter-token style).
 func genAPIKey() string {
@@ -66,11 +99,28 @@ func serve(args []string) {
 		checkAndUpdate()    // self-update from GitHub Releases at startup, then re-exec (best-effort)
 		go periodicUpdate() // y sigue comprobando en runtime (cada 30m) para coger releases sin reiniciar
 	}
-	// Fail-closed: if no API key is configured, mint one at startup so load/eject
-	// are never open on the LAN. The key shows (and copies) in the panel.
+	// Fail-closed: if no API key is configured, mint one so load/eject are never
+	// open on the LAN — but PERSIST it, and never print it whole.
+	//
+	// Both halves were bugs. Minting without persisting meant a new key on every
+	// restart, so any client holding one lost it: on a node caught in an update
+	// loop that was a new key every half hour, 51 of them in a day. And printing
+	// it in full put a live credential in the log, which gets copied around and
+	// pasted into chats when something breaks.
 	if cfg.APIKey == "" && !*noAuth {
-		cfg.APIKey = genAPIKey()
-		fmt.Printf("API key generada (requerida para load/eject; visible/copiable en el panel):\n  %s\n", cfg.APIKey)
+		keyPath := apiKeyPath(*cfgPath)
+		if k := readAPIKey(keyPath); k != "" {
+			cfg.APIKey = k
+			fmt.Printf("API key leida de %s (enmascarada: %s)\n", keyPath, maskKey(cfg.APIKey))
+		} else {
+			cfg.APIKey = genAPIKey()
+			if err := writeAPIKey(keyPath, cfg.APIKey); err != nil {
+				fmt.Printf("API key generada pero NO persistida (%v): rotara en el proximo arranque\n", err)
+			} else {
+				fmt.Printf("API key generada y guardada en %s (enmascarada: %s)\n", keyPath, maskKey(cfg.APIKey))
+			}
+		}
+		fmt.Println("  la clave completa se ve y se copia en el panel; no se escribe en el log")
 	}
 	fmt.Printf("sofmat serve on %s\n", cfg.Listen)
 	ensureFirewall(cfg.Listen) // open the port so the LAN can reach the panel/API
