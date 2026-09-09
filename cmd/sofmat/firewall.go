@@ -27,7 +27,13 @@ func openPanel(listen string) {
 	default:
 		cmd = exec.Command("xdg-open", url)
 	}
-	_ = cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	// Reap it. openPanel already runs in its own goroutine, so waiting here
+	// costs nothing — and NOT waiting leaves a zombie for the whole life of the
+	// daemon on Linux (the opener exits in milliseconds and nobody collects it).
+	_ = cmd.Wait()
 }
 
 // ensureFirewall best-effort opens the daemon's listen port so the panel and API

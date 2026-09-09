@@ -6,9 +6,22 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-var lastIdle, lastTotal uint64
+// The CPU baseline is process-global and every read is a read-modify-write
+// (delta since the previous sample). It is touched from at least two
+// goroutines: the sampler ticking every 2 s and Handler's fallback path, which
+// calls Payload inline while the first snapshot is not ready. Unsynchronised
+// that is a data race — caught by -race on 2026-09-09 — and it also corrupts
+// the reading itself: two callers racing on the baseline both compute a delta
+// against a half-updated one. netRate has had its mutex since it was written;
+// this is the same rule applied to the CPU counters.
+var (
+	cpuMu     sync.Mutex
+	lastIdle  uint64
+	lastTotal uint64
+)
 
 // readCPU returns idle and total jiffies from /proc/stat's aggregate line.
 func readCPU() (idle, total uint64) {
@@ -34,8 +47,10 @@ func readCPU() (idle, total uint64) {
 
 func cpuPercent() int {
 	idle, total := readCPU()
+	cpuMu.Lock()
 	di, dt := idle-lastIdle, total-lastTotal
 	lastIdle, lastTotal = idle, total
+	cpuMu.Unlock()
 	if dt == 0 || di > dt {
 		return 0
 	}

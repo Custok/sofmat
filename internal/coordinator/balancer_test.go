@@ -75,7 +75,7 @@ func TestNewSessionsSpreadAcrossEngines(t *testing.T) {
 func TestBudgetGuardPrefersTheEngineWithRoom(t *testing.T) {
 	b := newDecodeBalancer(balTestNodes(2))
 	// fill engine 0 to its usable budget
-	b.nodes[0].claim(int(float64(b.nodes[0].budget) * budgetUse))
+	b.nodes[0].claim(int(float64(b.nodes[0].budgetTokens()) * budgetUse))
 	key := sessionKey(bodyWith("s", "conversacion pegada al motor 0"))
 	b.remember(key, b.nodes[0]) // sticky to the full engine
 	n, done, _ := b.pick(key, 30000)
@@ -90,13 +90,13 @@ func TestBudgetProbeReadsRealContext(t *testing.T) {
 	b.probeBudgets(func(url string) (map[string]any, error) {
 		return map[string]any{"default_generation_settings": map[string]any{"n_ctx": float64(65536)}}, nil
 	})
-	if b.nodes[0].budget != 65536 {
-		t.Fatalf("budget = %d, want 65536", b.nodes[0].budget)
+	if b.nodes[0].budgetTokens() != 65536 {
+		t.Fatalf("budget = %d, want 65536", b.nodes[0].budgetTokens())
 	}
 	// a failing probe keeps the default
 	b2 := newDecodeBalancer(balTestNodes(1))
 	b2.probeBudgets(func(string) (map[string]any, error) { return nil, fmt.Errorf("down") })
-	if b2.nodes[0].budget != defaultCtx {
+	if b2.nodes[0].budgetTokens() != defaultCtx {
 		t.Fatal("a failed probe must keep the default budget")
 	}
 }
@@ -335,7 +335,7 @@ func TestDecodeRoomCountsOnlyGeneratingSlots(t *testing.T) {
 // the unified budget and llama-server then fails every concurrent request.
 func TestFullEngineRefusesInsteadOfOverloading(t *testing.T) {
 	b := newDecodeBalancer(balTestNodes(1))
-	b.nodes[0].claim(int(float64(b.nodes[0].budget) * budgetUse)) // engine full
+	b.nodes[0].claim(int(float64(b.nodes[0].budgetTokens()) * budgetUse)) // engine full
 	orig := waitBudgetForTest
 	waitBudgetForTest = 300 * time.Millisecond
 	defer func() { waitBudgetForTest = orig }()
@@ -349,7 +349,7 @@ func TestFullEngineRefusesInsteadOfOverloading(t *testing.T) {
 		t.Fatalf("the refusal must be identifiable: %v", err)
 	}
 	// once there is room again it is admitted
-	b.nodes[0].release(int(float64(b.nodes[0].budget) * budgetUse))
+	b.nodes[0].release(int(float64(b.nodes[0].budgetTokens()) * budgetUse))
 	if _, d, err := b.pick("k", 40000); err != nil {
 		t.Fatalf("with room free it must be admitted: %v", err)
 	} else {
@@ -396,7 +396,7 @@ func TestFitsCountsRealOccupancy(t *testing.T) {
 	b.setOccupancy(func(string) int { return held })
 	n := b.nodes[0]
 	if n.fits(40000) {
-		t.Fatalf("84k held + 40k must not fit in %d", n.budget)
+		t.Fatalf("84k held + 40k must not fit in %d", n.budgetTokens())
 	}
 	held = 60000
 	n.invalidateHeld()
@@ -575,7 +575,7 @@ func TestLoneClientGetsTheContextItDeclared(t *testing.T) {
 	b.setOccupancy(func(string) int { return 0 })
 	n, done, err := b.pick("sola", 80126)
 	if err != nil || n == nil {
-		t.Fatalf("an idle engine of %d must take a request of 80126: %v", b.nodes[0].budget, err)
+		t.Fatalf("an idle engine of %d must take a request of 80126: %v", b.nodes[0].budgetTokens(), err)
 	}
 	done()
 	// ...but a request that genuinely does not fit is still refused

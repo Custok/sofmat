@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -32,7 +33,20 @@ type filetime struct{ Low, High uint32 }
 
 func (f filetime) u64() uint64 { return uint64(f.High)<<32 | uint64(f.Low) }
 
-var lastIdle, lastKernel, lastUser uint64
+// The CPU baseline is process-global and every read is a read-modify-write
+// (delta since the previous sample). It is touched from at least two
+// goroutines: the sampler ticking every 2 s and Handler's fallback path, which
+// calls Payload inline while the first snapshot is not ready. Unsynchronised
+// that is a data race — caught by -race on 2026-09-09 — and it also corrupts
+// the reading itself: two callers racing on the baseline both compute a delta
+// against a half-updated one. netRate has had its mutex since it was written;
+// this is the same rule applied to the CPU counters.
+var (
+	cpuMu      sync.Mutex
+	lastIdle   uint64
+	lastKernel uint64
+	lastUser   uint64
+)
 
 // cpuPercent samples GetSystemTimes and returns busy% since the previous call
 // (Windows counts idle inside kernel time, so busy = kernel+user - idle).
@@ -46,8 +60,10 @@ func cpuPercent() int {
 		return 0
 	}
 	i, k, u := idle.u64(), kernel.u64(), user.u64()
+	cpuMu.Lock()
 	di, total := i-lastIdle, (k-lastKernel)+(u-lastUser)
 	lastIdle, lastKernel, lastUser = i, k, u
+	cpuMu.Unlock()
 	if total == 0 || di > total {
 		return 0
 	}

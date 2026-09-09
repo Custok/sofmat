@@ -71,7 +71,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 			if s.bal == nil || s.bal.Len() == 0 || n <= 0 {
 				return 0
 			}
-			budget := s.bal.Primary().budget
+			budget := s.bal.Primary().budgetTokens()
 			room := budget - n - templateMargin
 			if room < 0 {
 				room = 0
@@ -518,6 +518,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/control/kv-fetch", s.controlKVFetch)
 	mux.HandleFunc("/kv/", s.kvFile)
 	// Live request log (routing decisions + engine timings per request).
+	mux.HandleFunc("/api/runtime", s.apiRuntime) // goroutines/fds/heap: leaks visible from inside
 	mux.HandleFunc("/api/requests", s.panelRequests)
 	mux.HandleFunc("/", s.panelPage) // dashboard home (catch-all last)
 	return mux

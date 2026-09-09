@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Custok/sofmat/internal/gateway"
@@ -74,9 +75,16 @@ const (
 )
 
 type decodeNode struct {
-	name   string
-	url    string
-	budget int // context tokens
+	name string
+	url  string
+
+	// budget is the engine's context size in tokens. It is written ONCE by
+	// probeBudgets from the goroutine NewServer launches AFTER the server is
+	// already accepting requests, and read on the admission path of every
+	// request (fits) — an unsynchronised int there is a real race, caught by
+	// -race on 2026-09-09: a request could be admitted against a torn or stale
+	// budget. Atomic, not a mutex, so the read stays free on the hot path.
+	budget atomic.Int64
 
 	mu       sync.Mutex
 	inflight int
@@ -91,6 +99,9 @@ type decodeNode struct {
 	heldAt    time.Time
 	occupancy func(url string) int
 }
+
+// budgetTokens is the engine's context size (see the field's comment).
+func (n *decodeNode) budgetTokens() int { return int(n.budget.Load()) }
 
 // heldTokens returns the engine's real occupancy, re-read at most every second.
 func (n *decodeNode) heldTokens() int {
@@ -156,7 +167,7 @@ func (n *decodeNode) fits(tok int) bool {
 		// held already includes the prompts of my in-flight requests
 		used = held
 	}
-	return float64(used+tok) <= float64(n.budget)*budgetUse
+	return float64(used+tok) <= float64(n.budgetTokens())*budgetUse
 }
 
 type decodeBalancer struct {
@@ -171,7 +182,9 @@ type decodeBalancer struct {
 func newDecodeBalancer(endpoints []struct{ Name, URL string }) *decodeBalancer {
 	b := &decodeBalancer{sticky: map[string]int{}}
 	for _, e := range endpoints {
-		b.nodes = append(b.nodes, &decodeNode{name: e.Name, url: strings.TrimRight(e.URL, "/"), budget: defaultCtx})
+		n := &decodeNode{name: e.Name, url: strings.TrimRight(e.URL, "/")}
+		n.budget.Store(defaultCtx)
+		b.nodes = append(b.nodes, n)
 	}
 	return b
 }
@@ -250,7 +263,7 @@ func (b *decodeBalancer) probeBudgets(get func(url string) (map[string]any, erro
 			continue
 		}
 		if v, ok := gs["n_ctx"].(float64); ok && v > 0 {
-			n.budget = int(v)
+			n.budget.Store(int64(v))
 		}
 	}
 }
@@ -326,7 +339,7 @@ func (b *decodeBalancer) pick(key string, estTokens int) (*decodeNode, func(), e
 		return nil, func() {}, fmt.Errorf(
 			"%w: %s sin hueco para %d tokens (KV comprometido %d, en vuelo %d en %d peticiones, utilizable %d de %d)",
 			ErrEngineFull, n.name, estTokens, n.heldTokens(), mine, i,
-			int(float64(n.budget)*budgetUse), n.budget)
+			int(float64(n.budgetTokens())*budgetUse), n.budgetTokens())
 	}
 	n.claim(estTokens)
 	n.invalidateHeld()
@@ -427,7 +440,7 @@ func (b *decodeBalancer) stats() []map[string]any {
 	for idx, n := range b.nodes {
 		i, t := n.load()
 		out = append(out, map[string]any{
-			"name": n.name, "url": n.url, "budget": n.budget,
+			"name": n.name, "url": n.url, "budget": n.budgetTokens(),
 			"inflight": i, "tokens_inflight": t, "tokens_held": n.heldTokens(),
 			"sessions": b.sessionsOn(idx),
 		})

@@ -99,14 +99,27 @@ func handleLoad(w http.ResponseWriter, r *http.Request) {
 	// (e.g. GPU/Vulkan init) is diagnosable — a detached child with no stdio can
 	// die silently on first write.
 	cmd.Dir = filepath.Dir(body.Exe)
-	if logf, err := os.Create(filepath.Join(filepath.Dir(os.Args[0]), "llama-launch.log")); err == nil {
+	var logf *os.File
+	if f, err := os.Create(filepath.Join(filepath.Dir(os.Args[0]), "llama-launch.log")); err == nil {
+		logf = f
 		cmd.Stdout = logf
 		cmd.Stderr = logf
 	}
 	if err := cmd.Start(); err != nil {
+		if logf != nil {
+			logf.Close()
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	if logf != nil {
+		logf.Close() // Start dup'd it into the child; ours leaked once per launch
+	}
+	// Reap the child when it dies. Without this every llama-server that exits
+	// (crash, /eject) stays as a zombie under the agent — the agent outlives
+	// many engines, so they accumulate. control.go has had this reaper; the
+	// standalone agent did not.
+	go func() { _ = cmd.Wait() }()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "pid": cmd.Process.Pid})
 }
 

@@ -120,11 +120,21 @@ func launchLlama(exe string, args []string) map[string]any {
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = filepath.Dir(exe)
-	if logf, err := os.Create(filepath.Join(filepath.Dir(exe), "llama-launch.log")); err == nil {
+	var logf *os.File
+	if f, err := os.Create(filepath.Join(filepath.Dir(exe), "llama-launch.log")); err == nil {
+		logf = f
 		cmd.Stdout, cmd.Stderr = logf, logf
 	}
 	if err := cmd.Start(); err != nil {
+		if logf != nil {
+			logf.Close()
+		}
 		return map[string]any{"ok": false, "error": err.Error()}
+	}
+	// Start dups the descriptor into the child; our copy is dead weight and was
+	// never closed — one leaked handle per launch, for the life of the daemon.
+	if logf != nil {
+		logf.Close()
 	}
 	pid := cmd.Process.Pid
 	recordLaunched(pid) // so an eject can target only our own llama-server, never a prod one
