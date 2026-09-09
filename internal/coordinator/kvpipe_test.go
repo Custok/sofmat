@@ -33,6 +33,7 @@ type fakeEngine struct {
 	held        int // tokens the engine reports it is holding (slot 0)
 	restored    []string
 	restoreSlot string
+	restoreFail string           // when set, /slots/N?action=restore answers 500 with this
 	chats       []map[string]any // bodies received by /v1/chat/completions
 	srv         *httptest.Server
 }
@@ -135,6 +136,13 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 			e.mu.Unlock()
 			writeTestJSON(w, 200, map[string]any{"id_slot": id, "n_erased": 8000})
 		case "restore":
+			e.mu.Lock()
+			rf := e.restoreFail
+			e.mu.Unlock()
+			if rf != "" {
+				writeTestJSON(w, 500, map[string]any{"error": map[string]any{"code": 500, "message": rf}})
+				return
+			}
 			data, err := os.ReadFile(filepath.Join(e.dir, name))
 			if err != nil || string(data) != "STATE:"+name {
 				writeTestJSON(w, 400, map[string]any{"error": "state file not found in slot-save-path"})
@@ -716,5 +724,77 @@ func TestSSETimingsExtraction(t *testing.T) {
 	}
 	if sseTimings([]byte("data: [DONE]\n\n")) != nil {
 		t.Fatal("no timings → nil")
+	}
+}
+
+// TestRestoreOutOfRoomSkipsWithoutTrippingBreaker.
+//
+// makeDecodeRoom frees space from a reading of /slots, and the restore lands a
+// moment later — by which time another request may have taken it. The engine
+// then answers "No available space in KV cache". That is the SAME condition
+// makeDecodeRoom already treats as "serve this one direct", discovered later;
+// it used to arrive as a component failure and open the prefill breaker for
+// 30 s, taking the handoff away from every OTHER request too. Measured on .63:
+// six such refusals, each costing half a minute of degraded routing that
+// nothing reported.
+//
+// The second request is the assertion that matters: with the breaker open it
+// would not reach the prefill at all.
+func TestRestoreOutOfRoomSkipsWithoutTrippingBreaker(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	r.decode.mu.Lock()
+	r.decode.restoreFail = "No available space in KV cache"
+	r.decode.mu.Unlock()
+
+	// two DIFFERENT conversations on purpose: the same prompt twice takes the
+	// cache-hot short-circuit and never reaches the prefill, so the test would
+	// pass while proving nothing — the vacuous-test trap of 2026-09-08.
+	for i, who := range []string{"proyecto uno", "proyecto dos"} {
+		code, data := postChat(t, r.gateway.URL, map[string]any{
+			"messages": []any{map[string]any{"role": "user", "content": who + " " + longUser}},
+		})
+		if code != 200 || !bytes.Contains(data, []byte("resumen")) {
+			t.Fatalf("request %d must survive: %d %s", i+1, code, data)
+		}
+	}
+
+	rec := lastRequestRecord(t, r.gateway.URL)
+	if _, isError := rec["handoff_error"]; isError {
+		t.Fatalf("a full decode is not a broken one: %v", rec)
+	}
+	if skipped, _ := rec["handoff_skipped"].(string); !strings.Contains(skipped, "llen") {
+		t.Fatalf("the skip must say the decode filled up: %v", rec)
+	}
+
+	r.prefill.mu.Lock()
+	saves := len(r.prefill.saved)
+	r.prefill.mu.Unlock()
+	if saves < 2 {
+		t.Fatalf("the breaker closed the prefill after a FULL decode: only %d prefill(s) for 2 requests", saves)
+	}
+}
+
+// TestRestoreRealFailureStillTripsBreaker is the control: turning every restore
+// error into a skip would pass the test above and hide a genuinely broken
+// engine behind a permanently "skipped" handoff.
+func TestRestoreRealFailureStillTripsBreaker(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	r.decode.mu.Lock()
+	r.decode.restoreFail = "CUDA error: an illegal memory access was encountered"
+	r.decode.mu.Unlock()
+
+	code, data := postChat(t, r.gateway.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": longUser}},
+	})
+	if code != 200 || !bytes.Contains(data, []byte("resumen")) {
+		t.Fatalf("the request must survive even a real failure: %d %s", code, data)
+	}
+	rec := lastRequestRecord(t, r.gateway.URL)
+	he, _ := rec["handoff_error"].(string)
+	if he == "" {
+		t.Fatalf("a real engine failure must be recorded as an error, not as a skip: %v", rec)
+	}
+	if !strings.Contains(he, "illegal memory access") {
+		t.Fatalf("the cause must survive: %v", rec)
 	}
 }

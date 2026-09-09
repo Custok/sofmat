@@ -829,6 +829,18 @@ func (k *kvPipe) Handoff(hid, slot string) (gateway.Body, error) {
 		map[string]any{"filename": hid}, 120*time.Second)
 	k.cleanup(hid)
 	if err != nil {
+		if engineOutOfRoom(err) {
+			// The decode filled up between makeDecodeRoom's reading of /slots and
+			// the restore landing. That is the SAME condition makeDecodeRoom
+			// already treats as "serve direct" — discovered a moment later,
+			// because the room was taken in between. Treating it as a component
+			// failure opened the prefill breaker for 30 s and took the handoff
+			// away from every OTHER request too. Observed on .63: 6 restores
+			// refused for lack of space, each one costing half a minute of
+			// degraded routing that nobody could see.
+			return nil, fmt.Errorf("%w: el decode se llenó entre el cálculo y la restauración: %v",
+				gateway.ErrSkipHandoff, err)
+		}
 		return nil, fmt.Errorf("decode restore: %w", err)
 	}
 	out["restore_ms"] = msSince(t1)
@@ -836,6 +848,34 @@ func (k *kvPipe) Handoff(hid, slot string) (gateway.Body, error) {
 		out["n_restored"] = int(v)
 	}
 	return out, nil
+}
+
+// noRoomTexts are the ways llama-server says "the KV cache is full".
+//
+// There is more than one wording for the same condition, and matching only the
+// one you happen to have seen is how a count of 3 turned out to be 10 on .51
+// this morning: the engine had two phrasings and the search had one. So this is
+// a LIST, and it is the place to add the next wording rather than a new branch
+// somewhere else.
+var noRoomTexts = []string{
+	"no available space in kv cache",
+	"context size has been exceeded",
+	"exceeds the available context size",
+	"could not find a free slot",
+}
+
+// engineOutOfRoom reports whether an engine error is "full", not "broken".
+func engineOutOfRoom(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, t := range noRoomTexts {
+		if strings.Contains(msg, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanup deletes the shipped state on both nodes (best-effort, async): the
