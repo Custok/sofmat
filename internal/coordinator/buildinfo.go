@@ -138,6 +138,7 @@ func (s *Server) panelVersion(w http.ResponseWriter, r *http.Request) {
 		"pending":       cur != "dev" && avail != "" && avail > cur,
 		"fleet_pending": len(behind) > 0,
 		"behind":        behind,
+		"blocked":       updateBlocked(),
 	})
 }
 
@@ -145,6 +146,16 @@ func (s *Server) panelVersion(w http.ResponseWriter, r *http.Request) {
 func (s *Server) panelSetAutoUpdate(w http.ResponseWriter, r *http.Request) {
 	SetAutoUpdate(r.URL.Query().Get("on") == "true")
 	writeJSON(w, http.StatusOK, map[string]any{"autoupdate": AutoUpdateOn()})
+}
+
+// UpdateBlocked lo cablea main: devuelve por que el auto-update no avanza, o "".
+var UpdateBlocked func() string
+
+func updateBlocked() string {
+	if UpdateBlocked == nil {
+		return ""
+	}
+	return UpdateBlocked()
 }
 
 // UpdateNow is main's checkAndUpdate, wired in so the panel's "actualizar ahora"

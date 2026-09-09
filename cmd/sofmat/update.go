@@ -19,7 +19,14 @@ import (
 // "dev" (go run / unbuilt) never self-updates.
 var version = "dev"
 
-const releasesAPI = "https://api.github.com/repos/Custok/sofmat/releases/latest"
+// releasesAPI es var, no const, para que la prueba de extremo a extremo pueda
+// levantar un release falso y recorrer el camino ENTERO. Las piezas probadas por
+// separado no demuestran que esten conectadas.
+var releasesAPI = "https://api.github.com/repos/Custok/sofmat/releases/latest"
+
+// reexec es sustituible en pruebas: la de verdad no vuelve nunca (o llama a
+// os.Exit), que es incompatible con comprobar nada despues.
+var reexec = reexecReal
 
 // assetName is this platform's release asset — must match the names uploaded to
 // the GitHub release.
@@ -42,7 +49,7 @@ func assetName() string {
 
 // selfPath is the file to replace: the AppImage bundle when running as one, else
 // the executable itself.
-func selfPath() string {
+var selfPath = func() string {
 	if ap := os.Getenv("APPIMAGE"); ap != "" {
 		return ap
 	}
@@ -92,6 +99,10 @@ func checkAndUpdate() {
 		Assets []struct {
 			Name string `json:"name"`
 			URL  string `json:"browser_download_url"`
+			// Digest lo publica GitHub como "sha256:…" en releases recientes. Si
+			// viene, se comprueba; si no, la version declarada sigue siendo la
+			// guarda que de verdad corta el bucle del artefacto rancio.
+			Digest string `json:"digest"`
 		} `json:"assets"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&rel) != nil {
@@ -101,18 +112,30 @@ func checkAndUpdate() {
 	if latest == "" || latest <= version { // sortable YYYYMMDDHHMM stamps
 		return
 	}
-	var url string
+	var url, digest string
 	for _, a := range rel.Assets {
 		if a.Name == assetName() {
-			url = a.URL
+			url, digest = a.URL, a.Digest
 			break
 		}
 	}
 	if url == "" {
 		return
 	}
+	// Preguntar ANTES de gastar la descarga. Sin esto el rechazo funciona pero
+	// cuesta un binario entero cada media hora, para siempre.
+	if why, no := alreadyRefused(latest, digest); no {
+		fmt.Printf("soflink: auto-update detenido - %s\n", why)
+		return
+	}
+	// El cinturon: aunque todo lo demas falle, el numero de vueltas es finito y
+	// queda escrito en disco. Sin esto, "reintentar" y "bucle" son lo mismo.
+	if err := spendAttempt(latest, digest); err != nil {
+		fmt.Printf("soflink: auto-update detenido - %v\n", err)
+		return
+	}
 	fmt.Printf("soflink: nueva version %s (tengo %s) - actualizando...\n", latest, version)
-	if err := applyUpdate(client, url); err != nil {
+	if err := applyUpdate(client, url, latest, digest); err != nil {
 		fmt.Printf("soflink: auto-update fallo (%v) - sigo con la version actual\n", err)
 	}
 }
@@ -137,7 +160,7 @@ func periodicUpdate() {
 	}
 }
 
-func applyUpdate(client *http.Client, url string) error {
+func applyUpdate(client *http.Client, url, wantVersion, assetDigest string) error {
 	self := selfPath()
 	if self == "" {
 		return fmt.Errorf("no self path")
@@ -165,6 +188,13 @@ func applyUpdate(client *http.Client, url string) error {
 		_ = os.Remove(newPath)
 		return fmt.Errorf("download too small (%d bytes)", n)
 	}
+	_ = os.Chmod(newPath, 0o755) // hay que poder EJECUTARLO para preguntarle quien es
+	// La comprobacion que faltaba: que el fichero SEA lo que el release dice que
+	// es. El tag lo pone una persona; lo que va a correr es esto.
+	if err := admitArtifact(newPath, wantVersion, assetDigest); err != nil {
+		_ = os.Remove(newPath)
+		return err
+	}
 	// Swap: a running file can be RENAMED (even on Windows), just not overwritten.
 	oldPath := self + ".old"
 	_ = os.Remove(oldPath)
@@ -177,5 +207,6 @@ func applyUpdate(client *http.Client, url string) error {
 		return err
 	}
 	_ = os.Chmod(self, 0o755)
+	clearAttempts(wantVersion) // instalada de verdad: lo anotado deja de importar
 	return reexec(self)
 }

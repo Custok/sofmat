@@ -102,6 +102,7 @@ func serve(args []string) {
 	coordinator.GitHubToken = cfg.GitHubToken // authenticate the updater (5000 req/h vs anonymous 60/h)
 	coordinator.SetAutoUpdate(!*noUpdate)     // the header checkbox reads/toggles this
 	coordinator.UpdateNow = checkAndUpdate    // the header "actualizar todos" button triggers this
+	coordinator.UpdateBlocked = blockedReason // por que NO avanza, visible en el panel
 	if !*noUpdate {
 		checkAndUpdate()    // self-update from GitHub Releases at startup, then re-exec (best-effort)
 		go periodicUpdate() // y sigue comprobando en runtime (cada 30m) para coger releases sin reiniciar

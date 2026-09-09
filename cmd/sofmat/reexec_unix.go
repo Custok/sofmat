@@ -19,7 +19,7 @@ import (
 //
 // Exec cannot do that. There is no second process to leak, whatever supervises
 // the service — or does not.
-func reexec(self string) error {
+func reexecReal(self string) error {
 	args := append([]string{self}, os.Args[1:]...)
 	return syscall.Exec(self, args, os.Environ())
 }

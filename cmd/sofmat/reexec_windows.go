@@ -14,7 +14,7 @@ import (
 //
 // The parent exits only AFTER the child has started, so a failure to start
 // leaves the current version running rather than nothing at all.
-func reexec(self string) error {
+func reexecReal(self string) error {
 	cmd := exec.Command(self, os.Args[1:]...)
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
 	if err := cmd.Start(); err != nil {

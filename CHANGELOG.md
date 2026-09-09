@@ -2,6 +2,24 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609092243 (2026-09-09)
+El auto-update deja de poder entrar en bucle. Se arregla el lado del que INSTALA.
+
+El 07-09 un release publico un artefacto mal etiquetado: la etiqueta decia una version y el binario declaraba otra. El nodo lo instalaba, arrancaba diciendo la vieja, se veia desactualizado otra vez y se actualizaba otra vez. 281 arranques, 272 reinicios de servicio y ~940 MB en 24 h, **saliendo con codigo 0 cada vez**. Nada dio error, y por eso no salto nada. Aquel dia se arreglo el lado del que PUBLICA (`dist/release_all.sh` verifica que cada artefacto declare su tag). Faltaba el otro lado: el que instala tiene que aguantar aunque el que publica falle.
+
+Cuatro agujeros, cuatro guardas (`cmd/sofmat/updateguard.go`):
+
+1. **No se comprobaba que el binario descargado DECLARASE la version prometida.** El unico control era "pesa mas de 1 MB". Ahora se le ejecuta `version` antes de sustituir nada y se rechaza si no coincide.
+2. **El rechazo no sobrevivia al reinicio** — y el bucle se cierra justamente reiniciando. Se guarda en disco por sha256 del artefacto, junto al binario. Se levanta cuando el sha cambia, no cuando pasa el tiempo: reintentar cada media hora algo que esta mal es el mismo bucle, mas lento.
+3. **El rechazo por sha llega tarde: ya has gastado la descarga.** Eran los ~940 MB. Se ancla tambien al `digest` que GitHub publica en cada asset, que es lo unico que se conoce ANTES de descargar. Sin digest publicado no hay forma de reconocer el fichero sin bajarselo, y ahi el que acota las vueltas es el contador.
+4. **No habia contador.** El candado que existia solo evitaba dos updates SIMULTANEOS, no repetidos. Tres intentos por version. Y se rearma solo si el artefacto cambia: si no, "republica el release arreglado" seria mentira y el nodo se quedaria clavado hasta la version siguiente.
+
+**Y sale en el panel.** `/api/version` devuelve `blocked` con el motivo. Un fallo que solo existe en un log es un fallo que nadie ve: desde fuera no se distinguia "al dia" de "dando vueltas", que es exactamente por lo que se acabo desactivando el auto-update con `-no-update`.
+
+Nueve pruebas con sus controles. Las que valen son las de extremo a extremo, contra un GitHub de mentira que sirve un artefacto rancio: el binario que corre no se toca, no se re-ejecuta, y **la segunda vuelta ni siquiera se lo descarga**. Los controles son los que impiden que las apruebe un auto-update que no actualiza NUNCA —el otro fallo, el que hay ahora—: una actualizacion buena entra y re-ejecuta, y republicar desatasca. Esa prueba de extremo a extremo encontro el agujero 3, que las unitarias daban por bueno.
+
+Sabotaje que COMPILA, uno por guarda: quitar la comprobacion de version, quitar la persistencia del rechazo, quitar el corte del contador y quitar la pregunta previa a la descarga ponen en rojo exactamente la prueba que les corresponde.
+
 ## v202609091815 (2026-09-09)
 La decision de capacidad deja de adivinar: usa el conteo exacto que ya se habia pagado.
 
