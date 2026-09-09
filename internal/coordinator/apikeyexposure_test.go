@@ -244,3 +244,75 @@ func TestBootstrapCanStillMint(t *testing.T) {
 	pstate.apiKey = ""
 	pstate.mu.Unlock()
 }
+
+// TestAuthCheckIsTheOnlyGuardedRouteThatChangesNothing.
+//
+// A panel opened from another machine gets a mask, so the operator pastes the
+// key — and needs to know it is right BEFORE using it, which used to mean
+// firing a real action and seeing whether it failed. Every other guarded route
+// ejects, loads or deletes: probing them is the "test whose failure case is the
+// damage" that cost two nodes their live key this morning. This one answers the
+// question and does nothing else.
+func TestAuthCheckIsTheOnlyGuardedRouteThatChangesNothing(t *testing.T) {
+	gw := keyedGateway(t)
+
+	if code, body := get(t, gw.URL+"/api/authcheck"); code != http.StatusUnauthorized {
+		t.Fatalf("sin clave debe ser 401, fue %d: %s", code, body)
+	}
+	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/api/authcheck", nil)
+	req.Header.Set("Authorization", "Bearer "+"sk-"+"soflink-otra-cualquiera")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("con una clave equivocada debe ser 401, fue %d", resp.StatusCode)
+	}
+
+	// CONTROL: con la clave buena responde, o no sirve para validar nada
+	req, _ = http.NewRequest(http.MethodGet, gw.URL+"/api/authcheck", nil)
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"ok":true`) {
+		t.Fatalf("con la clave correcta debe confirmar: %d %s", resp.StatusCode, b)
+	}
+}
+
+// TestStatusSaysWhenItMasked: the panel must be TOLD, not left to infer it from
+// the shape of the string. A viewer that guesses "it has dots, so it is a mask"
+// breaks the day a key legitimately contains them.
+func TestStatusSaysWhenItMasked(t *testing.T) {
+	srv := serverWithKey(t, testKey)
+
+	remote := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	remote.RemoteAddr = "203.0.113.99:51234"
+	rec := httptest.NewRecorder()
+	srv.panelStatus(rec, remote)
+	var far map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &far); err != nil {
+		t.Fatalf("no es JSON: %s", rec.Body.String())
+	}
+	if far["api_key_masked"] != true {
+		t.Fatalf("a un viewer remoto hay que DECIRLE que va enmascarada: %v", far["api_key_masked"])
+	}
+
+	// CONTROL: desde la propia máquina NO va enmascarada, y hay que decirlo también
+	local := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	local.RemoteAddr = "127.0.0.1:51234"
+	rec2 := httptest.NewRecorder()
+	srv.panelStatus(rec2, local)
+	var near map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &near)
+	if near["api_key_masked"] != false {
+		t.Fatalf("desde la propia máquina no se enmascara: %v", near["api_key_masked"])
+	}
+	if near["api_key"] != testKey {
+		t.Fatalf("y debe venir la clave real")
+	}
+}

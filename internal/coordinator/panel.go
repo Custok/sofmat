@@ -106,18 +106,27 @@ func maskAPIKey(k string) string {
 // would hand the key to anyone who sets a header. A proxied request therefore
 // gets the mask, which is the safe direction to be wrong in.
 func (s *Server) keyForViewer(r *http.Request) string {
+	k, _ := s.keyForViewerMasked(r)
+	return k
+}
+
+// keyForViewerMasked also reports whether the value was masked, so the panel
+// does not have to guess by looking for dots inside the string: a viewer that
+// only got a mask needs a way to supply the real key, and it must be told, not
+// left to infer it from the shape of what it received.
+func (s *Server) keyForViewerMasked(r *http.Request) (string, bool) {
 	key := s.effectiveAPIKey()
 	if key == "" || r == nil {
-		return key
+		return key, false
 	}
 	host := r.RemoteAddr
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
 	if ip := net.ParseIP(host); ip != nil && isThisMachine(ip) {
-		return key
+		return key, false
 	}
-	return maskAPIKey(key)
+	return maskAPIKey(key), true
 }
 
 // isThisMachine reports whether an address belongs to this host: loopback OR
@@ -182,6 +191,15 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// authCheck answers whether the caller's key is the live one. Read-only and
+// behind the guard, so a panel opened from another machine can VERIFY a pasted
+// key immediately instead of discovering it was wrong when an action fails —
+// and it is the only guarded route that changes nothing, which is why probing
+// the others was never an option.
+func (s *Server) authCheck(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // panelGenKey mints a fresh random API key, activates it immediately, and
@@ -788,7 +806,7 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 	// Each carries its connection surface (endpoint, model path, API key); when
 	// roles are split, they also carry the coordinator that fronts them.
 	coordinator := s.cfg.PublicURL
-	apiKey := s.keyForViewer(r)
+	apiKey, apiKeyMasked := s.keyForViewerMasked(r)
 	coordShown := ""
 	if loaded && prefillUp {
 		coordShown = coordinator
@@ -874,7 +892,8 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 		"tokps": nz(tokps[selected]), "cluster_tokps": clusterOut,
 		"selected": selected, "active_config": activeKey(preset),
 		"coordinator": coordinator, "api_key": apiKey, "api_key_enabled": apiKey != "",
-		"_upn": upn,
+		"api_key_masked": apiKeyMasked,
+		"_upn":           upn,
 	})
 }
 

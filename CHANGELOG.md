@@ -2,6 +2,17 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609091430 (2026-09-09)
+El panel se puede operar desde fuera del nodo, pegando la clave una vez.
+
+Decision de David sobre la consecuencia del release anterior: `/api/status` entrega la clave completa solo a quien llama desde el propio equipo, asi que un panel abierto desde otra maquina podia mirar y no actuar. Ahora se le puede dar la clave, y el navegador la recuerda.
+
+`/api/status` dice ademas **si** lo que sirve va enmascarado, en vez de dejar que el panel lo deduzca de la forma de la cadena: un cliente que adivine "tiene puntos suspensivos, luego es una mascara" se rompe el dia que una clave legitima los lleve.
+
+Nuevo `GET /api/authcheck`, detras de la misma guarda que las acciones y **sin cambiar nada**: responde si la clave del que llama es la buena. Existe porque validar una clave pegada exigia hasta ahora disparar una accion de verdad y ver si fallaba — y todas las rutas protegidas expulsan, cargan o borran. Es exactamente la prueba cuyo caso de fallo es el dano, que este mismo dia costo a dos nodos su clave activa. Esta responde la pregunta y no hace nada mas.
+
+La clave pegada vive solo en el navegador que la escribio, y las lecturas y escrituras de ese almacen van protegidas: en una ventana privada o con las cookies bloqueadas el panel sigue funcionando sin memoria, en vez de romperse entero.
+
 ## v202609091350 (2026-09-09)
 Correccion del release anterior: "la propia maquina" no es lo mismo que "loopback".
 

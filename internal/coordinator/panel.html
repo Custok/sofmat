@@ -252,7 +252,27 @@ background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradien
 </div>
 <script>
 var HIST=[],SPARK=[],NM={};function dn(n){return NM[n]||n}
-var APIKEY='',LAST=null;
+var APIKEY='',LAST=null,MASKED=false;
+// localStorage puede lanzar (ventana privada, cookies bloqueadas): que el panel
+// siga funcionando sin memoria en vez de romperse entero.
+function savedKey(){try{return localStorage.getItem('soflink_apikey')||''}catch(e){return ''}}
+function saveKey(k){try{k?localStorage.setItem('soflink_apikey',k):localStorage.removeItem('soflink_apikey')}catch(e){}}
+function askKey(){
+  var k=prompt('API key de este nodo. Se guarda SOLO en este navegador.'+
+    '\n\nSe copia del panel abierto EN el propio nodo, o del fichero .soflink-apikey.'+
+    '\nDeja el campo vacio para olvidarla.', savedKey());
+  if(k===null)return;
+  k=k.trim(); saveKey(k); APIKEY=k;
+  if(!k){alert('Clave olvidada en este navegador.');tick();return}
+  // Comprobar ANTES de que falle una accion: /api/authcheck no cambia nada.
+  fetch('/api/authcheck',{headers:ah()}).then(function(r){
+    if(r.status===200)alert('Clave valida: ya puedes operar desde aqui.');
+    else if(r.status===401)alert('Esa clave NO es la de este nodo (401). Se ha guardado igual;'+
+      '\nvuelve a introducirla cuando tengas la buena.');
+    else alert('No se pudo comprobar la clave (HTTP '+r.status+').');
+    tick()
+  }).catch(function(){alert('No se pudo contactar con el nodo para comprobar la clave.');tick()})
+}
 document.head.insertAdjacentHTML('beforeend','<style>.cpv{cursor:pointer}.cpv:hover{opacity:1 !important}.genk{cursor:pointer;color:var(--accent);margin-left:5px;text-decoration:none;font-weight:600}.lccard{margin-top:10px;border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--panel2)}.lccardh{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:6px}.lccardt{font-weight:700}.lccardm{font-size:12px;color:var(--muted);font-family:ui-monospace,monospace}.lcstate{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;margin:8px 0;padding:8px 10px;border-radius:9px}.lcstate .dot{width:9px;height:9px;border-radius:50%;flex:none}.lcstate.load{color:var(--accent);background:var(--accent-soft)}.lcstate.load .dot{background:var(--accent);animation:lcpulse 1s ease-in-out infinite}.lcstate.ok{color:var(--good);background:var(--good-soft)}.lcstate.ok .dot{background:var(--good)}.lcstate.err{color:var(--crit);background:var(--crit-soft)}.lcstate.err .dot{background:var(--crit)}@keyframes lcpulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.8)}}.lcep{font-size:12px;color:var(--muted);font-family:ui-monospace,monospace;margin:2px 0;word-break:break-all}.lccardbtns{display:flex;gap:8px;margin-top:10px}</style>');
 function cp(t,el){if(!t)return;try{navigator.clipboard.writeText(t)}catch(e){}if(el){var o=el.style.color;el.style.color='var(--good)';setTimeout(function(){el.style.color=o},700)}}
 function maskKey(k){return k?(k.length>22?k.slice(0,14)+'…'+k.slice(-4):k):''}
@@ -282,7 +302,12 @@ function drawSpark(){var s=document.getElementById('spark');if(SPARK.length<2){s
   s.innerHTML='<path d="'+d+'" stroke="var(--accent)" stroke-width=2 stroke-linecap=round stroke-linejoin=round/><circle cx="'+last[0].toFixed(0)+'" cy="'+last[1].toFixed(0)+'" r=3.2 fill="var(--accent)"/>';}
 async function tick(){
   var s;try{s=await j('/api/status')}catch(e){return}
-  NM=s.names||{};APIKEY=s.api_key||'';LAST=s;
+  NM=s.names||{};LAST=s;
+  // El servidor enmascara la clave a quien no llama desde el propio nodo.
+  // Un panel abierto desde otro equipo la pega una vez y este navegador la
+  // recuerda; sin esto se podia mirar pero no operar.
+  MASKED=!!s.api_key_masked;
+  APIKEY = MASKED ? (savedKey()||'') : (s.api_key||'');
   var it=document.getElementById('insttabs');
   it.innerHTML=(s.instances||[]).map(function(i){
     var dc=i.up?(i.selected?'var(--good)':'var(--muted)'):'var(--crit)';
@@ -298,7 +323,7 @@ async function tick(){
       +(i.coordinator?'<br><span class=cpv onclick="cp(\''+i.coordinator+'\',this)" title="coordinador (union de roles) - clic para copiar">&#8627; via '+i.coordinator+' &#8888;</span>':'')
       +(i.model?'<br><span class=cpv onclick="cp(\''+i.model+'\',this)" title="model para la API - clic para copiar" style="opacity:.9">model: '+i.model+' &#8888;</span>':'')
       +'<br>API key: '+(i.api_key_enabled
-          ?'<span class=cpv onclick="cp(\''+(i.api_key||'')+'\',this)" title="clic para copiar la API key"><b>'+maskKey(i.api_key)+'</b> &#8888;</span> <a class=genk onclick="genkey()" title="regenerar">&#8635;</a>'
+          ?'<span class=cpv onclick="cp(\''+(MASKED?(savedKey()||''):(i.api_key||''))+'\',this)" title="clic para copiar la API key"><b>'+maskKey(i.api_key)+'</b> &#8888;</span>'+(MASKED?' <a class=genk onclick="askKey()" title="'+(APIKEY?'clave guardada en este navegador - clic para cambiarla':'este nodo no da la clave a equipos remotos - clic para introducirla')+'">'+(APIKEY?'&#128273;&#10003;':'&#128273;')+'</a>':' <a class=genk onclick="genkey()" title="regenerar">&#8635;</a>')
           :'<b>off</b> <a class=genk onclick="genkey()" title="generar una API key aleatoria">&#128273; generar</a>')
       +'</div></div>';
   }).join('');

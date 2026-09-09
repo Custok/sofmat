@@ -531,6 +531,8 @@ func (s *Server) Handler() http.Handler {
 	// guard(): minting a key REPLACES the live one, so it is a mutating action
 	// like eject or delete. On a node with no key yet authOK passes anyway, so
 	// a fresh install can still mint its first one.
+	// guard() sin postOnly: no cambia nada, solo dice si la clave vale.
+	mux.HandleFunc("/api/authcheck", s.guard(s.authCheck))
 	mux.HandleFunc("/api/genkey", s.mut(s.panelGenKey))
 	mux.HandleFunc("/api/chat", s.panelChat)
 	mux.HandleFunc("/api/chat/stream", s.panelChatStream)
