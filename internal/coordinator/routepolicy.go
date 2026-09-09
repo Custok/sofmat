@@ -60,13 +60,26 @@ func postOnly(next http.HandlerFunc) http.HandlerFunc {
 //
 // A valid API key is also accepted, so an operator can still drive them by hand.
 //
-// LIMIT, stated rather than discovered later: this protects against the LAN, not
-// against the host. A container started with NetworkMode=host shares the host's
-// stack, so :1357 is LOOPBACK to it — and loopback must pass, because the daemon
-// calls its own control surface. Any origin-based filter has this hole; the same
-// argument ruled out an iptables rule for the same job. Closing it needs a
-// secret, not an origin. There is at least one such container on the fleet
-// (a node-exporter), so this is a real exception and not a theoretical one.
+// LIMIT, stated rather than discovered later — and MEASURED, because the first
+// wording of this comment was true in shape and too broad in scope.
+//
+// A container started with NetworkMode=host shares the host's network stack, so
+// :1357 is LOOPBACK to it, and loopback must pass because the daemon calls its
+// own control surface. Any origin-based filter has that hole; the same argument
+// ruled out an iptables rule for the same job, and closing it needs a secret,
+// not an origin.
+//
+// But "it does not protect against the host" overstated it. Measured on a node
+// with 17 containers (2026-09-09): the 16 on bridge networks reach the port from
+// 172.x, are not in the configuration, and are REFUSED. Only the one sharing the
+// host's stack is indistinguishable from the panel. So the accurate statement is
+// narrower and more useful: it does not distinguish the container that shares
+// the host's network stack.
+//
+// Verified by fabricating the refusal rather than trusting a silent log: a real
+// process on a bridge network asking for a protected route got 401 and left the
+// line below, while the same route from loopback passed the check and died in
+// validation. A counter that has never said "one" is not a measurement.
 func (s *Server) peer(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.fromPeer(r) || s.authOK(r) {
