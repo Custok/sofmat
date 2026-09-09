@@ -7,6 +7,7 @@ package leakguard
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +35,11 @@ func TestMustBlockContent(t *testing.T) {
 		"torch-load-unsafe": "state = torch.load(path)",
 		"yaml-load-unsafe":  "cfg = yaml.load(open(p))",
 		"ip-octet-port":     "rpc at .51:50052 up",
+		// the real leak of 2026-09-09: a bare bearer key on a line of its own,
+		// no assignment around it. Nothing caught it.
+		"bare-sk-key":  "sk-soflink-" + strings.Repeat("a1b2c3d4", 8),
+		"openai-style": "sk-proj-AbCdEf0123456789",
+		"aws-akid":     "AKIAIOSFODNN7EXAMPLE",
 	}
 	for label, snippet := range cases {
 		if scanSnippet(t, snippet) == 0 {
@@ -70,6 +76,13 @@ func TestMustBlockPathsByName(t *testing.T) {
 		".env",
 		".env.production",
 		"nodes.local.map",
+		// the file that actually got pushed to the public mirror
+		".soflink-apikey",
+		"deploy/.soflink-apikey",
+		"soflink-apikey.txt",
+		"secrets/server.pem",
+		".ssh/id_ed25519",
+		".git-credentials",
 	}
 	for _, p := range paths {
 		if len(ScanPaths([]string{p}, StructuralRules())) == 0 {
@@ -83,6 +96,10 @@ func TestMustPassPathsByName(t *testing.T) {
 		"leak-guard/denylist.local.example.txt",
 		"config.example.yaml",
 		"runtime/worker.py",
+		// must NOT be swept up by the new name rules
+		"internal/gateway/tokens.go",
+		"cmd/tokenizer/main.go",
+		"docs/api-keys.md",
 	}
 	for _, p := range paths {
 		// nonexistent on disk: clean pass = name ok, content unread.

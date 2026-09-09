@@ -68,10 +68,22 @@ var skipPathRe = regexp.MustCompile(
 
 // Files that must NEVER be committed, whatever their content (defence in
 // depth over .gitignore): blocked by NAME.
+//
+// 2026-09-09: .soflink-apikey — a live bearer key, one bare token on one line —
+// was committed and pushed to the PUBLIC mirror because it matched NOTHING
+// here: not a listed basename, and its content is a bare token with no
+// `key = "…"` shape for credential-assign to bite on. Both holes are closed:
+// the name patterns below, and the `sk-` prefix in service-token.
 var forbiddenBasename = regexp.MustCompile(
 	`(^|/)(denylist\.local\.txt` +
 		`|config\.local\.(ya?ml|json|toml)` +
 		`|nodes\.local\.[^/]+` +
+		// secret-bearing dotfiles: .soflink-apikey, .git-credentials, .netrc…
+		`|\.[^/]*(apikey|api-key|api_key|secret|credential|passwd)[^/]*` +
+		`|\.netrc|\.pgpass` +
+		// key material by extension — none of these is a source extension
+		`|[^/]*\.(pem|p12|pfx|jks|ppk|keystore)` +
+		`|id_(rsa|dsa|ecdsa|ed25519)` +
 		`|\.env(\.[^/]+)?)$`)
 
 // Lines carrying an allow marker are waved through (example configs / docs).
@@ -80,6 +92,25 @@ var allowRe = regexp.MustCompile(
 		`|\.example\.(local|com|org)\b` +
 		`|REPLACE|PLACEHOLDER|example\.yaml` +
 		`|leak-guard-allow`)
+
+// secretishName is the softer branch: a basename that READS like a key file,
+// whatever its leading character (soflink-apikey.txt). It is deliberately
+// separate from forbiddenBasename because it must not swallow legitimate
+// documentation or source — docs/api-keys.md is a fine file to commit, and a
+// real key inside it is caught by the CONTENT rules instead. "token" is not in
+// the pattern on purpose: tokens.go and tokenizer.go are legitimate source.
+var secretishName = regexp.MustCompile(`(?i)(^|/)[^/]*(apikey|api-key|api_key)[^/]*$`)
+
+var docOrSourceExt = regexp.MustCompile(
+	`(?i)\.(md|markdown|rst|adoc|go|py|ts|tsx|js|jsx|java|rb|rs|c|h|cc|cpp|sh|ya?ml|html?)$`)
+
+// forbiddenName reports whether a path must be blocked by NAME alone.
+func forbiddenName(norm string) bool {
+	if forbiddenBasename.MatchString(norm) {
+		return true
+	}
+	return secretishName.MatchString(norm) && !docOrSourceExt.MatchString(norm)
+}
 
 func regexRule(name, pattern, hint string) Rule {
 	re := regexp.MustCompile(pattern)
@@ -147,6 +178,15 @@ func StructuralRules() []Rule {
 		regexRule("service-token",
 			`\b(?:lst_|ghp_|gho_|ghs_|xox[baprs]-)[A-Za-z0-9_\-]{8,}`,
 			"looks like a service/API token"),
+		// Bearer keys carry no vendor marker beyond a short prefix, so the
+		// prefix alone is not evidence — `"sk-soflink-" + hex.Encode(...)` is
+		// the code that MINTS one, not a leak. What distinguishes the real
+		// thing is the entropy that follows it, hence the longer tail here.
+		// This is the rule that was missing on 2026-09-09, when a bare
+		// sk-soflink-<64 hex> reached the public mirror.
+		regexRule("bearer-key",
+			`\b(?:sk-|sk_live_|sk_test_|AKIA)[A-Za-z0-9_\-]{16,}`,
+			"looks like a bearer/API key — keep it in a git-ignored sidecar, never in the tree"),
 		regexRule("bearer-token",
 			`(?i)\b(?:bearer|token)\s+[A-Za-z0-9._\-]{16,}`,
 			"hardcoded bearer/token — load from env / config.local.yaml"),
@@ -216,7 +256,7 @@ func ScanPaths(paths []string, rules []Rule) []Finding {
 	var findings []Finding
 	for _, path := range paths {
 		norm := strings.ReplaceAll(path, `\`, "/")
-		if forbiddenBasename.MatchString(norm) {
+		if forbiddenName(norm) {
 			findings = append(findings, Finding{
 				Path: path, Line: 0, Rule: "forbidden-file",
 				Hint:    "this file must never be committed (local secrets / real infra) — it belongs only on disk, git-ignored",
