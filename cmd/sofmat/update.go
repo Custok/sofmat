@@ -6,10 +6,10 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Custok/sofmat/internal/coordinator"
@@ -59,11 +59,21 @@ func selfPath() string {
 // checkAndUpdate queries GitHub for a newer release and, if found, downloads this
 // platform's asset, swaps the running file and re-execs into it. Best-effort: any
 // failure just logs and continues on the current version.
+// updating serialises the update path. checkAndUpdate is reachable from three
+// places at once — the startup check, the 30-minute ticker and the panel button
+// — and each one that gets through spawns a process. On a node where the update
+// never converged, overlapping calls are how one binary became many.
+var updating atomic.Bool
+
 func checkAndUpdate() {
 	defer func() { _ = recover() }()
 	if version == "dev" {
 		return
 	}
+	if !updating.CompareAndSwap(false, true) {
+		return // another update is already in flight
+	}
+	defer updating.Store(false)
 	client := &http.Client{Timeout: 8 * time.Second}
 	req, _ := http.NewRequest(http.MethodGet, releasesAPI, nil)
 	if coordinator.GitHubToken != "" { // authenticated = 5000 req/h, dodges the anonymous 60/h cap
@@ -167,12 +177,5 @@ func applyUpdate(client *http.Client, url string) error {
 		return err
 	}
 	_ = os.Chmod(self, 0o755)
-	// Re-exec into the freshly installed binary with the same args.
-	cmd := exec.Command(self, os.Args[1:]...)
-	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	os.Exit(0)
-	return nil
+	return reexec(self)
 }
