@@ -770,6 +770,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 	var tail, head []byte
 	streamed := 0
 	var readErr error
+	clientGone := false
 	// A stream that produces nothing used to be recorded as a request with no
 	// timings and no cause — the exact shape of the failures that took longest
 	// to diagnose. Say what the engine actually answered.
@@ -798,6 +799,20 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 				plan.Note("engine_said", strings.TrimSpace(string(head)))
 			}
 		}
+		// An engine that answers 200 and then sends NOTHING leaves the client
+		// with an empty stream, and every OpenAI-compatible client reports the
+		// only thing it can see: "Response contained no choices". The reason is
+		// right here — readErr, or simply a stream that closed empty — and it
+		// used to go into the request log and nowhere else. The status line is
+		// already on the wire and cannot be taken back, so the reason goes into
+		// the stream itself, which is the one channel still open.
+		if streamed == 0 && !clientGone {
+			why := "el motor aceptó la petición y cerró el stream sin enviar nada"
+			if readErr != nil {
+				why = readErr.Error()
+			}
+			emitSSEError(w, flusher, resp.StatusCode, why)
+		}
 		s.gw.Finish(plan, fin)
 	}()
 	buf := make([]byte, 8192)
@@ -809,7 +824,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 				head = append(head, buf[:min(n, 400-len(head))]...)
 			}
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				readErr = werr
+				readErr, clientGone = werr, true
 				return
 			}
 			flusher.Flush()
@@ -825,6 +840,30 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 			return
 		}
 	}
+}
+
+// emitSSEError puts one error event on an already-open stream, followed by the
+// terminator the clients wait for. finish_reason "error" is what an
+// OpenAI-compatible client reads as "the stream died", so it reports the cause
+// instead of the absence of choices.
+func emitSSEError(w http.ResponseWriter, flusher http.Flusher, status int, why string) {
+	code := status
+	if code == http.StatusOK {
+		code = http.StatusBadGateway // 200 was already sent; name the real class
+	}
+	chunk := gateway.Body{
+		"object":  "chat.completion.chunk",
+		"choices": []any{gateway.Body{"index": 0, "delta": gateway.Body{}, "finish_reason": "error"}},
+		"error":   gateway.Body{"code": code, "type": "upstream_error", "message": why},
+	}
+	b, err := json.Marshal(chunk)
+	if err != nil {
+		return
+	}
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(b)
+	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+	flusher.Flush()
 }
 
 func min(a, b int) int {
