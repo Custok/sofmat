@@ -514,20 +514,45 @@ func (k *kvPipe) decodeSlots() []map[string]any { return k.slotsAt(k.decodeURL) 
 // that no longer holds anything like this prompt, where believing the cache
 // costs a full reprocess (measured: 78 329 tokens, 184.5 s).
 func (k *kvPipe) holdsAtLeast(engine string, want int) bool {
+	n, _, ok := k.slotsHolding(engine, want)
+	return !ok || n > 0
+}
+
+// slotsHolding counts how many of an engine's slots hold at least want tokens
+// (with the same 20% tolerance). ok is false when the engine could not be read,
+// and a probe failure must never be turned into extra work.
+//
+// TWO counts and not a yes/no, because "some slot is big" does not say the big
+// one is MINE. With four slots and several conversations on the engine, another
+// client's cache answers the question I asked about my own — and the caller
+// pays a full cold prefill believing its prompt was hot. Measured on the
+// production gateway 2026-09-09: a 17,189-token prompt estimated at 4,100 new,
+// routed straight to the decode, and processed whole from scratch — 18 of its
+// 21.7 seconds. The count lets the caller compare it against how many
+// conversations could account for those slots: `cached` is how many slots hold
+// anything at all, which is how many conversations this engine is keeping. If
+// every one of them is big, mine is big too; if some are small, mine may be one
+// of the small ones and the honest answer is "unknown".
+func (k *kvPipe) slotsHolding(engine string, want int) (big, cached int, ok bool) {
 	if want <= 0 {
-		return true
+		return 0, 0, false
 	}
 	slots := k.slotsAt(engine)
 	if slots == nil {
-		return true // unreadable: do not turn a probe failure into extra work
+		return 0, 0, false
 	}
 	need := int(float64(want) * 0.8)
 	for _, s := range slots {
-		if v, ok := s["n_prompt_tokens"].(float64); ok && int(v) >= need {
-			return true
+		v, isNum := s["n_prompt_tokens"].(float64)
+		if !isNum || int(v) <= 0 {
+			continue
+		}
+		cached++
+		if int(v) >= need {
+			big++
 		}
 	}
-	return false
+	return big, cached, true
 }
 
 // engineHeld is what an engine's slots hold that a new prompt cannot have,

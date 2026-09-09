@@ -2,6 +2,17 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609091520 (2026-09-09)
+"Algun slot es grande" no dice que el grande sea el MIO.
+
+Antes de decidir la ruta, el gateway pregunta al motor si todavia guarda el prefijo de esta conversacion, y la comprobacion devolvia "si" en cuanto CUALQUIER slot tuviera suficientes tokens. Con cuatro slots y varias conversaciones en el mismo motor, la cache de otro cliente respondia la pregunta que se hacia sobre esta: la admision conservaba su estimacion optimista y el prompt se procesaba entero desde cero.
+
+Medido en produccion sobre una peticion real del HUD: 17.189 tokens, estimados en 4.100 nuevos, **18 de sus 21,7 segundos** procesando el prompt en el motor de generacion — que es justo el trabajo que el nodo de prefill existe para quitarle. Y los slots que enganaron a la comprobacion los habian llenado nuestras propias mediciones: la medicion alterando lo medido, con la factura pagada por un tercero.
+
+Ahora un slot grande se atribuye a esta conversacion solo cuando TODOS los slots que el motor esta cacheando son grandes. Uno cacheado y grande => es el mio, que es la regla anterior sin cambios. Tres cacheados y solo uno grande => el mio puede ser uno de los dos pequenos, y "no se sabe" tiene que leerse como frio. Equivocarse en esta direccion cuesta un traspaso que no hacia falta; equivocarse en la otra cuesta un prefill completo en el motor al que habia que proteger de el.
+
+La cuenta sale de los slots del propio motor y no del reparto de sesiones del balanceador: ese reparto no se mantiene cuando hay un solo motor de generacion, asi que una regla construida sobre el habria sido silenciosamente inutil en la configuracion mas comun.
+
 ## v202609091430 (2026-09-09)
 El panel se puede operar desde fuera del nodo, pegando la clave una vez.
 

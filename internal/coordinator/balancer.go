@@ -434,6 +434,23 @@ func (b *decodeBalancer) sessionsOn(idx int) int {
 	return n
 }
 
+// sessionsOnNode is how many conversations are pinned to this engine, never
+// less than one: the conversation asking is itself on it.
+func (b *decodeBalancer) sessionsOnNode(n *decodeNode) int {
+	if n == nil {
+		return 1
+	}
+	for i, m := range b.nodes {
+		if m == n {
+			if c := b.sessionsOn(i); c > 1 {
+				return c
+			}
+			return 1
+		}
+	}
+	return 1
+}
+
 // stats is what the panel/request log reports about the spread.
 func (b *decodeBalancer) stats() []map[string]any {
 	out := make([]map[string]any, 0, len(b.nodes))

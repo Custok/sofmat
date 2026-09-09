@@ -96,16 +96,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		// the engine itself is the only honest source on whether a conversation's
 		// prefix survived: the gateway records what it routed, not what the engine
 		// evicted to make room for somebody else.
-		opts.CacheResident = func(b gateway.Body, expect int) bool {
-			if s.bal == nil || s.bal.Len() == 0 {
-				return true
-			}
-			n := s.bal.stickyNode(sessionKey(b))
-			if n == nil {
-				return true
-			}
-			return kp.holdsAtLeast(n.url, expect)
-		}
+		opts.CacheResident = func(b gateway.Body, expect int) bool { return s.cacheResident(kp, b, expect) }
 		// symmetric routing: the prefill runs on the engine where the conversation
 		// does NOT live, and the state is restored into the engine that will serve
 		// it. So every conversation can take the handoff — no veto needed.
@@ -481,6 +472,46 @@ func (e *engineError) Error() string {
 		msg = http.StatusText(e.status)
 	}
 	return fmt.Sprintf("motor HTTP %d: %s", e.status, msg)
+}
+
+// cacheResident answers "does the engine that will serve this request still
+// hold this conversation's prefix?" — and the honest answer needs more than
+// "is some slot big".
+//
+// It used to return true as soon as ANY slot held enough tokens. With four
+// slots and several conversations on one engine, another client's cache
+// answered the question asked about this one: the admission kept its optimistic
+// estimate and the prompt was processed whole from scratch. Measured in
+// production 2026-09-09 on a HUD request: 17,189 tokens, estimated at 4,100
+// new, 18 of its 21.7 seconds spent prefilling on the decode. A proxy for
+// identity — the same shape the fleet spent that day finding elsewhere.
+//
+// So a big slot is attributed to this conversation only when EVERY slot the
+// engine is caching is big. One conversation cached and it is big => it is mine
+// (the old rule, unchanged). Three cached and only one big => mine may be one
+// of the two small ones, and "unknown" has to read as cold.
+//
+// The count comes from the engine's own slots and not from the balancer's
+// session map on purpose: that map is not kept when there is a single decode
+// engine, so a rule built on it would be silently toothless in exactly the
+// configuration most installations run. Being wrong this
+// way costs a handoff that was not needed; being wrong the other way costs a
+// full cold prefill on the engine that should have been protected from it.
+func (s *Server) cacheResident(kp *kvPipe, b gateway.Body, expect int) bool {
+	if s.bal == nil || s.bal.Len() == 0 || kp == nil {
+		return true
+	}
+	n := s.bal.stickyNode(sessionKey(b))
+	if n == nil {
+		return true
+	}
+	big, cached, ok := kp.slotsHolding(n.url, expect)
+	if !ok {
+		return true // unreadable: a probe failure must not create work
+	}
+	// Every cached conversation is big => mine is big too. Some are small =>
+	// mine may be one of those, and "unknown" has to read as cold.
+	return cached > 0 && big >= cached
 }
 
 // Handler returns the HTTP mux for the API.
