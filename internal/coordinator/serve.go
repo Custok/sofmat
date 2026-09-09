@@ -311,12 +311,12 @@ func (s *Server) pickDecode(body gateway.Body, extra gateway.Headers) (*decodeNo
 				n = m
 			}
 		}
-		est := estBodyTokens(body)
+		est := bodyTokens(body, extra)
 		n.claim(est)
 		s.bal.remember(sessionKey(body), n)
 		return n, func() { n.release(est); n.invalidateHeld() }, nil
 	}
-	return s.bal.pick(sessionKey(body), estBodyTokens(body))
+	return s.bal.pick(sessionKey(body), bodyTokens(body, extra))
 }
 
 // estBodyTokens is what a request will occupy in the engine's KV: the prompt
@@ -333,6 +333,45 @@ func (s *Server) pickDecode(body gateway.Body, extra gateway.Headers) (*decodeNo
 // under-count admits a request that does not fit — which costs everyone on
 // that engine. bytes/3 errs the safe way: it may make a request wait that
 // would have fitted, and waiting is recoverable.
+// bodyTokens is what the capacity decision counts: the prompt plus the reply it
+// will have to make room for. It prefers the EXACT prompt count when the
+// admission already paid for it (header ExactTokensHeader) and falls back to the
+// byte estimate otherwise.
+//
+// The estimate is bytes/3, and its error cannot be bounded because it depends on
+// the content: measured 2026-09-09 on two real probes twenty minutes apart, the
+// same formula was right to within 14 tokens on one (prose-like, ~3 B/token) and
+// 42 327 short on the other (synthetic filler, 1,91 B/token — a 36% miss that let
+// a request through that did not fit). Prose overestimates, JSON and repetitive
+// data underestimate. When the exact number is available it costs nothing extra:
+// the tokenizer round-trip was already spent deciding the route.
+func bodyTokens(body gateway.Body, extra gateway.Headers) int {
+	if v := extra[gateway.ExactTokensHeader]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n + replyReserveFor(body)
+		}
+	}
+	return estBodyTokens(body)
+}
+
+// replyReserveFor is how much of the engine the reply is allowed to claim.
+func replyReserveFor(body gateway.Body) int {
+	reply := 0
+	switch v := body["max_tokens"].(type) {
+	case float64:
+		reply = int(v)
+	case int:
+		reply = v
+	}
+	if reply <= 0 {
+		reply = replyDefault
+	}
+	if reply > replyReserve {
+		reply = replyReserve
+	}
+	return reply
+}
+
 func estBodyTokens(body gateway.Body) int {
 	n := 0
 	if raw, err := json.Marshal(body["messages"]); err == nil {

@@ -2,6 +2,19 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609091815 (2026-09-09)
+La decision de capacidad deja de adivinar: usa el conteo exacto que ya se habia pagado.
+
+El coordinador decidia si una conversacion cabe con una estimacion de bytes/3, y ese error no se puede acotar porque depende del contenido. Medido el mismo dia con dos peticiones reales separadas veinte minutos: la misma formula acerto por 14 tokens en una (contenido tipo prosa, ~3 bytes por token) y se quedo 42.327 corta en la otra (relleno sintetico, 1,91). La segunda entro y reboto contra el motor. La prosa sobreestima, el JSON y los datos repetidos se quedan cortos.
+
+Y el numero bueno ya existia: la admision tokeniza el prompt para decidir la ruta, asi que el conteo exacto esta hecho y pagado antes de elegir motor. Solo faltaba llevarlo. Viaja en la cabecera `x-sofmat-exact-tokens` desde la admision hasta el balanceador, que lo usa en lugar de la estimacion cuando esta.
+
+No cuesta ni una vuelta mas al tokenizador y el rechazo sigue saliendo en milisegundos. Las peticiones pequenas —las que no rozan el techo y para las que no se tokeniza— se siguen estimando: ahi la estimacion sobra.
+
+Cuatro pruebas con sus controles: el conteo exacto caza lo que la estimacion dejaba pasar (y el control comprueba que con la estimacion NO se rechazaba, o la prueba no discriminaria); la reserva de respuesta se sigue sumando sobre el exacto; una cabecera ausente, vacia, cero, negativa o ilegible vuelve a la estimacion sin romper nada; y el exacto tambien manda cuando es MENOR que la estimacion, que es el caso de la prosa y evita rechazar de mas.
+
+Sabotaje que COMPILA: ignorar la cabecera pone en rojo tres de las cuatro. La cuarta —la del respaldo— sigue verde a proposito, porque prueba justo el camino que el sabotaje deja intacto.
+
 ## v202609091735 (2026-09-09)
 Esperar cuatro minutos por un sitio que no puede aparecer.
 

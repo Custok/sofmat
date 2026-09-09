@@ -31,6 +31,11 @@ var ErrUnauthorized = errors.New("unauthorized")
 // the next request tries the prefill again straight away.
 var ErrSkipHandoff = errors.New("handoff skipped")
 
+// ExactTokensHeader lleva el conteo EXACTO de tokens del prompt desde la
+// admisión hasta quien elige motor, para que la decisión de capacidad no
+// dependa de una estimación por bytes cuyo error no se puede acotar.
+const ExactTokensHeader = "x-sofmat-exact-tokens"
+
 type Headers map[string]string
 type Body map[string]any
 
@@ -534,6 +539,13 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		}
 		if goPrefill && n > 0 {
 			fields["tokens"] = n
+			// El conteo EXACTO ya está hecho aquí (costó una vuelta al tokenizador
+			// y se paga igual). Viaja al que elige motor para que decida con él en
+			// vez de con la estimación por bytes: estBodyTokens supone 3 bytes por
+			// token y el error real medido va de +0,01 % (prosa) a -36 % (relleno
+			// sintético o JSON), o sea que no se puede acotar. Cuando no hay conteo
+			// —peticiones pequeñas, que no rozan el techo— se sigue estimando.
+			decodeHeaders[ExactTokensHeader] = strconv.Itoa(n)
 			if newExact < g.exactMin && !g.residentFor(merged, n-newExact) {
 				// the engine no longer holds the prefix we were counting on: this
 				// prompt is cold, whatever the bookkeeping says. Say so out loud
