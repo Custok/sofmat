@@ -81,3 +81,54 @@ func TestTrasUnRefrescoBuenoElErrorSeVa(t *testing.T) {
 		t.Fatalf("y la edad tiene que reiniciarse: %d s", age)
 	}
 }
+
+// La pregunta de metahuman-dev (09-09 23:51): en un nodo aislado que alguien
+// consulta, cada lectura ve age>600 y lanza un refresco que FALLA. Su lectura
+// era que la edad se queda rondando 600 y no delata nada.
+//
+// Se decide mirando si un refresco FALLIDO toca latestAt. No lo toca: la marca
+// de tiempo solo se escribe en el camino de exito. Asi que la edad SIGUE
+// CRECIENDO y el testigo funciona igual aunque el nodo este siendo consultado.
+//
+// Esta prueba existe para que eso deje de depender de que alguien lea bien esas
+// cuatro lineas.
+func TestUnRefrescoFallidoNoRejuveneceLaEdad(t *testing.T) {
+	ponerCache(t, "202609092339", time.Now().Add(-2*time.Hour), "")
+
+	_, antes, _ := latestReleaseWithAge()
+
+	// exactamente lo que hace refreshLatest cuando no hay red: anota el motivo
+	// y no toca nada mas
+	noteLatestErr("sin respuesta de GitHub")
+
+	_, despues, err := latestReleaseWithAge()
+
+	if despues < antes {
+		t.Fatalf("un intento fallido ha rejuvenecido la edad: %d -> %d", antes, despues)
+	}
+	if despues < 2*60*60 {
+		t.Fatalf("la edad tiene que seguir siendo la real (~2 h), no ~600 s: %d", despues)
+	}
+	if err == "" {
+		t.Fatal("y el motivo tiene que estar puesto")
+	}
+}
+
+// CONTROL: un refresco que SI va bien es el unico que rejuvenece la edad. Sin
+// esto, la de arriba pasaria con una edad congelada que no se actualiza nunca.
+func TestSoloUnRefrescoBuenoRejuveneceLaEdad(t *testing.T) {
+	ponerCache(t, "202609092339", time.Now().Add(-2*time.Hour), "")
+	_, antes, _ := latestReleaseWithAge()
+
+	latestMu.Lock() // lo que hace refreshLatest al terminar bien
+	latestVer, latestAt, latestErr = "202609092339", time.Now(), ""
+	latestMu.Unlock()
+
+	_, despues, _ := latestReleaseWithAge()
+	if despues >= antes {
+		t.Fatalf("un refresco bueno TIENE que rejuvenecerla: %d -> %d", antes, despues)
+	}
+	if despues > 60 {
+		t.Fatalf("y dejarla cerca de cero: %d", despues)
+	}
+}
