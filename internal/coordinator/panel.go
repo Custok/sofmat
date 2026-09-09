@@ -81,6 +81,45 @@ func (s *Server) effectiveAPIKey() string {
 	return s.cfg.APIKey
 }
 
+// maskAPIKey shows enough to tell two keys apart and not enough to use one.
+func maskAPIKey(k string) string {
+	if len(k) < 20 {
+		return "sk-soflink-..."
+	}
+	return k[:14] + "..." + k[len(k)-4:]
+}
+
+// keyForViewer decides how much of the API key /api/status may show.
+//
+// It used to show ALL of it, to ANYONE: the key that guards load/eject/delete
+// was published in clear by a route that required nothing, on every node of the
+// fleet. The protection was not weak — it did not exist. Measured 2026-09-09
+// on the production gateway: a plain GET with no header returned the live key,
+// byte-identical to the one on disk.
+//
+// A caller on this machine already has the file, so showing it there changes
+// nothing and keeps the panel's copy button working for the operator sitting
+// at the node. Everyone else gets the mask: enough to tell two keys apart in
+// the dashboard, not enough to use one.
+//
+// RemoteAddr only — X-Forwarded-For is attacker-controlled, and trusting it
+// would hand the key to anyone who sets a header. A proxied request therefore
+// gets the mask, which is the safe direction to be wrong in.
+func (s *Server) keyForViewer(r *http.Request) string {
+	key := s.effectiveAPIKey()
+	if key == "" || r == nil {
+		return key
+	}
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return key
+	}
+	return maskAPIKey(key)
+}
+
 // authOK passes when auth is off, or the request carries the key as a Bearer
 // token or X-API-Key header.
 func (s *Server) authOK(r *http.Request) bool {
@@ -106,6 +145,17 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 // panelGenKey mints a fresh random API key, activates it immediately, and
 // returns it so the panel can show + copy it (Jupyter-token style).
 func (s *Server) panelGenKey(w http.ResponseWriter, r *http.Request) {
+	// POST only. Minting is a write, and it used to answer GET and HEAD too —
+	// so anything that merely FOLLOWED the URL rotated the live key: a browser
+	// prefetching a link, a crawler, an availability monitor. On 2026-09-09 two
+	// operators triggered it by accident within twenty seconds of each other,
+	// both reasoning "a minting route will be POST-only". It was not.
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed,
+			map[string]any{"error": "usa POST: esta ruta acuña una clave nueva y desactiva la anterior"})
+		return
+	}
 	b := make([]byte, 24)
 	_, _ = rand.Read(b)
 	key := "sk-soflink-" + hex.EncodeToString(b)
@@ -696,7 +746,7 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 	// Each carries its connection surface (endpoint, model path, API key); when
 	// roles are split, they also carry the coordinator that fronts them.
 	coordinator := s.cfg.PublicURL
-	apiKey := s.effectiveAPIKey()
+	apiKey := s.keyForViewer(r)
 	coordShown := ""
 	if loaded && prefillUp {
 		coordShown = coordinator

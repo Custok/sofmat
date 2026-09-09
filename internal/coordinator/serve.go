@@ -504,15 +504,15 @@ func (s *Server) Handler() http.Handler {
 	// load/eject through the coordinator (see nodes.go).
 	mux.HandleFunc("/nodes", s.nodes)
 	mux.HandleFunc("/hop", s.hop)
-	mux.HandleFunc("/admin/eject", s.guard(s.adminEject))
-	mux.HandleFunc("/admin/load", s.guard(s.adminLoad))
-	mux.HandleFunc("/config/apply", s.guard(s.configApply)) // one-call model swap (eject+load)
+	mux.HandleFunc("/admin/eject", s.mut(s.adminEject))
+	mux.HandleFunc("/admin/load", s.mut(s.adminLoad))
+	mux.HandleFunc("/config/apply", s.mut(s.configApply)) // one-call model swap (eject+load)
 	// soflink LAN discovery: answer the hello so a peer's subnet sweep recognizes
 	// this node as soflink (not a random open port).
 	mux.HandleFunc("/soflink/hello", discovery.HelloHandler(s.selfID(), "coordinator"))
 	// Shared display labels: peers gossip pencil renames here (one hop, no
 	// re-propagate), and expose their current labels for startup catch-up.
-	mux.HandleFunc("/soflink/rename", s.peerRename)
+	mux.HandleFunc("/soflink/rename", s.peer(s.peerRename))
 	mux.HandleFunc("/soflink/renames", s.renamesList)
 	// The daemon IS the node sensor: it serves its own GPU/host telemetry, so any
 	// soflink found on the LAN self-reports its hardware (no separate agent).
@@ -521,41 +521,44 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/panel", s.panelPage)
 	mux.HandleFunc("/api/status", s.panelStatus)
 	mux.HandleFunc("/api/version", s.panelVersion)
-	mux.HandleFunc("/api/autoupdate", s.panelSetAutoUpdate)
-	mux.HandleFunc("/api/update", s.panelUpdateNow)
-	mux.HandleFunc("/api/update/fleet", s.panelUpdateFleet) // one click updates every node
-	mux.HandleFunc("/api/eject", s.guard(s.adminEject))
-	mux.HandleFunc("/api/load", s.guard(s.adminLoad))
-	mux.HandleFunc("/api/apply", s.guard(s.configApply))
-	mux.HandleFunc("/api/apply-union", s.guard(s.configApplyUnion)) // one click raises the whole decode+prefill group (idempotent)
-	mux.HandleFunc("/api/genkey", s.panelGenKey)
+	mux.HandleFunc("/api/autoupdate", s.mut(s.panelSetAutoUpdate))
+	mux.HandleFunc("/api/update", s.mut(s.panelUpdateNow))
+	mux.HandleFunc("/api/update/fleet", s.mut(s.panelUpdateFleet)) // one click updates every node
+	mux.HandleFunc("/api/eject", s.mut(s.adminEject))
+	mux.HandleFunc("/api/load", s.mut(s.adminLoad))
+	mux.HandleFunc("/api/apply", s.mut(s.configApply))
+	mux.HandleFunc("/api/apply-union", s.mut(s.configApplyUnion)) // one click raises the whole decode+prefill group (idempotent)
+	// guard(): minting a key REPLACES the live one, so it is a mutating action
+	// like eject or delete. On a node with no key yet authOK passes anyway, so
+	// a fresh install can still mint its first one.
+	mux.HandleFunc("/api/genkey", s.mut(s.panelGenKey))
 	mux.HandleFunc("/api/chat", s.panelChat)
 	mux.HandleFunc("/api/chat/stream", s.panelChatStream)
-	mux.HandleFunc("/api/measure", s.panelMeasure)
-	mux.HandleFunc("/api/selectinstance", s.panelSelectInstance)
-	mux.HandleFunc("/api/setconfig", s.panelSetConfig)
-	mux.HandleFunc("/api/rename", s.panelRename)
+	mux.HandleFunc("/api/measure", s.mut(s.panelMeasure))
+	mux.HandleFunc("/api/selectinstance", s.mut(s.panelSelectInstance))
+	mux.HandleFunc("/api/setconfig", s.mut(s.panelSetConfig))
+	mux.HandleFunc("/api/rename", s.mut(s.panelRename))
 	// Model download from HuggingFace (unsloth only): browse → pick quant →
 	// download to models dir → appears in Load. Additive; see models.go.
 	mux.HandleFunc("/api/hf/models", s.hfModels)
 	mux.HandleFunc("/api/hf/files", s.hfFiles)
-	mux.HandleFunc("/api/hf/download", s.hfDownload)
+	mux.HandleFunc("/api/hf/download", s.mut(s.hfDownload))
 	mux.HandleFunc("/api/hf/progress", s.hfProgress)
 	mux.HandleFunc("/api/models/local", s.localModels)
-	mux.HandleFunc("/api/models/load", s.guard(s.modelsLoad))
-	mux.HandleFunc("/api/models/eject", s.guard(s.modelsEject))
-	mux.HandleFunc("/api/models/delete", s.guard(s.modelsDelete))
+	mux.HandleFunc("/api/models/load", s.mut(s.modelsLoad))
+	mux.HandleFunc("/api/models/eject", s.mut(s.modelsEject))
+	mux.HandleFunc("/api/models/delete", s.mut(s.modelsDelete))
 	mux.HandleFunc("/api/models/probe", s.modelsProbe)
 	mux.HandleFunc("/api/models/alive", s.controlAlive)
 	// Control plane merged into the daemon (no separate node-agent): launch/stop
 	// llama-server on this host. LAN-trust like the old node-agent (allowlisted).
-	mux.HandleFunc("/control/load", s.controlLoad)
-	mux.HandleFunc("/control/eject", s.controlEject)
-	mux.HandleFunc("/control/kill", s.controlKill)
+	mux.HandleFunc("/control/load", s.peer(s.controlLoad))
+	mux.HandleFunc("/control/eject", s.peer(s.controlEject))
+	mux.HandleFunc("/control/kill", s.peer(s.controlKill))
 	// KV state exchange for the prefill→decode handoff (kvstate.go): a node serves
 	// the slot states its engine saved and pulls a peer's into its own dir.
-	mux.HandleFunc("/control/kv-fetch", s.controlKVFetch)
-	mux.HandleFunc("/kv/", s.kvFile)
+	mux.HandleFunc("/control/kv-fetch", s.peer(s.controlKVFetch))
+	mux.HandleFunc("/kv/", s.peer(s.kvFile))
 	// Live request log (routing decisions + engine timings per request).
 	mux.HandleFunc("/api/runtime", s.apiRuntime) // goroutines/fds/heap: leaks visible from inside
 	mux.HandleFunc("/api/requests", s.panelRequests)
@@ -640,8 +643,25 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, gateway.Body{"error": err.Error()})
 		return
 	}
-	log.Printf("chat: from=%s stream=%v tools=%v bytes=%d", r.RemoteAddr,
-		streamRequested(body), body["tools"] != nil, len(raw))
+	// Measured on every chat, enforced only when the operator asks for it. The
+	// three values are different facts: "no" is a client that sends nothing,
+	// "mala" is one that sends the wrong key — and telling them apart is what
+	// says whether require_api_key can be turned on without breaking anyone.
+	auth := "no"
+	if h := r.Header.Get("Authorization"); h != "" || r.Header.Get("X-API-Key") != "" {
+		auth = "mala"
+		if s.authOK(r) {
+			auth = "si"
+		}
+	}
+	log.Printf("chat: from=%s stream=%v tools=%v bytes=%d auth=%s", r.RemoteAddr,
+		streamRequested(body), body["tools"] != nil, len(raw), auth)
+	if s.cfg != nil && s.cfg.RequireAPIKey && !s.authOK(r) {
+		writeJSON(w, http.StatusUnauthorized, gateway.Body{"error": gateway.Body{
+			"code": 401, "type": "invalid_request_error",
+			"message": "API key requerida (require_api_key activo en este nodo)"}})
+		return
+	}
 	h := gateway.Headers{}
 	for k := range r.Header {
 		h[k] = r.Header.Get(k)

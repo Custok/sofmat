@@ -25,6 +25,13 @@ type Config struct {
 	// is the optional bearer key clients must send; empty = auth disabled.
 	PublicURL string `json:"public_url"`
 	APIKey    string `json:"api_key"`
+	// RequireAPIKey extends the key to the INFERENCE routes
+	// (/v1/chat/completions and the panel chat), which have always been open.
+	// Off by default on purpose: turning it on rejects every client that does
+	// not send the key, and whether a given editor sends it is a fact about
+	// production, not something to assume. The gateway logs auth=si|no|mala on
+	// every chat so the answer is measured before the switch is flipped.
+	RequireAPIKey bool `json:"require_api_key,omitempty"`
 
 	// AutoStart, when true, means the operator asked soflink to launch on boot (the
 	// panel's "Arrancar al inicio" check) AND auto-bring-up the configured unión,

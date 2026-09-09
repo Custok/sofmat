@@ -2,6 +2,25 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609091330 (2026-09-09)
+La API key no protegia nada: se publicaba en claro y cualquiera podia reemplazarla.
+
+**Enumeradas las 52 rutas en vez de revisar las sospechosas**, y la proteccion habia derivado hasta ser decorativa. `/api/eject` pedia la clave y `/control/eject` —el mismo eject— no pedia nada. Lo mismo con `load`. Y sin ninguna proteccion estaban ademas: `/control/kill` (mata el proceso que ocupa un puerto), `/api/update/fleet` (reinicia los tres nodos), `/api/update`, `/api/setconfig`, `/api/rename`, `/api/selectinstance`, `/api/autoupdate`, `/api/measure`, `/api/hf/download` (baja gigabytes a disco), `/kv/` (sirve y borra estados de KV) y `/api/genkey`.
+
+**`/api/status` servia la clave VIVA, en claro, a cualquiera que preguntase**, sin credencial: la misma que guardaba las diez rutas protegidas. Medido en produccion: un GET sin cabecera devolvio la clave byte a byte identica a la del fichero. La proteccion no estaba debilitada — no existia, porque el secreto se publicaba en la fachada.
+
+**Y `/api/genkey` acunaba una clave nueva y la activaba, sin credencial y con CUALQUIER metodo**, GET y HEAD incluidos. Eso lo saca del escenario del atacante y lo mete en el de cualquier cosa que siga una URL: un navegador precargando un enlace, un rastreador, un monitor de disponibilidad. Dos operadores lo dispararon por accidente con veinte segundos de diferencia, los dos razonando que una ruta que acuna seria POST-only. No lo era. Acunar ademas no deja rastro: no escribe el fichero ni el log, asi que hacerlo es invisible.
+
+**El arreglo no son parches sino que el registro de rutas declara la politica.** `mut()` exige clave y POST, y envuelve las diecinueve rutas que cambian estado; POST importa tanto como la clave, porque lo que solo sigue enlaces emite GET y HEAD. `peer()` cubre la superficie entre nodos —`/control/*`, `/kv/`, `/soflink/rename`— que no puede ir detras de la clave porque los nodos no se mandan credencial entre si: acepta a un host declarado en la configuracion, a la propia maquina, o a quien traiga la clave. Anadir una ruta obliga ahora a elegir su clase.
+
+`/api/status` entrega la clave completa solo a quien llama desde la propia maquina —que ya tiene el fichero— y una mascara a todos los demas, sin mirar `X-Forwarded-For`, que lo pone el que llama.
+
+**La regla de firewall que abria el puerto decia una cosa y hacia otra:** su comentario decia "accesible desde la LAN" y no llevaba restriccion de origen ninguna, que netsh interpreta como cualquier direccion. Ahora se limita a la subred local. En Linux, ufw no tiene equivalente, asi que el binario AVISA de que abre a cualquier origen en vez de dar a entender lo contrario.
+
+**Nuevo `require_api_key`, apagado por defecto**, que extiende la clave a las rutas de inferencia. Apagado a proposito: encenderlo rechaza a todo cliente que no mande la clave, y si un editor la manda o no es un hecho de produccion, no algo que suponer. El gateway registra ahora `auth=si|no|mala` en cada peticion, asi que la respuesta se mide antes de accionar el interruptor.
+
+Cada arreglo lleva su control —la llamada legitima que debe seguir funcionando— y la politica entera se comprueba recorriendo la lista de rutas, no las que uno recuerda.
+
 ## v202609091258 (2026-09-09)
 Los fallos dejan de ser mudos, y dos carreras de datos que decidian admisiones.
 

@@ -55,15 +55,22 @@ func ensureFirewall(listen string) {
 	case "windows":
 		// Already elevated → succeeds silently and idempotently.
 		_ = exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+name).Run()
+		// remoteip=LocalSubnet: the comment above says "reachable from the LAN"
+		// and the rule used to say nothing, which netsh reads as ANY address.
+		// The intent and the rule disagreed, and the rule is what runs. Verified
+		// on the production gateway 2026-09-09: two rules for this port, the
+		// hand-made one scoped to the local networks and THIS one open to Any.
 		add := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
-			"name="+name, "dir=in", "action=allow", "protocol=TCP", "localport="+port)
+			"name="+name, "dir=in", "action=allow", "protocol=TCP",
+			"localport="+port, "remoteip=LocalSubnet")
 		if err := add.Run(); err == nil {
 			fmt.Printf("firewall: puerto %s abierto (inbound TCP)\n", port)
 			return
 		}
 		// Not admin → relaunch netsh elevated; Windows shows the UAC prompt.
 		ps := fmt.Sprintf("Start-Process netsh -Verb RunAs -WindowStyle Hidden -ArgumentList "+
-			"'advfirewall','firewall','add','rule','name=%s','dir=in','action=allow','protocol=TCP','localport=%s'",
+			"'advfirewall','firewall','add','rule','name=%s','dir=in','action=allow','protocol=TCP',"+
+			"'localport=%s','remoteip=LocalSubnet'",
 			name, port)
 		if err := exec.Command("powershell", "-NoProfile", "-Command", ps).Run(); err != nil {
 			fmt.Printf("firewall: no pude abrir el puerto %s automaticamente — acepta el aviso de permisos o abrelo a mano\n", port)
@@ -71,7 +78,12 @@ func ensureFirewall(listen string) {
 			fmt.Printf("firewall: pedi abrir el puerto %s (acepta el aviso de Windows)\n", port)
 		}
 	case "linux":
+		// ufw has no "local subnet" token, so this opens the port to any source
+		// the host can be reached from. Say it instead of implying the LAN.
 		if err := exec.Command("ufw", "allow", port+"/tcp").Run(); err == nil {
+			fmt.Printf("firewall: AVISO — ufw abre el puerto %s a CUALQUIER origen; "+
+				"si el equipo no está solo en una red de confianza, acótalo a mano "+
+				"(ufw allow from <red>/24 to any port %s proto tcp)\n", port, port)
 			fmt.Printf("firewall: ufw allow %s/tcp\n", port)
 		}
 	}
