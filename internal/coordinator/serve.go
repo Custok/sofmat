@@ -669,9 +669,11 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		// error it is allowed to see as one
 		var ee *engineError
 		if errors.As(err, &ee) {
+			logAnomaly("?", ee.status, 0, nil, ee.Error())
 			writeJSON(w, ee.status, ee.body)
 			return
 		}
+		logAnomaly("?", http.StatusBadGateway, 0, err, err.Error())
 		writeJSON(w, http.StatusBadGateway, gateway.Body{"error": err.Error()})
 		return
 	}
@@ -813,6 +815,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 			}
 			emitSSEError(w, flusher, resp.StatusCode, why)
 		}
+		logAnomaly(engineName(node), resp.StatusCode, streamed, readErr, why0(readErr))
 		s.gw.Finish(plan, fin)
 	}()
 	buf := make([]byte, 8192)
@@ -840,6 +843,40 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 			return
 		}
 	}
+}
+
+// engineName is the engine label for a log line, "?" when no balancer picked one.
+func engineName(n *decodeNode) string {
+	if n == nil {
+		return "?"
+	}
+	return n.name
+}
+
+func why0(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// logAnomaly writes ONE persistent line for a request that ended badly.
+//
+// The engine_* notes (engine_bytes, engine_read_error, engine_status) went only
+// into the request log, which lives in memory and dies with the process. So the
+// evidence for exactly the failures they were added to diagnose was gone at the
+// next restart — twice today: my own request log was wiped when I restarted to
+// rotate the key, and .63 reported "0 engine_bytes ever" when the truth was
+// "never recorded". A counter that cannot survive a restart cannot answer a
+// question asked after one.
+//
+// Quiet by design: a healthy request logs nothing here.
+func logAnomaly(engine string, status, streamed int, readErr error, why string) {
+	if status == http.StatusOK && streamed > 0 && readErr == nil {
+		return
+	}
+	log.Printf("chat-anomalia: engine=%s status=%d bytes=%d err=%q motivo=%q",
+		engine, status, streamed, why0(readErr), why)
 }
 
 // emitSSEError puts one error event on an already-open stream, followed by the

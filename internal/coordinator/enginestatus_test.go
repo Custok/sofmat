@@ -1,7 +1,9 @@
 package coordinator
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -197,5 +199,70 @@ func TestGoodStreamIsUntouched(t *testing.T) {
 	}
 	if !strings.Contains(body, "hola") || !strings.Contains(body, `"stop"`) {
 		t.Fatalf("the answer did not come through intact: %s", body)
+	}
+}
+
+// captureLog swaps the standard logger's sink for the duration of a test.
+// Tests in this package are not parallel, so the swap is safe.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	return &buf
+}
+
+// TestAnomalyReachesTheLogFile: the engine_* notes only ever went into the
+// in-memory request log, so the evidence for exactly the failures they exist to
+// diagnose vanished at the next restart. It happened twice on 2026-09-09 — a
+// gateway restarted to rotate the API key wiped its own log, and a node
+// reported "0 engine_bytes ever" when the truth was "never recorded". A
+// counter that cannot survive a restart cannot answer a question asked after
+// one.
+func TestAnomalyReachesTheLogFile(t *testing.T) {
+	buf := captureLog(t)
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/props") {
+			writeTestJSON(w, 200, map[string]any{"default_generation_settings": map[string]any{"n_ctx": 100096.0}})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(engine.Close)
+	gw := gatewayOver(t, engine)
+
+	_, _ = postChat(t, gw.URL, map[string]any{
+		"stream":   true,
+		"messages": []any{map[string]any{"role": "user", "content": "hola " + strings.Repeat("u", 400)}},
+	})
+	if !strings.Contains(buf.String(), "chat-anomalia") {
+		t.Fatalf("a request that produced nothing left no trace on disk:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "bytes=0") {
+		t.Fatalf("the line does not carry the byte count, which is what separates the cases:\n%s", buf.String())
+	}
+}
+
+// TestHealthyRequestIsQuiet is the control: a logger that fired on every
+// request would pass the test above and bury the anomalies it exists to
+// surface — which is precisely how the 990 processes stayed invisible.
+func TestHealthyRequestIsQuiet(t *testing.T) {
+	buf := captureLog(t)
+	engine := engineReturning(t, http.StatusOK, map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+		"timings": map[string]any{"prompt_n": 10.0, "cache_n": 0.0},
+	})
+	gw := gatewayOver(t, engine)
+	code, _ := postChat(t, gw.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "hola " + strings.Repeat("t", 400)}},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("setup: expected 200, got %d", code)
+	}
+	if strings.Contains(buf.String(), "chat-anomalia") {
+		t.Fatalf("a healthy request logged an anomaly; the signal is worthless if it always fires:\n%s", buf.String())
 	}
 }
