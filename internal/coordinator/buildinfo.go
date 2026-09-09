@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,18 +43,49 @@ func AutoUpdateOn() bool    { return autoUpdate.Load() }
 var (
 	latestMu   sync.Mutex
 	latestVer  string
-	latestAt   time.Time
+	latestAt   time.Time // cuando se OBTUVO el valor que hay en latestVer
+	latestErr  string    // por que fallo el ultimo intento; "" si fue bien
 	refreshing atomic.Bool
 )
 
 func latestRelease() string {
+	v, _, _ := latestReleaseWithAge()
+	return v
+}
+
+// latestReleaseWithAge devuelve el valor, su EDAD en segundos, y el error del
+// ultimo intento de refresco.
+//
+// La edad existe porque sin ella el campo no puede decir nada. refreshLatest
+// falla en silencio y conserva el valor anterior, asi que un `available`
+// correcto puede venir de hace horas: "coincide con la ultima release" y "este
+// nodo lleva horas sin poder hablar con GitHub" producian el MISMO JSON. Con la
+// edad al lado, el segundo caso se ve desde fuera y sin entrar en el nodo.
+//
+// -1 = no se ha conseguido nunca, que no es lo mismo que 0. "No lo se" y "cero"
+// son cosas distintas (misma regla que los contadores de /api/runtime).
+//
+// ⚠ Al leerlo desde fuera: devuelve el valor CACHEADO y refresca DESPUES, en
+// segundo plano. La primera lectura tras un rato trae lo viejo aunque el nodo
+// este perfectamente. Hay que preguntar dos veces y quedarse con la segunda.
+func latestReleaseWithAge() (string, int, string) {
 	latestMu.Lock()
-	v, stale := latestVer, time.Since(latestAt) > 10*time.Minute || latestVer == ""
+	v, at, e := latestVer, latestAt, latestErr
 	latestMu.Unlock()
-	if stale {
+	age := -1
+	if !at.IsZero() {
+		age = int(time.Since(at).Seconds())
+	}
+	if v == "" || age < 0 || age > int((10*time.Minute).Seconds()) {
 		go refreshLatest()
 	}
-	return v
+	return v, age, e
+}
+
+func noteLatestErr(msg string) {
+	latestMu.Lock()
+	latestErr = msg
+	latestMu.Unlock()
 }
 
 func refreshLatest() {
@@ -66,28 +98,40 @@ func refreshLatest() {
 	if GitHubToken != "" {
 		req.Header.Set("Authorization", "Bearer "+GitHubToken)
 	}
+	// Cada salida deja escrito POR QUE. Antes los tres fallos devolvian sin
+	// tocar nada y el valor viejo se quedaba pareciendo bueno.
 	resp, err := c.Do(req)
 	if err != nil || resp == nil {
+		noteLatestErr("sin respuesta de GitHub")
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		noteLatestErr("GitHub HTTP " + strconv.Itoa(resp.StatusCode))
+		return
+	}
 	var rel struct {
 		Tag string `json:"tag_name"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&rel) != nil {
+		noteLatestErr("respuesta de GitHub ilegible")
 		return
 	}
-	if v := strings.TrimPrefix(rel.Tag, "v"); v != "" {
-		latestMu.Lock()
-		latestVer, latestAt = v, time.Now()
-		latestMu.Unlock()
+	v := strings.TrimPrefix(rel.Tag, "v")
+	if v == "" {
+		noteLatestErr("GitHub no da tag_name")
+		return
 	}
+	latestMu.Lock()
+	latestVer, latestAt, latestErr = v, time.Now(), ""
+	latestMu.Unlock()
 }
 
 // panelVersion feeds the header: current build, the newest published build, and
 // whether auto-update is on / an update is pending.
 func (s *Server) panelVersion(w http.ResponseWriter, r *http.Request) {
-	cur, avail := Version, latestRelease()
+	cur := Version
+	avail, availAge, availErr := latestReleaseWithAge()
 	// Fleet-wide: which nodes run a build older than the latest release? The panel
 	// only shows the "actualizar" button when at least one node is behind — so it
 	// disappears once the whole fleet is on the newest version.
@@ -139,6 +183,21 @@ func (s *Server) panelVersion(w http.ResponseWriter, r *http.Request) {
 		"fleet_pending": len(behind) > 0,
 		"behind":        behind,
 		"blocked":       updateBlocked(),
+
+		// De cuando es `available`. Sin esto, "coincide con la ultima release" y
+		// "llevo horas sin poder hablar con GitHub" son el mismo JSON.
+		// -1 = nunca se ha conseguido. available_error dice por que fallo el
+		// ultimo intento ("" si fue bien) — un valor viejo CON error al lado ya
+		// no se puede confundir con uno fresco.
+		"available_age_s": availAge,
+		"available_error": availErr,
+
+		// Del OTRO camino, el que instala: cuando miro por ultima vez y que paso.
+		// Un soflink al dia no escribia NADA nunca, asi que un nodo incomunicado
+		// se veia igual que uno correcto. checked_at vacio = todavia no ha
+		// mirado (el primer chequeo del ticker es a los 30 min de arrancar).
+		"checked_at":   lastUpdateCheckAt(),
+		"check_result": lastUpdateCheckResult(),
 	})
 }
 
@@ -150,6 +209,31 @@ func (s *Server) panelSetAutoUpdate(w http.ResponseWriter, r *http.Request) {
 
 // UpdateBlocked lo cablea main: devuelve por que el auto-update no avanza, o "".
 var UpdateBlocked func() string
+
+// UpdateLastCheck lo cablea main: cuando miro el updater por ultima vez y que
+// paso. Va aparte de UpdateBlocked a proposito: `blocked` dice por que RECHACE
+// algo, y el caso que faltaba es justo el contrario — miro, no habia nada que
+// rechazar, y no quedaba constancia de que hubiera mirado.
+var UpdateLastCheck func() (time.Time, string)
+
+func lastUpdateCheckAt() string {
+	if UpdateLastCheck == nil {
+		return ""
+	}
+	at, _ := UpdateLastCheck()
+	if at.IsZero() {
+		return ""
+	}
+	return at.Format(time.RFC3339)
+}
+
+func lastUpdateCheckResult() string {
+	if UpdateLastCheck == nil {
+		return ""
+	}
+	_, res := UpdateLastCheck()
+	return res
+}
 
 func updateBlocked() string {
 	if UpdateBlocked == nil {

@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -72,13 +74,51 @@ var selfPath = func() string {
 // never converged, overlapping calls are how one binary became many.
 var updating atomic.Bool
 
+// Registro de la ULTIMA comprobacion: cuando y con que resultado.
+//
+// Hasta ahora `checkAndUpdate` tenia SIETE `return` antes de la primera linea
+// que imprimia algo, y uno de ellos era el caso normal ("estoy al dia"), o sea
+// que un soflink correcto no escribia NADA nunca. Otros dos eran "GitHub no
+// responde" y "GitHub devuelve != 200": un nodo incomunicado se veia
+// exactamente igual que uno al dia.
+//
+// `blocked` no cubre esto: dice por que RECHACE algo, y aqui no habia nada que
+// rechazar. El silencio significaba dos cosas y se veian igual — que es la
+// misma forma que dejo correr el bucle del 07-09 durante 38 horas, sin un solo
+// error, saliendo con codigo 0.
+var lastCheck struct {
+	mu  sync.Mutex
+	at  time.Time
+	res string
+}
+
+// noteCheck deja constancia SIEMPRE, tanto si hubo algo que hacer como si no.
+// Va al log y a /api/version, porque un rastro que obliga a entrar en la
+// maquina no sirve para comparar tres nodos.
+func noteCheck(format string, a ...any) {
+	res := fmt.Sprintf(format, a...)
+	lastCheck.mu.Lock()
+	lastCheck.at, lastCheck.res = time.Now(), res
+	lastCheck.mu.Unlock()
+	log.Printf("update-check: %s", res)
+}
+
+// LastCheck alimenta /api/version. at cero = todavia no ha mirado (el primer
+// chequeo del ticker cae a los 30 min de arrancar).
+func LastCheck() (time.Time, string) {
+	lastCheck.mu.Lock()
+	defer lastCheck.mu.Unlock()
+	return lastCheck.at, lastCheck.res
+}
+
 func checkAndUpdate() {
 	defer func() { _ = recover() }()
 	if version == "dev" {
-		return
+		return // build sin sellar: no se actualiza y no hay nada que registrar
 	}
 	if !updating.CompareAndSwap(false, true) {
-		return // another update is already in flight
+		noteCheck("otra actualizacion en curso, no miro")
+		return
 	}
 	defer updating.Store(false)
 	client := &http.Client{Timeout: 8 * time.Second}
@@ -88,10 +128,12 @@ func checkAndUpdate() {
 	}
 	resp, err := client.Do(req)
 	if err != nil || resp == nil {
+		noteCheck("NO he podido mirar: sin respuesta de GitHub (%v)", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		noteCheck("NO he podido mirar: GitHub HTTP %d", resp.StatusCode)
 		return
 	}
 	var rel struct {
@@ -106,10 +148,16 @@ func checkAndUpdate() {
 		} `json:"assets"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&rel) != nil {
+		noteCheck("NO he podido mirar: respuesta de GitHub ilegible")
 		return
 	}
 	latest := strings.TrimPrefix(rel.Tag, "v")
-	if latest == "" || latest <= version { // sortable YYYYMMDDHHMM stamps
+	if latest == "" {
+		noteCheck("NO he podido mirar: GitHub no da tag_name")
+		return
+	}
+	if latest <= version { // sortable YYYYMMDDHHMM stamps
+		noteCheck("al dia (%s)", version)
 		return
 	}
 	var url, digest string
@@ -120,23 +168,24 @@ func checkAndUpdate() {
 		}
 	}
 	if url == "" {
+		noteCheck("hay %s pero el release no trae %s para esta plataforma", latest, assetName())
 		return
 	}
 	// Preguntar ANTES de gastar la descarga. Sin esto el rechazo funciona pero
 	// cuesta un binario entero cada media hora, para siempre.
 	if why, no := alreadyRefused(latest, digest); no {
-		fmt.Printf("soflink: auto-update detenido - %s\n", why)
+		noteCheck("detenido: %s", why)
 		return
 	}
 	// El cinturon: aunque todo lo demas falle, el numero de vueltas es finito y
 	// queda escrito en disco. Sin esto, "reintentar" y "bucle" son lo mismo.
 	if err := spendAttempt(latest, digest); err != nil {
-		fmt.Printf("soflink: auto-update detenido - %v\n", err)
+		noteCheck("detenido: %v", err)
 		return
 	}
-	fmt.Printf("soflink: nueva version %s (tengo %s) - actualizando...\n", latest, version)
+	noteCheck("hay %s (tengo %s) - actualizando", latest, version)
 	if err := applyUpdate(client, url, latest, digest); err != nil {
-		fmt.Printf("soflink: auto-update fallo (%v) - sigo con la version actual\n", err)
+		noteCheck("la actualizacion a %s fallo (%v) - sigo con %s", latest, err, version)
 	}
 }
 

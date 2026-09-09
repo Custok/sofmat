@@ -2,6 +2,48 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609092339 (2026-09-09)
+El auto-update deja de trabajar en silencio. Decision de David: cerrar las dos piezas.
+
+**Un soflink al dia no escribia NADA. Nunca.** `checkAndUpdate` tenia **siete `return` antes de la primera linea que imprimia algo**, y uno de ellos era el caso normal:
+
+```
+version == "dev"                     return   silencio
+otro update en vuelo                 return   silencio
+error de red contra GitHub           return   silencio   <- nodo incomunicado
+respuesta != 200                     return   silencio   <- nodo incomunicado
+el JSON no se deja leer              return   silencio
+latest <= version   ESTOY AL DIA     return   silencio   <- el 99 % de las veces
+no hay asset para mi plataforma      return   silencio
+```
+**Un nodo que no podia hablar con GitHub se veia exactamente igual que uno correcto.** `v202609092243` anadio `blocked`, que dice por que **rechace** algo — pero el caso que faltaba es el contrario: *mire, no habia nada que hacer, y no quedo constancia de que hubiera mirado*. **El silencio significaba dos cosas y se veian igual**, que es la misma forma que dejo correr el bucle del 07-09 durante 38 horas sin un solo error.
+
+**Ahora cada comprobacion deja constancia siempre**, con la hora y el resultado, en el log **y** en `GET /api/version`:
+```
+checked_at    2026-09-09T23:50:59+02:00
+check_result  "al dia (202609092243)"
+              "NO he podido mirar: GitHub HTTP 403"
+              "NO he podido mirar: sin respuesta de GitHub (...)"
+              "hay 202609100900 (tengo 202609092243) - actualizando"
+              "detenido: <motivo>"
+```
+`checked_at` vacio = todavia no ha mirado; el primer chequeo del ticker cae a los 30 min de arrancar (`updateCheckEvery`). Los mensajes del updater pasan de `fmt.Printf` (stdout, sin hora) a `log.Printf` (stderr, fechados), como el resto de la traza operativa.
+
+**Y `available` viaja con su EDAD.** Ese campo lo rellena `refreshLatest`, que es **otro camino de codigo** —su propia cache de 10 min, su propio cliente, disparado bajo demanda al pedir `/api/version`— y **tambien fallaba en silencio conservando el valor anterior**. Asi que *«coincide con la ultima release»* y *«llevo horas sin poder consultarla»* producian **el mismo JSON**:
+```
+available_age_s   segundos desde que se OBTUVO ese valor;  -1 = nunca se ha conseguido
+available_error   por que fallo el ultimo intento;  "" si fue bien
+```
+`-1` no es `0`: *«no lo se»* y *«cero»* son cosas distintas (misma regla que los contadores de `/api/runtime`). Y `refreshLatest` gana el chequeo de `!= 200` que no tenia.
+
+**⚠️ Al leerlo desde fuera: `available` devuelve el valor CACHEADO y refresca DESPUES, en segundo plano.** La primera lectura tras un rato trae lo viejo aunque el nodo este perfectamente. **Hay que preguntar dos veces y quedarse con la segunda**, o un nodo sano se ve caido.
+
+**Siete pruebas, y lo que exigen no es "ahora registra algo": es que dos situaciones distintas produzcan respuestas DISTINGUIBLES.** Un registro que dijera lo mismo estando al dia y estando incomunicado no arreglaria nada, y pasaria cualquier prueba que solo mire que el campo no esta vacio. Por eso la principal compara los dos resultados entre si en vez de mirarlos por separado.
+
+**Sabotaje que COMPILA, uno por pieza:** hacer que el error diga "al dia" tumba la prueba que los compara (y solo esa); quitar la linea del caso normal tumba la del caso normal; y una edad fija en 0 —el campo existe pero no informa— tumba las dos que distinguen fresco de viejo.
+
+**Contexto de la decision:** planteadas a David tres opciones para la ventana del sabado (avisar al bus antes de reiniciar / pausar el autoupdate / instalar sin reiniciar). **Eligio dejar el autoupdate encendido en los tres nodos** y cerrar en su lugar la observabilidad, que era lo que impedia distinguir un nodo sano de uno mudo.
+
 ## v202609092243 (2026-09-09)
 El auto-update deja de poder entrar en bucle. Se arregla el lado del que INSTALA.
 
