@@ -2,6 +2,15 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609091350 (2026-09-09)
+Correccion del release anterior: "la propia maquina" no es lo mismo que "loopback".
+
+`/api/status` entrega la clave completa al operador que llama desde el propio nodo, y esa comprobacion se escribio como `IsLoopback()`. Una maquina tiene mas direcciones que `127.0.0.1`, y la suya propia es una de ellas: abrir el panel en `http://<ip-del-nodo>:1357/` —que es como se abre desde un acceso directo— hace que el navegador conecte a esa direccion, asi que el servidor ve la IP de red de la propia maquina como origen y no la reconoce. El panel guardaba entonces la MASCARA como credencial y todas sus acciones fallaban con 401, en la maquina duena de la clave.
+
+Es la misma forma que la regla de firewall corregida en el release anterior —el comentario decia "LAN" y la regla decia "cualquiera"—, cometida en el mismo commit que la arreglaba: aqui el comentario decia "la propia maquina" y el codigo decia "loopback".
+
+Ahora se acepta loopback o cualquier direccion de las interfaces de este host. La propiedad de seguridad no cambia: otro equipo de la red sigue recibiendo la mascara, y quien llama desde el propio nodo ya puede leer el fichero. Con su test, que falla si se vuelve a exigir loopback.
+
 ## v202609091330 (2026-09-09)
 La API key no protegia nada: se publicaba en claro y cualquiera podia reemplazarla.
 

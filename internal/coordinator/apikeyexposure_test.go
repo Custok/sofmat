@@ -3,6 +3,7 @@ package coordinator
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -127,6 +128,26 @@ func TestStatusNeverPublishesTheKeyToTheNetwork(t *testing.T) {
 	if len(got) >= len(testKey) {
 		t.Fatalf("the mask is not shorter than the key: %q", got)
 	}
+	// The node's OWN LAN address must get the key: the panel is opened at that
+	// address from a desktop shortcut, so the browser connects to it and the
+	// server sees the machine's own IP, not 127.0.0.1. Requiring loopback broke
+	// the panel on the very machine that owns the key — measured against the
+	// live gateway before anyone hit it.
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			n, ok := a.(*net.IPNet)
+			if !ok || n.IP == nil || n.IP.IsLoopback() || n.IP.To4() == nil {
+				continue
+			}
+			own := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+			own.RemoteAddr = net.JoinHostPort(n.IP.String(), "51234")
+			if got := srv.keyForViewer(own); got != testKey {
+				t.Fatalf("la propia dirección del nodo (%s) recibió máscara: el panel no podría operar", n.IP)
+			}
+			break
+		}
+	}
+
 	// a forged header must not buy the key back
 	remote.Header.Set("X-Forwarded-For", "127.0.0.1")
 	if srv.keyForViewer(remote) == testKey {

@@ -42,8 +42,25 @@ func TestOpenFDsCounts(t *testing.T) {
 	for _, f := range held {
 		f.Close()
 	}
-	if after := openFDs(); after >= during {
-		t.Fatalf("after closing %d files the count did not fall: %d -> %d", n, during, after)
+	// The counter is process-global and the rest of the package keeps test
+	// servers alive, so descriptors open and close underneath this measurement:
+	// asserting a strict drop made the test pass alone and fail in the suite —
+	// caught on 2026-09-09, and a test that fails sometimes is worse than no
+	// test, because it teaches people to ignore a red run. Half the files is
+	// still far more movement than the noise, so a counter stuck at a constant
+	// fails while ordinary churn does not.
+	want := during - n/2
+	var after int
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		after = openFDs()
+		if after <= want || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if after > want {
+		t.Fatalf("after closing %d files the count did not fall: %d -> %d (esperaba <= %d)", n, during, after, want)
 	}
 }
 

@@ -114,11 +114,53 @@ func (s *Server) keyForViewer(r *http.Request) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+	if ip := net.ParseIP(host); ip != nil && isThisMachine(ip) {
 		return key
 	}
 	return maskAPIKey(key)
 }
+
+// isThisMachine reports whether an address belongs to this host: loopback OR
+// any address on one of its interfaces.
+//
+// Loopback alone is NOT enough, and assuming it was would have broken the
+// panel: opening it at the node's LAN address — which is how it is reached
+// from a desktop shortcut — makes the browser connect to that address, so the
+// server sees the machine's OWN LAN IP as the source, not 127.0.0.1. The panel
+// would have received the mask, stored it as its credential, and every action
+// would have failed with 401 on the very machine that owns the key. Caught by
+// measuring both URLs from the node itself before anyone hit it.
+//
+// The security property is unchanged: a DIFFERENT host on the LAN still gets
+// the mask. What this adds is the machine's own addresses, and a caller there
+// can already read the file.
+func isThisMachine(ip net.IP) bool {
+	if ip.IsLoopback() {
+		return true
+	}
+	localIPsOnce.Do(func() {
+		addrs, err := net.InterfaceAddrs()
+		if err != nil {
+			return
+		}
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP != nil {
+				localIPs = append(localIPs, n.IP)
+			}
+		}
+	})
+	for _, own := range localIPs {
+		if own.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	localIPsOnce sync.Once
+	localIPs     []net.IP
+)
 
 // authOK passes when auth is off, or the request carries the key as a Bearer
 // token or X-API-Key header.
