@@ -321,6 +321,21 @@ func (b *decodeBalancer) pick(key string, estTokens int) (*decodeNode, func(), e
 	if estTokens < 0 {
 		estTokens = 0
 	}
+	// Waiting only helps against CONTENTION: room appears when somebody else
+	// finishes. A request that does not fit in an EMPTY engine will not fit
+	// later either, so holding it for waitBudget and refusing anyway is the
+	// worst of both worlds — it looks like the system hung. Measured 2026-09-09:
+	// a conversation of 94 822 tokens against 100 096 x 0.97 = 97 093 usable
+	// exceeded the budget by 16 tokens with 2 288 held, waited 240 s, was
+	// refused, and the client retried it six times: 24 minutes of a decode slot
+	// producing nothing.
+	if big, room, ok := b.tooBigForEveryEngine(estTokens); ok {
+		return nil, func() {}, fmt.Errorf(
+			"%w: esta conversación pide %d tokens y el motor más grande (%s) sólo admite %d de sus %d: "+
+				"no cabe ni con todos los motores vacíos, así que esperar no serviría. "+
+				"Reduce el contexto del cliente en al menos %d tokens",
+			ErrEngineFull, estTokens, big.name, room, big.budgetTokens(), estTokens-room)
+	}
 	n := b.chooseNode(key, estTokens)
 	deadline := time.Now().Add(waitBudgetForTest)
 	for !n.fits(estTokens) && time.Now().Before(deadline) {
@@ -377,6 +392,31 @@ func (b *decodeBalancer) chooseNode(key string, estTokens int) *decodeNode {
 	}
 	b.setLocked(key, bestIdx)
 	return best
+}
+
+// tooBigForEveryEngine reports whether tok exceeds the usable budget of every
+// engine, i.e. whether no amount of waiting can make room for it. It returns
+// the roomiest engine so the caller can say by how much the request overflows.
+// An engine whose budget has not been probed yet (<= 0) is not used to refuse:
+// a probe that has not answered must not turn into a rejection.
+func (b *decodeBalancer) tooBigForEveryEngine(tok int) (big *decodeNode, room int, tooBig bool) {
+	if tok <= 0 {
+		return nil, 0, false
+	}
+	best := -1
+	for _, n := range b.nodes {
+		bt := n.budgetTokens()
+		if bt <= 0 {
+			return nil, 0, false // unknown budget: let the normal path decide
+		}
+		if u := int(float64(bt) * budgetUse); u > best {
+			best, big = u, n
+		}
+	}
+	if big == nil {
+		return nil, 0, false
+	}
+	return big, best, tok > best
 }
 
 // freeNode returns an engine with room for tok right now, or nil.

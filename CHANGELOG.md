@@ -2,6 +2,27 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609091735 (2026-09-09)
+Esperar cuatro minutos por un sitio que no puede aparecer.
+
+Una conversacion de 94.822 tokens contra un motor de 100.096 se quedaba 240 segundos sin respuesta y el cliente la reintentaba. Seis veces: veinticuatro minutos de un slot del decode sin producir un token, y de paso expulsando la cache de los demas.
+
+El balanceador ya comprobaba que la peticion cupiera, ya contaba lo que los slots retienen, ya buscaba otro motor y ya rechazaba con un error detallado. Lo que hacia mal era **esperar antes de darlo**. La espera es deliberada y es correcta: convierte la contencion en cola en vez de en fallo, porque otro cliente termina y libera sitio. Pero si la peticion no cabe **ni en un motor vacio**, ese sitio no va a aparecer nunca, y esperar solo consigue que parezca que el sistema se ha colgado.
+
+Ahora se comprueba antes de la cola: si la conversacion supera el presupuesto utilizable del motor mas grande, se rechaza **al instante** con cuanto se pasa y que hay que reducir. Lo que sigue siendo contencion sigue esperando igual.
+
+La aritmetica del caso real, que es tambien la del precipicio que se veia desde fuera:
+```
+presupuesto utilizable = 100.096 x 0,97 = 97.093
+94.252 + 2.288 retenidos = 96.540   cabe por 553   -> 5,4 s
+94.822 + 2.288 retenidos = 97.110   NO por 16      -> 240 s
+```
+Dieciseis tokens. La misma conversacion iba a 5,4 segundos el turno anterior.
+
+Un presupuesto que aun no se ha sondeado nunca provoca un rechazo: "no se cuanto cabe" y "no cabe" son cosas distintas.
+
+Cuatro pruebas con sus controles: la conversacion mayor que el motor se rechaza sin esperar y con un mensaje que dice que hacer; la contencion transitoria sigue esperando; un presupuesto desconocido no rechaza; y una peticion que cabe en el motor mas grande no se rechaza porque no quepa en el pequeno. Comprobado con un sabotaje que COMPILA: sin el arreglo, la primera falla por tardar los 3 s del presupuesto de espera.
+
 ## v202609091520 (2026-09-09)
 "Algun slot es grande" no dice que el grande sea el MIO.
 
