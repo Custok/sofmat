@@ -1,0 +1,129 @@
+package coordinator
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/Custok/sofmat/internal/config"
+)
+
+// engineReturning stands up an engine that answers every chat with the given
+// status and body — llama-server's real error shape.
+func engineReturning(t *testing.T, status int, body map[string]any) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/props") {
+			writeTestJSON(w, 200, map[string]any{"default_generation_settings": map[string]any{"n_ctx": 100096.0}})
+			return
+		}
+		writeTestJSON(w, status, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func gatewayOver(t *testing.T, engine *httptest.Server) *httptest.Server {
+	t.Helper()
+	s, err := NewServer(&config.Config{Instances: []config.Instance{
+		{Key: "decode", Role: "decode", Endpoint: engine.URL},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := httptest.NewServer(s.Handler())
+	t.Cleanup(gw.Close)
+	return gw
+}
+
+// TestEngineErrorKeepsItsStatus is the defect that produced, for days, the only
+// message the VS Code clients ever showed: "Response contained no choices."
+//
+// httpBackend read the engine's body, unmarshalled it and returned (body, nil)
+// WHATEVER the status was; s.chat then wrote 200. So a 400 from llama-server
+// arrived as HTTP 200 with {"error":{"code":400,...}} and no "choices" key —
+// and every client reported the absence of choices instead of the reason,
+// which was sitting in the body. A 200 tells a client there is nothing to look
+// for.
+//
+// The streaming half of this same gateway always forwarded resp.StatusCode.
+// This pins the two halves together.
+func TestEngineErrorKeepsItsStatus(t *testing.T) {
+	engine := engineReturning(t, http.StatusBadRequest, map[string]any{
+		"error": map[string]any{"code": 400, "type": "invalid_request_error",
+			"message": "the request exceeds the available context size"},
+	})
+	gw := gatewayOver(t, engine)
+
+	code, data := postChat(t, gw.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "hola " + strings.Repeat("x", 400)}},
+	})
+	if code != http.StatusBadRequest {
+		t.Fatalf("the engine said 400 and the gateway said %d: an error the client cannot see as one\nbody: %s", code, data)
+	}
+
+	// and the reason must survive the trip: a correct status with an empty body
+	// would trade one silence for another
+	var out struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("body is not the engine's error object: %s", data)
+	}
+	if !strings.Contains(out.Error.Message, "context size") {
+		t.Fatalf("the engine's reason did not reach the client: %q", out.Error.Message)
+	}
+}
+
+// TestEngineOKStillPassesThrough is the control: a gateway that answered every
+// call with the engine's status would pass the test above while breaking every
+// working request. The instrument has to be able to say "200" too.
+func TestEngineOKStillPassesThrough(t *testing.T) {
+	engine := engineReturning(t, http.StatusOK, map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+		"timings": map[string]any{"prompt_n": 10.0, "cache_n": 0.0},
+	})
+	gw := gatewayOver(t, engine)
+
+	code, data := postChat(t, gw.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "hola " + strings.Repeat("y", 400)}},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("a good answer must stay 200, got %d: %s", code, data)
+	}
+	if !strings.Contains(string(data), `"choices"`) {
+		t.Fatalf("the answer did not come through: %s", data)
+	}
+}
+
+// TestEngineErrorThatIsNotJSONKeepsItsStatus covers the path that has no body
+// to forward: llama-server aborting mid-header, a proxy returning plain text.
+// Before the fix this returned the JSON parse error as a 502 and lost the
+// engine's status entirely.
+func TestEngineErrorThatIsNotJSONKeepsItsStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/props") {
+			writeTestJSON(w, 200, map[string]any{"default_generation_settings": map[string]any{"n_ctx": 100096.0}})
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("upstream connect error or disconnect/reset before headers"))
+	}))
+	t.Cleanup(srv.Close)
+	gw := gatewayOver(t, srv)
+
+	code, data := postChat(t, gw.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "hola " + strings.Repeat("z", 400)}},
+	})
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("engine said 503, gateway said %d: %s", code, data)
+	}
+	if !strings.Contains(string(data), "upstream connect error") {
+		t.Fatalf("the upstream text did not reach the client: %s", data)
+	}
+}

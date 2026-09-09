@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -438,10 +439,48 @@ func httpBackend(endpoint string) gateway.BackendCall {
 		}
 		var out gateway.Body
 		if err := json.Unmarshal(data, &out); err != nil {
+			if resp.StatusCode != http.StatusOK {
+				// a non-200 that is not even JSON: keep the status, quote the head
+				return nil, &engineError{status: resp.StatusCode,
+					body: gateway.Body{"error": gateway.Body{"code": resp.StatusCode,
+						"message": string(data[:min(len(data), 512)])}}}
+			}
 			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, &engineError{status: resp.StatusCode, body: out}
 		}
 		return out, nil
 	}
+}
+
+// engineError carries the engine's own status out of the backend call.
+//
+// httpBackend used to read the body, unmarshal it and return (body, nil)
+// WHATEVER the status was, and s.chat then stamped 200 on it. So a 400 from
+// llama-server reached the client as "HTTP 200" with {"error":{"code":400}}
+// inside and no "choices" key — which is precisely the message the VS Code
+// clients kept showing: "Response contained no choices". The real error
+// ("Context size has been exceeded", the template failure, whatever it was)
+// was in the body all along and every client dropped it, because a 200 says
+// there is nothing to look for.
+//
+// The streaming half of this same gateway has always forwarded resp.StatusCode
+// (chatStream). The two halves disagreed; now they do not.
+type engineError struct {
+	status int
+	body   gateway.Body
+}
+
+func (e *engineError) Error() string {
+	msg := ""
+	if inner, ok := e.body["error"].(map[string]any); ok {
+		msg, _ = inner["message"].(string)
+	}
+	if msg == "" {
+		msg = http.StatusText(e.status)
+	}
+	return fmt.Sprintf("motor HTTP %d: %s", e.status, msg)
 }
 
 // Handler returns the HTTP mux for the API.
@@ -626,6 +665,13 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.gw.Chat(h, body)
 	if err != nil {
+		// forward the engine's own status and body: a client can only act on an
+		// error it is allowed to see as one
+		var ee *engineError
+		if errors.As(err, &ee) {
+			writeJSON(w, ee.status, ee.body)
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, gateway.Body{"error": err.Error()})
 		return
 	}
