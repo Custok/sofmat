@@ -372,6 +372,42 @@ func noteInstalled(version, sha string) {
 	saveUpdateState(st)
 }
 
+// bootstrapInstalled deja constancia, AL ARRANCAR, de que este binario es el
+// instalado: su version (compilada) y su sha (se calcula a si mismo).
+//
+// Hace falta porque noteInstalled corre dentro de applyUpdate, en el binario
+// VIEJO que hace la instalacion; un nodo que llega a la primera version con
+// esta feature desde una anterior se queda sin `installed` hasta que el nuevo
+// binario instale otra cosa. Medido por debian-dev en .51 el 10-09: cogio
+// v202609101217 y el fichero de estado no tenia `installed`, asi que el
+// lanzador que lo lee no tenia nada que leer y .63 seguia expuesto al
+// no-arranque tras apagon. Escribirlo al arrancar cierra el hueco: el binario
+// que corre ES el instalado, y eso lo sabe sin red.
+//
+// Idempotente: si ya esta escrito para esta version y este sha, no toca el
+// fichero (y no lo reescribe en cada arranque por nada).
+func bootstrapInstalled() {
+	if version == "dev" {
+		return
+	}
+	self := selfPath()
+	if self == "" {
+		return
+	}
+	sha, err := sha256File(self)
+	if err != nil {
+		return
+	}
+	st := loadUpdateState()
+	if stateCorrupt != "" {
+		return // fail-closed: no reescribimos encima de un fichero que no entendemos
+	}
+	if st.Installed.Version == version && st.Installed.Sha == sha {
+		return
+	}
+	noteInstalled(version, sha)
+}
+
 // clearAttempts se conserva para las pruebas antiguas; en produccion lo que se
 // llama al instalar es noteInstalled.
 func clearAttempts(target string) { noteInstalled(target, "") }

@@ -2,6 +2,11 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609101226 (2026-09-10)
+`installed` se escribe TAMBIEN al arrancar. Hallazgo de debian-dev, medido en `.51` a los cuatro minutos de publicarse la anterior: cogio `1217` y `soflink-update-state.json` **no tenia `installed`**. Por que: `noteInstalled` corre dentro de `applyUpdate`, en el binario VIEJO que hace la instalacion — y el viejo no tenia la funcion. **El primer binario con la feature llega sin ella**, asi que el lanzador que lee `installed.sha` no tenia nada que leer y `.63` seguia expuesto al no-arranque tras apagon. Ahora `bootstrapInstalled()` en el arranque: version compilada + sha de si mismo. Idempotente; no pisa un estado corrupto (fail-closed). Cuatro pruebas con controles; sabotaje que tumba dos.
+
+Y se corrige una afirmacion de la entrada anterior: `.51` NO tiene opcion C ni `REF_SHA` (arranca siempre, degradado). El patron del downgrade/no-arranque era de `.63` y `.30`; generalice un fichero de `flota/infra` a dos nodos sin preguntar a uno.
+
 ## v202609101217 (2026-09-10)
 Revision completa del auto-update tras el cambio de modelo en `.30`: **seis fallos demostrados y cerrados de una vez**, con un segundo desarrollador (debian-dev) leyendo el fuente publico y citando lineas, y un tercero (metahuman-dev) midiendo desde fuera lo que el codigo no ve de si mismo. Anoche los tres firmaron conclusiones sobre este codigo leyendo la lectura del autor; hoy no.
 

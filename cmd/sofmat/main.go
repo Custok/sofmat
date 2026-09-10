@@ -104,6 +104,7 @@ func serve(args []string) {
 	coordinator.UpdateNow = func() { checkAndUpdate(false) } // the header "actualizar todos" button
 	coordinator.UpdateBlocked = blockedReason                // por que NO avanza, visible en el panel
 	coordinator.UpdateLastCheck = LastCheck                  // cuando mire y que paso, visible en el panel
+	bootstrapInstalled()                                     // este binario ES el instalado: que quede escrito para el lanzador, aunque -no-update
 	if !*noUpdate {
 		checkAndUpdate(true) // al arrancar, con presupuesto ACOTADO: corre antes de abrir el puerto
 		go periodicUpdate()  // y sigue comprobando en runtime (cada 30m) para coger releases sin reiniciar
