@@ -90,7 +90,7 @@ func TestElBucleDel0709NoSeRepite(t *testing.T) {
 	api, descargas := releaseFalso(t, "202609092200", artefacto("202609091430"), true)
 	self, reexecd := banco(t, "202609091815", api)
 
-	checkAndUpdate()
+	checkAndUpdate(false)
 
 	if v := declara(t, self); v != "202609091815" {
 		t.Fatalf("han sustituido el binario que corre por uno rancio: ahora declara %s", v)
@@ -104,7 +104,7 @@ func TestElBucleDel0709NoSeRepite(t *testing.T) {
 
 	// La segunda vuelta es la que importa. Un rechazo que no se recuerda es un
 	// bucle mas lento: ni siquiera debe volver a bajarselo.
-	checkAndUpdate()
+	checkAndUpdate(false)
 	if *descargas != 1 {
 		t.Fatalf("se lo ha vuelto a descargar (%d veces): el rechazo no persiste", *descargas)
 	}
@@ -122,7 +122,7 @@ func TestUnaActualizacionBuenaSiEntra(t *testing.T) {
 	api, descargas := releaseFalso(t, "202609092200", artefacto("202609092200"), true)
 	self, reexecd := banco(t, "202609091815", api)
 
-	checkAndUpdate()
+	checkAndUpdate(false)
 
 	if v := declara(t, self); v != "202609092200" {
 		t.Fatalf("la actualizacion buena NO ha entrado: sigue declarando %s", v)
@@ -172,7 +172,7 @@ func TestSinDigestLasVueltasSonFinitas(t *testing.T) {
 	self, _ := banco(t, "202609091815", api)
 
 	for i := 0; i < 10; i++ {
-		checkAndUpdate()
+		checkAndUpdate(false)
 	}
 	if v := declara(t, self); v != "202609091815" {
 		t.Fatalf("han sustituido el binario que corre: declara %s", v)

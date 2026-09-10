@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -55,7 +56,26 @@ type updateState struct {
 	// por sha llega tarde —ya has gastado la descarga—. Eso eran los ~940 MB en
 	// 24 h del 07-09. Republicar cambia el digest y lo desbloquea solo.
 	RefusedTags map[string]string `json:"refused_tags"`
+	// Installed: lo ULTIMO que este updater verifico (digest + version declarada)
+	// e instalo. Es la constancia que faltaba: el updater era el unico que
+	// sabia la verdad en ese momento y la tiraba. Sin esto, el lanzador de
+	// arranque solo tenia REF_SHA —que escribe el mismo lanzador y solo cuando
+	// su oraculo contesta— y tras un autoupdate lo veia todo como sospechoso:
+	// en .63 (10-09) REF_SHA iba DOS versiones por detras y con GitHub caido el
+	// nodo no arrancaba. Version = YYYYMMDDHHMM, Sha = sha256 hex minusculas.
+	Installed struct {
+		Version string `json:"version"`
+		Sha     string `json:"sha"`
+		At      string `json:"at"`
+	} `json:"installed"`
 }
+
+// stateCorrupt se enciende cuando el fichero de estado existe y NO se puede
+// leer. Antes un JSON roto se leia como estado VACIO —todas las guardas
+// desaparecian sin que nada lo dijera—. Ahora es fail-closed: no se
+// actualiza en ese ciclo y `blocked` lo cuenta. Se apaga sola en cuanto una
+// escritura buena lo reemplaza (o alguien lo borra).
+var stateCorrupt string
 
 // stateDir permite a las pruebas apuntar el estado a un directorio temporal.
 // Vacio = junto al binario, que es donde tiene que estar en produccion para
@@ -86,9 +106,14 @@ func loadUpdateState() updateState {
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {
+		stateCorrupt = "" // no existe = estado vacio legitimo
 		return st
 	}
-	_ = json.Unmarshal(b, &st)
+	if err := json.Unmarshal(b, &st); err != nil {
+		stateCorrupt = fmt.Sprintf("%s ilegible (%v)", filepath.Base(p), err)
+		return st
+	}
+	stateCorrupt = ""
 	if st.Refused == nil {
 		st.Refused = map[string]string{}
 	}
@@ -113,7 +138,16 @@ func saveUpdateState(st updateState) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(p, b, 0o644)
+	// temporal + rename: un corte a mitad no deja un JSON truncado. Y como el
+	// handler HTTP lee este fichero (blockedReason) mientras el updater lo
+	// escribe, el rename garantiza que nunca lea uno a medias.
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+	}
 }
 
 // sha256File es el identificador con el que se rechaza un artefacto: no la
@@ -253,18 +287,39 @@ func spendAttempt(target, digest string) error {
 // "al dia" de "dando vueltas".
 func blockedReason() string {
 	st := loadUpdateState()
-	for target, n := range st.Attempts {
-		if n >= maxAttemptsPerVersion {
-			return fmt.Sprintf("%d intentos fallidos hacia %s; esperando a que se republique", n, target)
+	if stateCorrupt != "" {
+		return "estado del updater " + stateCorrupt + ": no me actualizo hasta que se arregle o se borre"
+	}
+	// Solo cuenta lo que esta POR ENCIMA de la version que corre. Un rechazo o
+	// un contador agotado de una version ya superada es historia, no bloqueo:
+	// antes `blocked` se quedaba encendido para siempre tras el primer
+	// artefacto malo de la historia del nodo.
+	//
+	// Y va ORDENADO: si hay varias entradas, la respuesta es siempre la misma
+	// (los mapas de Go se recorren en orden aleatorio).
+	var keys []string
+	for t := range st.Attempts {
+		keys = append(keys, t)
+	}
+	sort.Strings(keys)
+	for _, target := range keys {
+		if target > version && st.Attempts[target] >= maxAttemptsPerVersion {
+			return fmt.Sprintf("%d intentos fallidos hacia %s; esperando a que se republique", st.Attempts[target], target)
 		}
 	}
-	for target, dig := range st.RefusedTags {
-		_ = dig
-		return fmt.Sprintf("el artefacto publicado para %s esta mal: no lo instalo hasta que se republique", target)
+	keys = keys[:0]
+	for t := range st.RefusedTags {
+		keys = append(keys, t)
 	}
-	if n := len(st.Refused); n > 0 {
-		return fmt.Sprintf("%d artefacto(s) rechazado(s) por no declarar la version que prometian", n)
+	sort.Strings(keys)
+	for _, target := range keys {
+		if target > version {
+			return fmt.Sprintf("el artefacto publicado para %s esta mal: no lo instalo hasta que se republique", target)
+		}
 	}
+	// `Refused` (sha -> motivo) es la lista negra de ficheros que no se deben
+	// ejecutar nunca. Es permanente a proposito y NO alimenta `blocked`: un
+	// fichero malo de hace tres versiones no dice nada del estado de hoy.
 	return ""
 }
 
@@ -286,15 +341,37 @@ func refundAttempt(target string) {
 	saveUpdateState(st)
 }
 
-// clearAttempts se llama cuando una version se instala de verdad: lo que quedo
-// escrito de los intentos fallidos deja de importar.
-func clearAttempts(target string) {
+// noteInstalled se llama cuando una version se instala de verdad. Hace dos
+// cosas que antes no se hacian:
+//
+//  1. purga TODO lo de versiones <= la instalada, no solo la instalada. Antes
+//     clearAttempts borraba una sola clave, y un rechazo de v1 seguia
+//     encendiendo `blocked` despues de instalar v2 y v3. Una version superada
+//     no puede bloquear nada.
+//  2. deja escrito QUE se instalo y con que sha, para el lanzador de arranque.
+//
+// Las versiones son sellos YYYYMMDDHHMM y se comparan como cadenas.
+func noteInstalled(version, sha string) {
 	st := loadUpdateState()
-	if _, ok := st.Attempts[target]; !ok {
-		return
+	for t := range st.Attempts {
+		if t <= version {
+			delete(st.Attempts, t)
+		}
 	}
-	delete(st.Attempts, target)
-	delete(st.Digests, target)
-	delete(st.RefusedTags, target)
+	for t := range st.Digests {
+		if t <= version {
+			delete(st.Digests, t)
+		}
+	}
+	for t := range st.RefusedTags {
+		if t <= version {
+			delete(st.RefusedTags, t)
+		}
+	}
+	st.Installed.Version, st.Installed.Sha, st.Installed.At = version, sha, time.Now().Format(time.RFC3339)
 	saveUpdateState(st)
 }
+
+// clearAttempts se conserva para las pruebas antiguas; en produccion lo que se
+// llama al instalar es noteInstalled.
+func clearAttempts(target string) { noteInstalled(target, "") }

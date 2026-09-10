@@ -112,8 +112,20 @@ func LastCheck() (time.Time, string) {
 	return lastCheck.at, lastCheck.res
 }
 
-func checkAndUpdate() {
-	defer func() { _ = recover() }()
+// checkAndUpdate mira si hay version nueva y, si la hay, la instala. `startup`
+// acota el presupuesto: al arrancar corre SINCRONO antes de abrir el puerto, y
+// con el presupuesto normal (5 min x 3 reintentos) un GitHub medio caido dejaba
+// el gateway ~15 minutos sin servir. Al arrancar: un intento y 20 s; si no
+// llega, el ticker lo coge a los 30 min con el presupuesto entero.
+func checkAndUpdate(startup bool) {
+	defer func() {
+		// El octavo silencio: un panic aqui se tragaba sin escribir nada, y
+		// soflink no escribe al journal, asi que no habia NINGUN sitio donde
+		// pudiera verse. Ahora deja constancia como cualquier otro resultado.
+		if r := recover(); r != nil {
+			noteCheck("PANIC en el updater, sigo con %s: %v", version, r)
+		}
+	}()
 	if version == "dev" {
 		return // build sin sellar: no se actualiza y no hay nada que registrar
 	}
@@ -122,6 +134,12 @@ func checkAndUpdate() {
 		return
 	}
 	defer updating.Store(false)
+	// Fail-closed: si el fichero de estado existe y esta roto, NO se actualiza.
+	// Antes se leia como vacio y todas las guardas desaparecian en silencio.
+	if loadUpdateState(); stateCorrupt != "" {
+		noteCheck("NO me actualizo: estado del updater %s", stateCorrupt)
+		return
+	}
 	client := &http.Client{Timeout: apiTimeout}
 	req, _ := http.NewRequest(http.MethodGet, releasesAPI, nil)
 	if coordinator.GitHubToken != "" { // authenticated = 5000 req/h, dodges the anonymous 60/h cap
@@ -185,7 +203,7 @@ func checkAndUpdate() {
 		return
 	}
 	noteCheck("hay %s (tengo %s) - actualizando", latest, version)
-	if err := applyUpdate(client, url, latest, digest); err != nil {
+	if err := applyUpdate(client, url, latest, digest, startup); err != nil {
 		// Un fallo de RED devuelve el intento. El presupuesto de 3 existe contra
 		// artefactos malos —"fallos que aun no sabemos nombrar"—, y este si
 		// sabemos nombrarlo: la linea toso y se arregla sola. Sin esto, tres
@@ -218,7 +236,7 @@ func periodicUpdate() {
 	defer t.Stop()
 	for range t.C {
 		if coordinator.AutoUpdateOn() { // the header checkbox can pause auto-update live
-			checkAndUpdate()
+			checkAndUpdate(false)
 		}
 	}
 }
@@ -257,25 +275,56 @@ var downloadClient = &http.Client{Timeout: 5 * time.Minute}
 // esperar al siguiente tick ni gastar un intento.
 const descargasPorIntento = 3
 
-// bajarArtefacto deja el artefacto en newPath. Todo lo que devuelve envuelto en
-// ErrDescarga es transitorio y NO debe contar como intento.
-func bajarArtefacto(url, newPath string) error {
+// startupClient es el presupuesto del chequeo de ARRANQUE, que corre antes de
+// abrir el puerto. Un binario de 7 MB en 20 s son 350 KB/s: cualquier enlace
+// sano lo hace en uno. Si no llega, no pasa nada: el ticker reintenta a los 30
+// min con downloadClient y sus 5 minutos, ya con el puerto abierto.
+var startupClient = &http.Client{Timeout: 20 * time.Second}
+
+// bajarArtefacto deja el artefacto en newPath, ya VERIFICADO contra el digest
+// publicado si lo hay. Todo lo que devuelve envuelto en ErrDescarga es
+// transitorio y NO debe contar como intento.
+//
+// El digest se comprueba AQUI, dentro del bucle de reintentos, y no despues en
+// admitArtifact. La diferencia lo es todo: unos bytes corruptos por la red son
+// un fallo de descarga (se reintenta), no un artefacto malo (se rechaza para
+// siempre). Con la comprobacion fuera del bucle, una sola corrupcion dejaba la
+// version bloqueada de forma permanente -demostrado el 10-09-.
+func bajarArtefacto(url, newPath, wantDigest string, startup bool) error {
+	client, tries := downloadClient, descargasPorIntento
+	if startup {
+		client, tries = startupClient, 1
+	}
+	want := strings.ToLower(strings.TrimPrefix(wantDigest, "sha256:"))
 	var last error
-	for i := 1; i <= descargasPorIntento; i++ {
+	for i := 1; i <= tries; i++ {
 		if i > 1 {
 			time.Sleep(time.Duration(i-1) * 3 * time.Second)
-			noteCheck("reintento %d/%d de la descarga tras %v", i, descargasPorIntento, last)
+			noteCheck("reintento %d/%d de la descarga tras %v", i, tries, last)
 		}
-		last = intentarDescarga(url, newPath)
-		if last == nil {
+		last = intentarDescarga(client, url, newPath)
+		if last != nil {
+			continue
+		}
+		if want == "" {
 			return nil
 		}
+		got, err := sha256File(newPath)
+		if err != nil {
+			last = err
+			continue
+		}
+		if got == want {
+			return nil
+		}
+		_ = os.Remove(newPath)
+		last = fmt.Errorf("los bytes no coinciden con el digest publicado (%s != %s)", truncate(got, 12), truncate(want, 12))
 	}
-	return fmt.Errorf("%w tras %d intentos: %v", ErrDescarga, descargasPorIntento, last)
+	return fmt.Errorf("%w tras %d intentos: %v", ErrDescarga, tries, last)
 }
 
-func intentarDescarga(url, newPath string) error {
-	resp, err := downloadClient.Get(url)
+func intentarDescarga(client *http.Client, url, newPath string) error {
+	resp, err := client.Get(url)
 	if err != nil {
 		return err
 	}
@@ -300,16 +349,17 @@ func intentarDescarga(url, newPath string) error {
 	return nil
 }
 
-func applyUpdate(client *http.Client, url, wantVersion, assetDigest string) error {
+func applyUpdate(client *http.Client, url, wantVersion, assetDigest string, startup bool) error {
 	_ = client // la API y la descarga ya NO comparten cliente: ver downloadClient
 	self := selfPath()
 	if self == "" {
 		return fmt.Errorf("no self path")
 	}
 	newPath := self + ".new"
-	if err := bajarArtefacto(url, newPath); err != nil {
+	if err := bajarArtefacto(url, newPath, assetDigest, startup); err != nil {
 		return err
 	}
+	installedSha, _ := sha256File(newPath)
 	_ = os.Chmod(newPath, 0o755) // hay que poder EJECUTARLO para preguntarle quien es
 	// La comprobacion que faltaba: que el fichero SEA lo que el release dice que
 	// es. El tag lo pone una persona; lo que va a correr es esto.
@@ -329,6 +379,10 @@ func applyUpdate(client *http.Client, url, wantVersion, assetDigest string) erro
 		return err
 	}
 	_ = os.Chmod(self, 0o755)
-	clearAttempts(wantVersion) // instalada de verdad: lo anotado deja de importar
+	// Instalada de verdad: purgar lo de versiones superadas y DEJAR CONSTANCIA
+	// de que se instalo y con que sha. Esta es la verificacion que el lanzador
+	// de arranque no tenia y por la que, sin oraculo, hacia downgrade (.30) o
+	// no arrancaba (.63).
+	noteInstalled(wantVersion, installedSha)
 	return reexec(self)
 }

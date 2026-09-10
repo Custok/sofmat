@@ -98,15 +98,15 @@ func serve(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	coordinator.Version = version             // so the panel header shows the running build number
-	coordinator.GitHubToken = cfg.GitHubToken // authenticate the updater (5000 req/h vs anonymous 60/h)
-	coordinator.SetAutoUpdate(!*noUpdate)     // the header checkbox reads/toggles this
-	coordinator.UpdateNow = checkAndUpdate    // the header "actualizar todos" button triggers this
-	coordinator.UpdateBlocked = blockedReason // por que NO avanza, visible en el panel
-	coordinator.UpdateLastCheck = LastCheck   // cuando mire y que paso, visible en el panel
+	coordinator.Version = version                            // so the panel header shows the running build number
+	coordinator.GitHubToken = cfg.GitHubToken                // authenticate the updater (5000 req/h vs anonymous 60/h)
+	coordinator.SetAutoUpdate(!*noUpdate)                    // the header checkbox reads/toggles this
+	coordinator.UpdateNow = func() { checkAndUpdate(false) } // the header "actualizar todos" button
+	coordinator.UpdateBlocked = blockedReason                // por que NO avanza, visible en el panel
+	coordinator.UpdateLastCheck = LastCheck                  // cuando mire y que paso, visible en el panel
 	if !*noUpdate {
-		checkAndUpdate()    // self-update from GitHub Releases at startup, then re-exec (best-effort)
-		go periodicUpdate() // y sigue comprobando en runtime (cada 30m) para coger releases sin reiniciar
+		checkAndUpdate(true) // al arrancar, con presupuesto ACOTADO: corre antes de abrir el puerto
+		go periodicUpdate()  // y sigue comprobando en runtime (cada 30m) para coger releases sin reiniciar
 	}
 	// Fail-closed: if no API key is configured, mint one so load/eject are never
 	// open on the LAN — but PERSIST it, and never print it whole.

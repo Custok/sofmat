@@ -46,7 +46,7 @@ func TestEstarAlDiaDejaConstancia(t *testing.T) {
 	})
 	conVersion(t, "202609092243", api)
 
-	checkAndUpdate()
+	checkAndUpdate(false)
 
 	at, res := LastCheck()
 	if at.IsZero() {
@@ -63,12 +63,12 @@ func TestUnNodoIncomunicadoNoSeParaceAUnoAlDia(t *testing.T) {
 		fmt.Fprintf(w, `{"tag_name":"v202609092243","assets":[]}`)
 	})
 	conVersion(t, "202609092243", apiOK)
-	checkAndUpdate()
+	checkAndUpdate(false)
 	_, resAlDia := LastCheck()
 
 	apiRoto := githubFalso(t, func(w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) })
 	conVersion(t, "202609092243", apiRoto)
-	checkAndUpdate()
+	checkAndUpdate(false)
 	atRoto, resRoto := LastCheck()
 
 	if atRoto.IsZero() {
@@ -92,7 +92,7 @@ func TestSinRespuestaDeGitHubTambienQueda(t *testing.T) {
 	srv.Close() // cerrado a proposito: nadie contesta ahi
 	conVersion(t, "202609092243", url)
 
-	checkAndUpdate()
+	checkAndUpdate(false)
 
 	at, res := LastCheck()
 	if at.IsZero() || !strings.Contains(res, "NO he podido mirar") {
@@ -109,7 +109,7 @@ func TestCuandoHayVersionNuevaElRegistroLoDice(t *testing.T) {
 	})
 	conVersion(t, "202609092243", api)
 
-	checkAndUpdate()
+	checkAndUpdate(false)
 
 	_, res := LastCheck()
 	if strings.Contains(res, "al dia") {

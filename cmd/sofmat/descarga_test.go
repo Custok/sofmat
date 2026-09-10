@@ -43,7 +43,7 @@ func TestUnaDescargaQueFallaYLuegoVaSeReintenta(t *testing.T) {
 	defer func() { stateDir = "" }()
 	dest := filepath.Join(dir, "soflink.new")
 
-	if err := bajarArtefacto(srv.URL, dest); err != nil {
+	if err := bajarArtefacto(srv.URL, dest, "", false); err != nil {
 		t.Fatalf("tenia que acabar consiguiendolo: %v", err)
 	}
 	if n != 3 {
@@ -65,7 +65,7 @@ func TestSiLaDescargaNuncaVaSeRindeYLoMarcaComoRed(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	err := bajarArtefacto(srv.URL, filepath.Join(dir, "x.new"))
+	err := bajarArtefacto(srv.URL, filepath.Join(dir, "x.new"), "", false)
 	if err == nil {
 		t.Fatal("tenia que fallar")
 	}

@@ -2,6 +2,27 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609101217 (2026-09-10)
+Revision completa del auto-update tras el cambio de modelo en `.30`: **seis fallos demostrados y cerrados de una vez**, con un segundo desarrollador (debian-dev) leyendo el fuente publico y citando lineas, y un tercero (metahuman-dev) midiendo desde fuera lo que el codigo no ve de si mismo. Anoche los tres firmaron conclusiones sobre este codigo leyendo la lectura del autor; hoy no.
+
+**De mas grave a menos, cada uno con su prueba en rojo contra la version anterior y su sabotaje que compila:**
+
+**1. Una descarga CORRUPTA bloqueaba la version para siempre.** `admitArtifact` comparaba el digest **despues** de descargar y, si no cuadraba, escribia `Refused[sha]` + `RefusedTags[version]` permanentes y gastaba intento: el ciclo siguiente ni volvia a descargar (*«ya se rechazo y no ha cambiado»*). Unos bytes corruptos por la red se trataban como un release mal publicado. **Ahora el digest se comprueba DENTRO de `bajarArtefacto`, en el bucle de reintentos: corrupcion = `ErrDescarga` = se reintenta y NO gasta intento.** Solo tres descargas seguidas que no cuadren se consideran un release malo. *(Hallazgo de debian-dev; prueba `TestUnaDescargaCorruptaNoDebeBloquearLaVersionParaSiempre`.)*
+
+**2. El lanzador de arranque hacia DOWNGRADE (Windows) o NO ARRANCABA (Linux) tras un autoupdate si el oraculo no contestaba.** El updater verificaba digest + version declarada e instalaba, **y tiraba esa verificacion**; el lanzador solo confiaba en `REF_SHA`, que escribe el propio lanzador y solo cuando su oraculo (Gitea en `.30`, GitHub en `.51`/`.63`) responde. Medido en `.63`: `REF_SHA` **dos versiones por detras** porque el re-exec en sitio no pasa por el `ExecStartPre`; con GitHub caido, los once respaldos descartados y `exit 1`. **Ahora el updater deja constancia en `soflink-update-state.json` → `installed {version, sha, at}`**, y el lanzador de `.30` la lee como anclaje de confianza sin red. **Ademas, guarda anti-downgrade: nunca se sustituye un binario que ejecuta y declara un sello valido por un respaldo con sello mas viejo** (acotada a sellos de 12 digitos: un binario roto que imprime basura no puede bloquear el rescate). Los lanzadores Linux tienen el mismo patron y el campo `installed` ya esta ahi para que lo lean.
+
+**3. `blocked` se quedaba encendido PARA SIEMPRE tras el primer rechazo.** `clearAttempts` borraba solo la clave instalada y `blockedReason` recorria todo sin mirar si era una version superada; `Refused` no tenia ningun camino de purga. **Ahora `blockedReason` solo cuenta versiones `> version` (ordenado, sin azar de mapas), `noteInstalled` purga todo lo `<=` a la instalada, y `Refused` queda como lista negra permanente de ficheros pero NO alimenta `blocked`.** Con test independiente del filtro (estado heredado sin purgar).
+
+**4. Regresion de arranque: hasta ~15 min sin puerto.** `checkAndUpdate` corre sincrono antes de `coordinator.Run`, y la release anterior le puso 5 min × 3 reintentos. **Ahora `checkAndUpdate(startup=true)` usa `startupClient` (20 s) y UN intento**; si no llega, el ticker lo coge con el puerto abierto y el presupuesto entero.
+
+**5. Estado no atomico + corrupto = vacio en silencio.** `saveUpdateState` hacia `os.WriteFile` directo y `loadUpdateState` ignoraba el error de `Unmarshal`. **Ahora temporal + `rename`, y un fichero ilegible enciende `stateCorrupt`: fail-closed** (no se actualiza ese ciclo, `blocked` lo dice). Un fichero que no existe sigue siendo estado vacio legitimo.
+
+**6. `recover()` mudo** — el octavo silencio, que ademas no tenia ningun sitio donde verse (soflink no escribe al journal). **Ahora `noteCheck("PANIC en el updater…")`.**
+
+**Doce pruebas nuevas con sus controles**, incluido el que hace que el filtro de `blocked` este probado por si solo (sin el, sabotear el filtro no ponia nada en rojo porque la purga lo tapaba). **Siete sabotajes que compilan, uno por arreglo, cada uno tumba exactamente su prueba.** Suite entera con `-race`. Lanzador de `.30`: 30 comprobaciones en tres bancos, incluido el escenario real del 10-09 (autoupdate + `REF_SHA` viejo + Gitea caida → **no downgrade**).
+
+**Lo que sigue abierto, dicho para que no se de por cerrado:** siete pruebas del camino de admision se saltan en Windows (el artefacto falso es un script sh); Windows si ejecuta `soflink.exe.new`, comprobado, pero el nodo de produccion corre un camino que solo se ha probado en Linux. Y **por que hubo un hipo de red en `.63` a las 00:02** sigue sin explicar (n=1). Esta release arregla que pasa cuando lo hay.
+
 ## v202609101124 (2026-09-10)
 Un tropiezo de red deja de tener consecuencias permanentes.
 
