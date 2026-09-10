@@ -2,6 +2,40 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609101124 (2026-09-10)
+Un tropiezo de red deja de tener consecuencias permanentes.
+
+**El dato que lo destapa, del log de `.63`** (lo encontró metahuman-dev mientras comprobaba otra cosa):
+```
+46  "auto-update fallo"      TODOS "Client.Timeout exceeded while awaiting headers"
+    19 seguidos contra la MISMA version, v202609072206
+274 actualizaciones que SI funcionaron
+```
+**No hay nada roto: hay una línea que tose de vez en cuando y un actualizador que convertía cada tos en un fallo completo.** Y esos 46 fallos **no salían por ninguna parte** hasta `v202609092339`.
+
+**Tres cosas mal, y ninguna es el tamaño del fichero:**
+
+**1. El mismo `http.Client` preguntaba a la API y se descargaba el binario.**
+```
+client := &http.Client{Timeout: 8 * time.Second}   // se pasaba a applyUpdate
+```
+En Go `Timeout` cubre la petición **entera, incluida la lectura del cuerpo**. Ocho segundos están bien para preguntar «cuál es la última versión» y son absurdos para bajar un binario. **Nadie lo roza con la red sana** —medido: `.30` baja sus 6,86 MB en **0,70 s** y `.63` sus 3,55 MB en **0,35 s**, márgenes de 11x y 15x— **pero un cronómetro corto no falla por el tamaño: falla porque no deja término medio entre «va bien» y «fallo total».** Ahora la descarga tiene su propio `downloadClient` con 5 minutos, y `apiTimeout` queda para lo que es.
+
+**2. No había un solo reintento** dentro de `applyUpdate`. Una respuesta lenta y a esperar media hora al siguiente tick. Ahora **3 intentos con pausa creciente** dentro de la misma vuelta. *(Idea de metahuman-dev, y es la más barata de las tres: sus 46 fallos históricos eran hipos y el intento siguiente funcionaba.)*
+
+**3. La que dejaba clavado el nodo: un fallo de RED gastaba intento.**
+```
+spendAttempt(latest, digest)     <- gastaba 1 de 3
+applyUpdate(...)                 <- y AQUI fallaba la descarga
+```
+El presupuesto de 3 existe **contra artefactos malos** — el comentario que lo acompaña dice *«cubre los fallos que aún no sabemos nombrar»*, y éste sí sabemos nombrarlo. **Tres tropiezos seguidos ataban el nodo a la versión vieja con un artefacto perfecto esperándole**, y `blocked` habría dicho *«3 intentos sin conseguirlo»*, que quien lo lea entiende como *«el artefacto está mal»*. **El fichero de estado SÍ distingue los dos casos** (`refused` vacío, `attempts` en 3): lo que se perdía era **al redactarlo**. Ahora `ErrDescarga` devuelve el intento con `refundAttempt`.
+
+**El caso real, la noche del 09-10:** `.63` falló su intento 1 a las 00:02 y **cogió el 2 a las 00:32**, así que no llegó a atarse — y al conseguirlo el estado **se limpia solo** (`attempts` y `digests` vacíos). Eso atenúa el (3) pero no lo retira: **el castigo no se acumula entre versiones, sólo dentro de la misma.**
+
+**Seis pruebas con sus controles.** Las que valen son las que exigen que dos situaciones distintas se traten distinto: un fallo de red **no** gasta intento aunque ocurra diez veces, y —**el control que importa**— un fallo que **no** es de red **sí** lo gasta y sigue atando el nodo a la tercera. *Un contador desactivado del todo es el otro modo de fallo, y pasaría cualquier prueba que sólo mire que el nodo no se atasca.*
+
+**Sabotaje que COMPILA, uno por pieza:** devolver la descarga al cliente de la API tumba la del presupuesto; poner los reintentos a 1 tumba la del hipo; y un reintegro que no reintegra tumba la del intento devuelto. **Cada uno tumba exactamente el suyo y ninguno más.**
+
 ## v202609092339 (2026-09-09)
 El auto-update deja de trabajar en silencio. Decision de David: cerrar las dos piezas.
 

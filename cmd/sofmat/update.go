@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -121,7 +122,7 @@ func checkAndUpdate() {
 		return
 	}
 	defer updating.Store(false)
-	client := &http.Client{Timeout: 8 * time.Second}
+	client := &http.Client{Timeout: apiTimeout}
 	req, _ := http.NewRequest(http.MethodGet, releasesAPI, nil)
 	if coordinator.GitHubToken != "" { // authenticated = 5000 req/h, dodges the anonymous 60/h cap
 		req.Header.Set("Authorization", "Bearer "+coordinator.GitHubToken)
@@ -185,7 +186,20 @@ func checkAndUpdate() {
 	}
 	noteCheck("hay %s (tengo %s) - actualizando", latest, version)
 	if err := applyUpdate(client, url, latest, digest); err != nil {
-		noteCheck("la actualizacion a %s fallo (%v) - sigo con %s", latest, err, version)
+		// Un fallo de RED devuelve el intento. El presupuesto de 3 existe contra
+		// artefactos malos —"fallos que aun no sabemos nombrar"—, y este si
+		// sabemos nombrarlo: la linea toso y se arregla sola. Sin esto, tres
+		// hipos seguidos dejan al nodo clavado en la version vieja con un
+		// artefacto perfecto esperandole, y `blocked` diria "3 intentos sin
+		// conseguirlo", que quien lo lea entendera como "el artefacto esta mal".
+		// El fichero de estado SI distingue los dos casos (`refused` vacio,
+		// `attempts` en 3); lo que se perdia era al redactarlo.
+		if errors.Is(err, ErrDescarga) {
+			refundAttempt(latest)
+			noteCheck("no he podido descargar %s (%v) - no gasto intento, lo reintento en el proximo ciclo", latest, err)
+		} else {
+			noteCheck("la actualizacion a %s fallo (%v) - sigo con %s", latest, err, version)
+		}
 	}
 }
 
@@ -209,20 +223,66 @@ func periodicUpdate() {
 	}
 }
 
-func applyUpdate(client *http.Client, url, wantVersion, assetDigest string) error {
-	self := selfPath()
-	if self == "" {
-		return fmt.Errorf("no self path")
+// ErrDescarga marca los fallos que son de la RED, no del artefacto. La
+// diferencia decide si se gasta un intento: el presupuesto existe contra
+// artefactos malos, y castigar con el a una linea que tose deja al nodo clavado
+// con un artefacto perfecto esperandole en el servidor.
+var ErrDescarga = errors.New("fallo de descarga")
+
+// downloadClient es un cliente APARTE del que consulta la API, y es la
+// correccion del 10-09.
+//
+// El de la API tiene 8 s, que esta bien para preguntar "cual es la ultima
+// version" y es absurdo para bajarse un binario: en Go `http.Client.Timeout`
+// cubre la peticion ENTERA, incluida la lectura del cuerpo. Se estaba usando el
+// mismo objeto para las dos cosas, asi que la descarga corria contra un
+// cronometro de 8 segundos.
+//
+// Medido: .30 se baja sus 6,86 MB en 0,70 s y .63 sus 3,55 MB en 0,35 s, o sea
+// que NADIE roza ese techo con la red sana. Pero .63 tenia 46 fallos en su log,
+// todos con el mismo mensaje ("Client.Timeout exceeded while awaiting headers"),
+// 19 de ellos seguidos contra la misma version. Un cronometro corto no falla por
+// el tamaño: falla porque convierte cualquier lentitud momentanea en un fallo
+// COMPLETO, sin termino medio.
+// apiTimeout es para PREGUNTAR "cual es la ultima version": una respuesta JSON
+// pequeña. 8 s esta bien aqui y era absurdo para la descarga.
+const apiTimeout = 8 * time.Second
+
+var downloadClient = &http.Client{Timeout: 5 * time.Minute}
+
+// descargasPorIntento: reintentos dentro de la MISMA vuelta del updater. Idea de
+// metahuman-dev, y es mas barata que las otras dos correcciones juntas: sus 46
+// fallos historicos eran hipos, y el siguiente intento —media hora despues—
+// funcionaba. Reintentar a los pocos segundos habria evitado casi todos sin
+// esperar al siguiente tick ni gastar un intento.
+const descargasPorIntento = 3
+
+// bajarArtefacto deja el artefacto en newPath. Todo lo que devuelve envuelto en
+// ErrDescarga es transitorio y NO debe contar como intento.
+func bajarArtefacto(url, newPath string) error {
+	var last error
+	for i := 1; i <= descargasPorIntento; i++ {
+		if i > 1 {
+			time.Sleep(time.Duration(i-1) * 3 * time.Second)
+			noteCheck("reintento %d/%d de la descarga tras %v", i, descargasPorIntento, last)
+		}
+		last = intentarDescarga(url, newPath)
+		if last == nil {
+			return nil
+		}
 	}
-	resp, err := client.Get(url)
+	return fmt.Errorf("%w tras %d intentos: %v", ErrDescarga, descargasPorIntento, last)
+}
+
+func intentarDescarga(url, newPath string) error {
+	resp, err := downloadClient.Get(url)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %d", resp.StatusCode)
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	newPath := self + ".new"
 	f, err := os.OpenFile(newPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return err
@@ -235,7 +295,20 @@ func applyUpdate(client *http.Client, url, wantVersion, assetDigest string) erro
 	}
 	if n < 1_000_000 { // sanity: a real binary is > 1 MB
 		_ = os.Remove(newPath)
-		return fmt.Errorf("download too small (%d bytes)", n)
+		return fmt.Errorf("solo %d bytes", n)
+	}
+	return nil
+}
+
+func applyUpdate(client *http.Client, url, wantVersion, assetDigest string) error {
+	_ = client // la API y la descarga ya NO comparten cliente: ver downloadClient
+	self := selfPath()
+	if self == "" {
+		return fmt.Errorf("no self path")
+	}
+	newPath := self + ".new"
+	if err := bajarArtefacto(url, newPath); err != nil {
+		return err
 	}
 	_ = os.Chmod(newPath, 0o755) // hay que poder EJECUTARLO para preguntarle quien es
 	// La comprobacion que faltaba: que el fichero SEA lo que el release dice que

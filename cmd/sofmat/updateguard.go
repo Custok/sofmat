@@ -268,6 +268,24 @@ func blockedReason() string {
 	return ""
 }
 
+// refundAttempt devuelve un intento gastado. Se usa cuando el fallo es de la
+// RED y no del artefacto: el presupuesto es contra artefactos malos, y gastarlo
+// con una linea que tose deja al nodo clavado con un artefacto perfecto al otro
+// lado. Nunca baja de cero.
+func refundAttempt(target string) {
+	st := loadUpdateState()
+	n, ok := st.Attempts[target]
+	if !ok || n <= 0 {
+		return
+	}
+	if n-1 == 0 {
+		delete(st.Attempts, target)
+	} else {
+		st.Attempts[target] = n - 1
+	}
+	saveUpdateState(st)
+}
+
 // clearAttempts se llama cuando una version se instala de verdad: lo que quedo
 // escrito de los intentos fallidos deja de importar.
 func clearAttempts(target string) {
