@@ -18,7 +18,8 @@
 set -u
 cd "$(dirname "$(readlink -f "$0")")"
 
-BIN="soflink-x86_64.AppImage"
+ARCH="$(uname -m)"                 # x86_64 | aarch64: coincide con el nombre del asset
+BIN="soflink-${ARCH}.AppImage"
 REPO="Custok/sofmat"
 SOLO_CHECK=0
 [ "${1:-}" = "--check" ] && SOLO_CHECK=1
@@ -32,7 +33,7 @@ DIGEST="$(printf '%s' "$REL" | python3 -c '
 import sys,json
 d=json.load(sys.stdin)
 for a in d.get("assets",[]):
-    if a.get("name")=="soflink-x86_64.AppImage": print((a.get("digest") or "")[7:])
+    if a.get("name")=="soflink-'"$ARCH"'.AppImage": print((a.get("digest") or "")[7:])
 ' 2>/dev/null)"
 [ -n "$TAG" ] || { echo "❌ sin respuesta de la API de GitHub — no toco nada"; exit 1; }
 
@@ -44,7 +45,7 @@ TMP="./$BIN.new.$$"
 trap 'rm -f "$TMP"' EXIT
 echo "descargando $TAG …"
 curl -sL --max-time 180 -o "$TMP" \
-  "https://github.com/$REPO/releases/download/$TAG/soflink-x86_64.AppImage" || {
+  "https://github.com/$REPO/releases/download/$TAG/soflink-${ARCH}.AppImage" || {
   echo "❌ descarga fallida — sigo con la version actual"; exit 1; }
 chmod +x "$TMP"
 
