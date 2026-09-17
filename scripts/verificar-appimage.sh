@@ -29,8 +29,9 @@
 set -u
 cd "$(dirname "$(readlink -f "$0")")"
 
-REF_FILE="levantar.sh"          # dónde vive el REF_SHA de respaldo (una sola copia)
-BIN="soflink-x86_64.AppImage"
+REF_FILE="${REF_FILE:-levantar.sh}"   # dónde vive el REF_SHA de respaldo (una sola copia); en nodos sin levantar.sh: REF_FILE=<fichero con REF_SHA="…">
+ARCH="$(uname -m)"                    # x86_64 | aarch64: coincide con el nombre del asset
+BIN="soflink-${ARCH}.AppImage"
 
 [ -x "$BIN" ] || { echo "❌ no existe $BIN en $(pwd)"; exit 1; }
 REF_SHA="$(grep -oE '^REF_SHA="[0-9a-f]{64}"' "$REF_FILE" | cut -d'"' -f2)"
@@ -66,9 +67,9 @@ except Exception:
     sys.exit(0)
 for r in rels:
     for a in r.get("assets", []):
-        if a.get("name") == "soflink-x86_64.AppImage" and a.get("digest", "") == "sha256:" + got:
+        if a.get("name") == "soflink-" + sys.argv[2] + ".AppImage" and a.get("digest", "") == "sha256:" + got:
             print(r["tag_name"]); sys.exit(0)
-' "$GOT_SHA")"
+' "$GOT_SHA" "$ARCH")"
 
 if [ -n "$MATCH" ]; then
   echo "✅ hash = asset oficial del release $MATCH (GitHub)"
@@ -132,9 +133,9 @@ except Exception:
     sys.exit(0)
 for r in rels:
     for a in r.get("assets", []):
-        if a.get("name") == "soflink-x86_64.AppImage" and a.get("digest", "") == "sha256:" + got:
+        if a.get("name") == "soflink-" + sys.argv[2] + ".AppImage" and a.get("digest", "") == "sha256:" + got:
             print(r["tag_name"]); sys.exit(0)
-' "$C_SHA")"
+' "$C_SHA" "$ARCH")"
   # No basta con que el sha del candidato sea OFICIAL: el artefacto del bucle del
   # 07-09 es oficial en CATORCE releases y declara 202609071545. Restaurarlo seria
   # meter de vuelta justo el binario que causo los 281 arranques. Asi que al
