@@ -1,0 +1,64 @@
+# /etc/systemd/system/soflink.service — tal cual corre en .63 (metahuman-dev).
+# Referencia para otros nodos: rutas y User son de .63. En .100 (radxa-dev)
+# va como unidad de USUARIO (~/.config/systemd/user/), igual que su ComfyUI.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+[Unit]
+# soflink (coordinador sofmat) en node-d .63 — metahuman-dev 2026-09-07.
+# Motivo (topic prefill-decode-desagregado-kv-handoff, 06-09 23:38): soflink se
+# lanzaba con `setsid nohup` desde levantar.sh, así que NO sobrevivía a un
+# reinicio del host. Le pasó a .51 tras su reboot de las 23:19: su soflink no
+# volvió, el `kv-fetch` del traspaso murió con "connection refused" y la
+# petición de 46k pagó prefill + decode entera (57 s). El autoupdate sí aplica
+# en caliente (re-exec desde la v202609062130); lo que faltaba era esto.
+Description=soflink — coordinador sofmat en node-d (.63), API y /kv del KV-handoff
+Documentation=https://github.com/Custok/sofmat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=custok
+WorkingDirectory=/home/custok/soflink
+# Integridad ANTES de arrancar: el AppImage debe ser un asset oficial de las
+# releases de GitHub (mismo script que usa el arranque manual de levantar.sh).
+# Si no cuadra, la unidad no arranca (binario re-etiquetado = no se ejecuta).
+ExecStartPre=/home/custok/soflink/verificar-appimage.sh
+ExecStart=/home/custok/soflink/soflink-x86_64.AppImage serve -no-update --config config.local.json
+Restart=always
+RestartSec=5
+# 2026-09-09 (orden de David): `-no-update`. El autoupdate integrado entro en
+# bucle porque 14 releases del 07-09 publicaron el MISMO artefacto (declara
+# 202609071545): comparaba, descargaba, se reiniciaba y volvia a comparar lo
+# mismo. 272 reinicios, ~940 MB y 51 API keys rotadas en 24 h, sin una sola
+# linea de error. La actualizacion ahora es DELIBERADA: ./actualizar-soflink.sh
+# (verifica hash Y que el artefacto declare la version de su etiqueta).
+StandardOutput=append:/home/custok/soflink/soflink.log
+StandardError=append:/home/custok/soflink/soflink.log
+
+[Install]
+WantedBy=multi-user.target
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DROP-IN que hay ADEMAS en .63: /etc/systemd/system/soflink.service.d/10-autoupdate.conf
+# (se reproduce aqui como comentario para que el repo describa el estado REAL;
+#  en un nodo que no sirve nada — .100 — NO ponerlo, y queda -no-update)
+#
+#   # Quita el -no-update del ExecStart de la unidad.
+#   #
+#   # El -no-update se puso el 09-09-2026 como MITIGACION del bucle del 07-09:
+#   # catorce releases con el mismo artefacto, 281 arranques en .63, ~4,8 GB
+#   # descargados y 145 claves rotadas sin una sola linea de error.
+#   #
+#   # Se retira el 09-09-2026 con OK directo de David, una vez que v202609092243
+#   # arregla el lado del que INSTALA: comprueba que el binario descargado declare
+#   # la version prometida, guarda el rechazo en disco por sha256 (sobrevive al
+#   # reinicio, que es como se cerraba el bucle), lo ancla al digest que publica
+#   # GitHub para no gastar la descarga, y lleva un contador de 3 intentos por
+#   # version que se rearma si el artefacto cambia.
+#   #
+#   # Para volver atras:  rm este fichero  +  systemctl daemon-reload  +  restart
+#
+#   [Service]
+#   ExecStart=
+#   ExecStart=/home/custok/soflink/soflink-x86_64.AppImage serve --config config.local.json
