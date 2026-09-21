@@ -285,6 +285,9 @@ func (s *Server) getJSONOr(url string) (map[string]any, error) {
 // A request whose KV was just handed off must stay on the primary engine — the
 // restored state lives in that engine's slot.
 func (s *Server) backendCall(body gateway.Body, extra gateway.Headers) (gateway.Body, error) {
+	if pf := s.smallToPrefill(body, extra); pf != "" {
+		return httpBackend(pf)(body, extra)
+	}
 	node, done, err := s.pickDecode(body, extra)
 	if err != nil {
 		return nil, err
@@ -295,6 +298,35 @@ func (s *Server) backendCall(body gateway.Body, extra gateway.Headers) (gateway.
 		url = node.url
 	}
 	return httpBackend(url)(body, extra)
+}
+
+// smallDecodePromptTokens is the prompt-size (reply reserve excluded) below which
+// a request is served on the prefill engine instead of the decode engine. It sits
+// in the order-of-magnitude gap between housekeeping calls (a few hundred tokens)
+// and real conversations (tens of thousands), measured 2026-09-21.
+const smallDecodePromptTokens = 4000
+
+// smallToPrefill returns the prefill engine's URL for a SMALL, non-handoff request
+// (and "" to leave it on decode). Small housekeeping calls (emotion tagging, tool
+// routing) are disposable — the prefill erases its slots by design, so nothing is
+// lost by serving them there. Keeping them OFF the decode engine matters because
+// the decode runs unified KV: every new task on it clears the idle slots, which is
+// what was evicting the resident big conversation between a user's turns (measured
+// 2026-09-21: retention 0/4 on .63, slot cleared ~1 s after each turn). Handoff
+// requests are never rerouted: their KV was restored into the decode engine's slot
+// and must be served there.
+func (s *Server) smallToPrefill(body gateway.Body, extra gateway.Headers) string {
+	if s.bc.PrefillURL == "" || s.bc.PrefillURL == s.bc.DecodeEntryURL {
+		return ""
+	}
+	if extra["x-sofmat-kv-handoff"] != "" {
+		return ""
+	}
+	prompt := bodyTokens(body, extra) - replyReserveFor(body)
+	if prompt < smallDecodePromptTokens {
+		return s.bc.PrefillURL
+	}
+	return ""
 }
 
 // pickDecode resolves the engine for a request plus its release function.
@@ -810,17 +842,24 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 	}
 	// same engine choice as the JSON path: sticky per conversation, least loaded
 	// for a new one, and pinned to the primary when a handoff just restored there.
-	node, doneNode, perr := s.pickDecode(plan.Body, plan.Headers)
-	if perr != nil {
-		writeJSON(w, http.StatusServiceUnavailable, gateway.Body{"error": perr.Error()})
-		s.gw.Finish(plan, gateway.Body{})
-		return
+	decodeURL := s.bc.DecodeEntryURL
+	doneNode := func() {}
+	var node *decodeNode
+	if pf := s.smallToPrefill(plan.Body, plan.Headers); pf != "" {
+		decodeURL = pf // small housekeeping call: serve on the prefill, keep it off decode
+	} else {
+		n, dn, perr := s.pickDecode(plan.Body, plan.Headers)
+		if perr != nil {
+			writeJSON(w, http.StatusServiceUnavailable, gateway.Body{"error": perr.Error()})
+			s.gw.Finish(plan, gateway.Body{})
+			return
+		}
+		node, doneNode = n, dn
+		if node != nil {
+			decodeURL = node.url
+		}
 	}
 	defer doneNode()
-	decodeURL := s.bc.DecodeEntryURL
-	if node != nil {
-		decodeURL = node.url
-	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, gateway.Body{"error": "streaming unsupported by server"})

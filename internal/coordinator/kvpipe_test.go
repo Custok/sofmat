@@ -486,7 +486,14 @@ func TestAutoModeCostAndCacheAware(t *testing.T) {
 	}
 }
 
-func TestShortPromptStaysDecodeDirect(t *testing.T) {
+// A short prompt is served on the PREFILL engine's chat endpoint, NOT on the
+// decode engine. These throwaway, no-state calls (emotion tagging, tool routing)
+// must not land on the decode engine, because the decode runs unified KV and every
+// new task on it clears the idle slots — which was evicting the resident big
+// conversation between a user's turns (measured 2026-09-21). The prefill's HANDOFF
+// machinery (completion/save) is still untouched: the short prompt rides the
+// engine's ordinary chat endpoint, and slot selection is left to the engine.
+func TestShortPromptGoesToPrefillEngine(t *testing.T) {
 	r := newRig(t, func(e *fakeEngine) string { return e.dir })
 	code, _ := postChat(t, r.gateway.URL, map[string]any{
 		"messages": []any{map[string]any{"role": "user", "content": "hola, ¿qué tal?"}},
@@ -496,13 +503,22 @@ func TestShortPromptStaysDecodeDirect(t *testing.T) {
 	}
 	r.prefill.mu.Lock()
 	defer r.prefill.mu.Unlock()
+	// handoff machinery untouched: served, not prefilled+handed off
 	if len(r.prefill.completions) != 0 || len(r.prefill.saved) != 0 {
-		t.Fatalf("short prompt must never touch the prefill: %+v", r.prefill)
+		t.Fatalf("short prompt must not use the prefill/handoff machinery: %+v", r.prefill)
+	}
+	// served on the prefill ENGINE's chat endpoint
+	if len(r.prefill.chats) != 1 {
+		t.Fatalf("short prompt must be served on the prefill engine: %d chats", len(r.prefill.chats))
+	}
+	if _, ok := r.prefill.chats[0]["id_slot"]; ok {
+		t.Fatal("decode-direct must leave slot selection to the engine")
 	}
 	r.decode.mu.Lock()
 	defer r.decode.mu.Unlock()
-	if _, ok := r.decode.chats[0]["id_slot"]; ok {
-		t.Fatal("decode-direct must leave slot selection to the engine")
+	// and NEVER on the decode engine, whose idle slots we are protecting
+	if len(r.decode.chats) != 0 {
+		t.Fatalf("short prompt must not hit the decode engine: %d chats", len(r.decode.chats))
 	}
 	if rec := lastRequestRecord(t, r.gateway.URL); rec["admitted_via"] != "decode" {
 		t.Fatalf("record wrong: %v", rec)
