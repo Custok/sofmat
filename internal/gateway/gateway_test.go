@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -195,6 +196,60 @@ func TestColdPrefixForgottenAfterEngineMiss(t *testing.T) {
 	gw.Chat(Headers{}, chatBody(bigPrompt, "quinta"))
 	if len(c.prefill) != 2 {
 		t.Fatal("a real cache hit must keep the prefix hot")
+	}
+}
+
+// An engine miss on the SHARED system prefix must not forget the CONVERSATION's
+// own last-prompt record. It used to (g.last.forget(ckey) on any cache-cold
+// reply), so the next turn's bestPrefix returned ~0, the whole still-resident
+// conversation counted as new, and it was shipped to a full prefill+handoff of
+// tens of thousands of tokens (2026-09-21, ckey 0cc88487: 40k recomputed, 27 s).
+// The same conversation (stable ckey) must stay recognised across a miss.
+func TestEngineMissKeepsConversationPrefix(t *testing.T) {
+	cacheN := 20000.0
+	gw, c := newTestGW(t, func(o *Options) {
+		o.Tokens = func(b Body) ([]int, error) {
+			raw, _ := json.Marshal(b["messages"]) // deterministic ids: shared content -> shared prefix
+			ids := make([]int, len(raw)/4)
+			for i := range ids {
+				h := 0
+				for _, ch := range raw[4*i : 4*i+4] {
+					h = h*31 + int(ch)
+				}
+				ids[i] = 1000 + h%50000
+			}
+			return ids, nil
+		}
+		o.BackendCall = func(body Body, extra Headers) (Body, error) {
+			return Body{"timings": map[string]any{"prompt_n": 1.0, "cache_n": cacheN}}, nil
+		}
+	})
+	sysPrompt := strings.Repeat("s", 4000) // ~1000 tok: prefixToks>0 so the cold-prefix Forget can fire
+	seed := strings.Repeat("y", 40000)     // stable first user turn -> stable ckey, big enough to route via prefill
+	conv := func(tail string) Body {
+		msgs := []any{
+			map[string]any{"role": "system", "content": sysPrompt},
+			map[string]any{"role": "user", "content": seed},
+		}
+		if tail != "" {
+			msgs = append(msgs,
+				map[string]any{"role": "assistant", "content": "ok"},
+				map[string]any{"role": "user", "content": tail})
+		}
+		return Body{"messages": msgs}
+	}
+	gw.Chat(Headers{}, conv("")) // turn 1: establish + remember the conversation
+	cacheN = 0                   // turn 2: engine reports a miss -> Finish forgets pkey (must KEEP ckey)
+	gw.Chat(Headers{}, conv("a"))
+	cacheN = 20000
+	pBefore := len(c.prefill)
+	gw.Chat(Headers{}, conv("ab")) // turn 3: continuation of the SAME conversation
+	rec := lastRecord(t, gw)
+	if nt, _ := rec["new_tokens"].(float64); nt > 8192 {
+		t.Fatalf("miss forgot the conversation prefix: new_tokens=%v (bestPrefix went stale)", rec["new_tokens"])
+	}
+	if len(c.prefill) != pBefore {
+		t.Fatalf("a continuation after a miss was re-prefilled whole: prefill %d -> %d", pBefore, len(c.prefill))
 	}
 }
 

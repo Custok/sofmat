@@ -771,9 +771,15 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 	if cn, ok := timingInt(resp, "cache_n"); ok && !p.viaPrefill && p.prefixToks > 0 && cn < p.prefixToks/2 {
 		g.known.Forget(p.pkey)
 		g.last.forget(p.pkey)
-		if p.ckey != "" && p.ckey != p.pkey {
-			g.last.forget(p.ckey)
-		}
+		// Do NOT forget g.last[ckey]: prefixToks is the SYSTEM prefix, so this miss
+		// only says the system prefix was cold — it does not mean the CONVERSATION's
+		// last-prompt record is invalid. Forgetting ckey poisoned the next turn:
+		// bestPrefix then returned ~0, the whole (still-resident) conversation counted
+		// as new, and it was shipped to a full prefill+handoff of tens of thousands of
+		// tokens (measured 2026-09-21, ckey 0cc88487: new_tokens 40065, cache_n 40067,
+		// handoff 26.7 s restoring a KV the decode already held). Keeping the ckey
+		// record lets the next turn recognise the continuation and serve decode-direct;
+		// if the KV really is gone the engine content-matches and reprocesses honestly.
 		p.fields["prefix_cold"] = true
 	}
 	// feed the cost model with what the engines just measured.
