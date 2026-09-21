@@ -487,10 +487,17 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	// admission: decode-direct, or dedicated prefill + KV handoff first.
 	prefixToks := EstimateTokens(systemPrompt, nil)
 	tailToks := EstimateTokens(tailTextOf(body), nil)
+	// hotPrefix hoisted to a var so /api/requests can log it alongside pkey/ckey:
+	// the estimate that decides prefill-vs-decode is opaque without these, and the
+	// 2026-09-21 diagnosis (resident conversations routed to a 21 s handoff) turns
+	// on whether HotTokens(pkey) reflects THIS conversation or another one that
+	// shares the system prompt. Behaviour is unchanged: same call, same value.
+	knownHot := g.known.HotTokens(pkey)
+	hotPrefix := g.residentHot(body, knownHot, slot)
 	decision := ClassifyAdmission(AdmissionInput{
 		PrefixTokens:     prefixToks,
 		TailTokens:       tailToks,
-		HotPrefixTokens:  g.residentHot(body, g.known.HotTokens(pkey), slot),
+		HotPrefixTokens:  hotPrefix,
 		Threshold:        g.threshold,
 		PrefillAvailable: g.Disaggregated(),
 	})
@@ -529,6 +536,18 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		"n_max":          merged[SpeculativeNMaxKey],
 		"admission":      decision.Reason,
 		"est_new_tokens": decision.EstNewTokens,
+		// diagnosis columns (2026-09-21): group turns by conversation and see the
+		// estimate's inputs. pkey collision across conversations that share a
+		// system prompt is the suspected cause of resident turns hitting prefill.
+		"pkey":              pkey,
+		"ckey":              ckey,
+		"known_hot_tokens":  knownHot,
+		"hot_prefix_tokens": hotPrefix,
+		"prefix_toks":       prefixToks,
+		"tail_toks":         tailToks,
+		// t1: wall-clock at admission, so decode occupancy can be crossed against the
+		// instant a turn ARRIVES (not when it finishes appearing in the log).
+		"t1_admit": time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	decodeHeaders := Headers{"x-sofmat-slot": slot}
 	admittedVia := decision.Route
@@ -625,15 +644,18 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 			if newExact < g.exactMin {
 				if newExact < n {
 					fields["admission"] = "cache-hot"
-					// Pin the decode call to the slot this conversation's KV actually
-					// lives in (convSlot, updated from the last handoff's restore slot).
-					// Without this the engine picks a slot by itself and usually misses
-					// the resident KV (measured 2026-09-21: 15k reusable, 484 used) —
-					// pickIdleSlot rotated the KV across slots, so LCP found nothing.
-					if si, err := strconv.Atoi(slot); err == nil {
-						merged["id_slot"] = si
-						merged["cache_prompt"] = true
-					}
+					// cache_prompt lets the engine reuse its slot cache; the engine
+					// selects the slot by its OWN content match (LCP), which is
+					// identity-correct. We deliberately do NOT pin id_slot to convSlot:
+					// convSlot goes stale between turns on a shared decode, and pinning
+					// it forced the decode onto a slot holding ANOTHER conversation's
+					// similar-sized KV — the count-based residency check was fooled and
+					// the engine reprocessed the whole prompt (measured 2026-09-21, ids
+					// 37/44: cache-hot with cache_n=0, prompt_n ~23-29k, 20-23 s). The
+					// no-pin decode-direct route was measured fast at 16k tokens (0.3 s);
+					// slots are stable now (per-slot residency fix), so the engine's own
+					// slot selection no longer needs the pin that once corrected rotation.
+					merged["cache_prompt"] = true
 				} else {
 					fields["admission"] = "exact-below-floor"
 				}

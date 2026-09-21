@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,7 +31,13 @@ type fakeEngine struct {
 	completions []int  // prompt token counts received by /completion
 	saved       []string
 	erased      int
-	held        int // tokens the engine reports it is holding (slot 0)
+	// heldBySlot models WHERE the engine's KV lives: slot id -> n_prompt_tokens.
+	// A real llama-server keeps a slot's prompt cache after the request ends and
+	// reuses it only when a request is pinned to THAT slot; a pin to an evicted
+	// slot reprocesses the whole prompt. Modelling placement per slot (not a
+	// single "held" number that always sat on slot 0) is what lets a test
+	// reproduce the stale-pin ping-pong: KV on slot X, the pin points at slot Y.
+	heldBySlot  map[int]int
 	restored    []string
 	restoreSlot string
 	restoreFail string           // when set, /slots/N?action=restore answers 500 with this
@@ -46,24 +53,23 @@ func writeTestJSON(w http.ResponseWriter, code int, v any) {
 
 func newFakeEngine(t *testing.T) *fakeEngine {
 	t.Helper()
-	e := &fakeEngine{dir: t.TempDir(), busy: true}
+	e := &fakeEngine{dir: t.TempDir(), busy: true, heldBySlot: map[int]int{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/slots", func(w http.ResponseWriter, r *http.Request) {
 		e.mu.Lock()
 		busy := e.busy
+		// busy: slots 0-2 generating, only slot 3 idle (so a handoff must land in
+		// 3). Each slot reports the KV it actually holds (heldBySlot), the way a
+		// real llama-server does — the residency probe reads exactly this, per slot.
+		out := make([]any, 4)
+		for id := 0; id < 4; id++ {
+			out[id] = map[string]any{
+				"id": id, "is_processing": busy && id < 3,
+				"n_prompt_tokens": float64(e.heldBySlot[id]),
+			}
+		}
 		e.mu.Unlock()
-		e.mu.Lock()
-		held := float64(e.held)
-		e.mu.Unlock()
-		// busy: slots 0-2 generating, only slot 3 idle (so a handoff must land in 3).
-		// slot 0 reports what the engine last processed, the way a real
-		// llama-server does — the residency probe reads exactly this.
-		writeTestJSON(w, 200, []any{
-			map[string]any{"id": 0, "is_processing": busy, "n_prompt_tokens": held},
-			map[string]any{"id": 1, "is_processing": busy},
-			map[string]any{"id": 2, "is_processing": busy},
-			map[string]any{"id": 3, "is_processing": false},
-		})
+		writeTestJSON(w, 200, out)
 	})
 	mux.HandleFunc("/apply-template", func(w http.ResponseWriter, r *http.Request) {
 		var b map[string]any
@@ -133,6 +139,9 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 		case "erase":
 			e.mu.Lock()
 			e.erased++
+			if n, err := strconv.Atoi(id); err == nil {
+				delete(e.heldBySlot, n) // the slot's KV is gone
+			}
 			e.mu.Unlock()
 			writeTestJSON(w, 200, map[string]any{"id_slot": id, "n_erased": 8000})
 		case "restore":
@@ -151,6 +160,9 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 			e.mu.Lock()
 			e.restored = append(e.restored, name)
 			e.restoreSlot = id
+			if n, err := strconv.Atoi(id); err == nil {
+				e.heldBySlot[n] = 8000 // the restored KV now lives in this slot
+			}
 			e.mu.Unlock()
 			writeTestJSON(w, 200, map[string]any{"id_slot": id, "filename": name, "n_restored": 8000,
 				"timings": map[string]any{"restore_ms": 62.0}})
@@ -161,20 +173,35 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
+		promptTokens := 0
+		if msgs, _ := json.Marshal(b["messages"]); len(msgs) > 0 {
+			promptTokens = len(msgs) / 4
+		}
+		slotID := 0
+		idSlotF, pinned := b["id_slot"].(float64)
+		if pinned {
+			slotID = int(idSlotF)
+		}
 		e.mu.Lock()
 		e.chats = append(e.chats, b)
-		// a real llama-server keeps what it just processed in the slot, and that is
-		// what the residency probe reads back on the next turn
-		if msgs, _ := json.Marshal(b["messages"]); len(msgs) > 0 {
-			e.held = len(msgs) / 4
-		}
-		e.mu.Unlock()
-		// the engine reused the restored KV only when pinned to the slot that holds it
-		promptN := 8001.0
-		if _, pinned := b["id_slot"]; pinned && b["cache_prompt"] == true {
+		// The engine reuses cache ONLY when pinned to a slot that actually holds
+		// this conversation's KV. A pin to an evicted slot reprocesses the whole
+		// prompt (prompt_n = the full count, cache_n 0) — the exact ping-pong the
+		// residency fix removes. A direct (unpinned) request processes the prompt
+		// too. Either way, the prompt now lives in the slot the engine used, and
+		// that is what the residency probe reads back on the next turn.
+		promptN := float64(promptTokens)
+		if promptN < 1 {
 			promptN = 1
 		}
-		tm := map[string]any{"prompt_n": promptN, "cache_n": 8001 - promptN, "predicted_n": 43, "predicted_per_second": 40.5}
+		cacheN := 0.0
+		if pinned && b["cache_prompt"] == true && e.heldBySlot[slotID] > 0 {
+			promptN = 1
+			cacheN = float64(e.heldBySlot[slotID])
+		}
+		e.heldBySlot[slotID] = promptTokens
+		e.mu.Unlock()
+		tm := map[string]any{"prompt_n": promptN, "cache_n": cacheN, "predicted_n": 43, "predicted_per_second": 40.5}
 		if s, _ := b["stream"].(bool); s {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(200)
@@ -483,6 +510,76 @@ func TestAutoModeCostAndCacheAware(t *testing.T) {
 	r.prefill.mu.Unlock()
 	if n != 1 {
 		t.Fatalf("no second prefill for a cache-hot turn: %d", n)
+	}
+}
+
+// TestStalePinnedSlotDoesNotReprocess reproduces the production ping-pong of
+// 2026-09-21 (measured 22/22 on a resident ~19k conversation). Between a user's
+// turns, other tasks on the shared decode engine clear idle slots, so the slot
+// convSlot remembers no longer holds this conversation's KV. The OLD aggregate
+// residency check ("is SOME slot big") then saw a NEIGHBOUR's big slot, called
+// the next turn cache-hot, pinned the evicted slot, and the decode reprocessed
+// the whole prompt (cache_n 0, prompt_n ~18923); Finish Forgot the record and
+// the following turn swung to a full prefill — both branches slow.
+//
+// With residency asked of the PINNED slot, the stale pin reads cold and the turn
+// is restored through the handoff (prompt_n 1) instead of pinned to an empty
+// slot. Without the fix this test fails: the follow-up is admitted cache-hot and
+// the decode reprocesses the whole prompt. It relies on the fake modelling KV
+// placement PER SLOT (heldBySlot) — a single held-on-slot-0 fake cannot express
+// "KV on slot X, pin points at slot Y".
+func TestStalePinnedSlotDoesNotReprocess(t *testing.T) {
+	// kvMiss mirrors gateway.kvMissPromptTokens: past this many prompt tokens the
+	// restored/cached KV was NOT reused and the prompt was re-processed.
+	const kvMiss = 64
+	r := newRig(t, func(e *fakeEngine) string { return e.dir }) // decode busy: only slot 3 idle
+
+	convA := func(extra ...map[string]any) map[string]any {
+		msgs := []any{map[string]any{"role": "user", "content": longUser}}
+		for _, m := range extra {
+			msgs = append(msgs, m)
+		}
+		return map[string]any{"messages": msgs}
+	}
+
+	// Turn 1: large cold conversation -> prefill + handoff, restored into slot 3.
+	if code, _ := postChat(t, r.gateway.URL, convA()); code != 200 {
+		t.Fatalf("turn 1 failed: %d", code)
+	}
+	if rec := lastRequestRecord(t, r.gateway.URL); rec["admitted_via"] != "prefill" || rec["prompt_n"] != 1.0 {
+		t.Fatalf("turn 1 must hand off and reuse the restored KV: %v", rec)
+	}
+	r.decode.mu.Lock()
+	landed, held3 := r.decode.restoreSlot, r.decode.heldBySlot[3]
+	r.decode.mu.Unlock()
+	if landed != "3" || held3 <= 0 {
+		t.Fatalf("turn 1 KV must live in slot 3: landed=%q held=%d", landed, held3)
+	}
+
+	// Between turns: another task cleared David's idle slot 3, and a NEIGHBOUR
+	// conversation now occupies a different slot (big). convSlot still points at 3.
+	r.decode.mu.Lock()
+	delete(r.decode.heldBySlot, 3) // David's KV evicted from its slot
+	r.decode.heldBySlot[1] = 20000 // a neighbour's big slot (would fool the aggregate)
+	r.decode.mu.Unlock()
+
+	// Turn 2: same conversation, a small new turn on top (the whole history is
+	// resent, so the estimate would want to call this cache-hot and pin slot 3).
+	if code, _ := postChat(t, r.gateway.URL, convA(
+		map[string]any{"role": "assistant", "content": "ok"},
+		map[string]any{"role": "user", "content": "y ahora amplia el punto tres, por favor"},
+	)); code != 200 {
+		t.Fatalf("turn 2 failed: %d", code)
+	}
+	rec := lastRequestRecord(t, r.gateway.URL)
+	pn, _ := rec["prompt_n"].(float64)
+	if rec["admission"] == "cache-hot" && pn > kvMiss {
+		t.Fatalf("stale pin: admitted cache-hot but the decode reprocessed the whole prompt "+
+			"(prompt_n=%v) — pinned to an evicted slot. That is the ping-pong: %v", rec["prompt_n"], rec)
+	}
+	// the pinned slot really held (or was restored with) the KV, so the turn reuses it
+	if pn != 1.0 {
+		t.Fatalf("turn 2 must reuse the KV (prompt_n 1), got %v: %v", rec["prompt_n"], rec)
 	}
 }
 

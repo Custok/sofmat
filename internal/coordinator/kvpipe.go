@@ -555,6 +555,41 @@ func (k *kvPipe) slotsHolding(engine string, want int) (big, cached int, ok bool
 	return big, cached, true
 }
 
+// slotHeld reports how many prompt tokens ONE specific slot holds, and ok=false
+// when the engine could not be read (a probe failure must never be turned into
+// extra work).
+//
+// slotsHolding asks "is SOME slot big"; slotHeld asks about the EXACT slot the
+// admission is about to pin the decode call to (id_slot). Pinning id_slot forces
+// the engine onto that one slot, so it is the only slot whose residency can
+// possibly help: a big slot elsewhere belongs to a neighbouring conversation and
+// cannot be reused by a pin. Trusting the aggregate is what produced the
+// ping-pong of 2026-09-21 — convSlot went stale between turns (other tasks on the
+// shared decode cleared idle slots), the aggregate check saw a neighbour's big
+// slot and called the turn "cache-hot", the decode was pinned to an evicted slot
+// and reprocessed the whole ~19k prompt (cache_n 0, prompt_n ~18923).
+func (k *kvPipe) slotHeld(engine, slotID string) (held int, ok bool) {
+	slots := k.slotsAt(engine)
+	if slots == nil {
+		return 0, false
+	}
+	for _, s := range slots {
+		id := ""
+		if v, isNum := s["id"].(float64); isNum {
+			id = fmt.Sprintf("%d", int(v))
+		}
+		if id != slotID {
+			continue
+		}
+		if v, isNum := s["n_prompt_tokens"].(float64); isNum {
+			return int(v), true
+		}
+		return 0, true
+	}
+	// the slot was not reported at all: readable engine, that slot holds nothing.
+	return 0, true
+}
+
 // engineHeld is what an engine's slots hold that a new prompt cannot have,
 // re-read at most once a second per engine. Any engine can be asked to prefill
 // AND to decode, and both share ONE unified KV budget, so reserving prefill

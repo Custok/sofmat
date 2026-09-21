@@ -557,10 +557,16 @@ func (e *engineError) Error() string {
 // new, 18 of its 21.7 seconds spent prefilling on the decode. A proxy for
 // identity — the same shape the fleet spent that day finding elsewhere.
 //
-// So a big slot is attributed to this conversation only when EVERY slot the
-// engine is caching is big. One conversation cached and it is big => it is mine
-// (the old rule, unchanged). Three cached and only one big => mine may be one
-// of the two small ones, and "unknown" has to read as cold.
+// There are two callers, and they know different things:
+//   - the admission FLOW passes the pinned slot (slot != ""). The decode call
+//     will carry id_slot = slot, so residency is answered by THAT slot alone:
+//     a big slot elsewhere cannot be reached by the pin. See the slot-pinned
+//     branch below (added 2026-09-21 to stop the stale-convSlot ping-pong).
+//   - a STANDALONE probe passes slot == "" and has no pinned slot to trust, so
+//     a big slot is attributed to this conversation only when EVERY slot the
+//     engine is caching is big. One conversation cached and it is big => it is
+//     mine. Three cached and only one big => mine may be one of the two small
+//     ones, and "unknown" has to read as cold.
 //
 // The count comes from the engine's own slots and not from the balancer's
 // session map on purpose: that map is not kept when there is a single decode
@@ -576,29 +582,38 @@ func (s *Server) cacheResident(kp *kvPipe, b gateway.Body, expect int, slot stri
 	if n == nil {
 		return true
 	}
-	// Slot-pinned path: the conversation is routed to ONE slot deterministically
-	// (id_slot imposed on the decode call), so residency is identity by
-	// construction — ask that EXACT slot, not the aggregate. This is what makes
-	// reuse reliable once the engine keeps idle slots (--no-cache-idle-slots): the
-	// conversation's KV stays in ITS slot and only that slot can confirm it, with
-	// no risk of attributing another conversation's big slot to this one (the
-	// 2026-09-09 misattribution the aggregate rule below was added to avoid).
+	if slot != "" {
+		// Slot-pinned path: the decode call will carry id_slot = slot, which forces
+		// the engine onto EXACTLY that slot. So the only residency that can help is
+		// that slot's own — ask it directly, not the aggregate.
+		//
+		// The aggregate ("some slot holds ~expect") was too lenient: convSlot goes
+		// stale between a user's turns because other tasks on the shared decode
+		// clear idle slots, and then a neighbour's big slot answered "yes, resident"
+		// for a conversation whose own slot had been evicted. The admission called
+		// the turn cache-hot, pinned the evicted slot, and the decode reprocessed
+		// the whole prompt (measured 2026-09-21: 15k reusable, cache_n 0,
+		// prompt_n ~18923). Asking the pinned slot directly makes the fast path land
+		// only where the KV really is; when it has moved or been evicted the honest
+		// answer is "cold" and the admission restores it through the handoff (which
+		// pins the slot it restored into) instead of pinning an empty one.
+		//
+		// This cannot reintroduce the 2026-09-09 cross-conversation misattribution:
+		// a big slot belonging to ANOTHER conversation is at a different id than the
+		// one we are about to pin, so it never satisfies this check.
+		held, okSlot := kp.slotHeld(n.url, slot)
+		if !okSlot {
+			return true // unreadable: a probe failure must not create work
+		}
+		return held >= int(float64(expect)*0.8)
+	}
+	// Standalone probe with no prefix evidence and no pinned slot: a big slot may
+	// be another client's, so mine is proven only when EVERY cached conversation is
+	// big (2026-09-09).
 	big, cached, ok := kp.slotsHolding(n.url, expect)
 	if !ok {
 		return true // unreadable: a probe failure must not create work
 	}
-	if slot != "" {
-		// Called from the admission flow: it only reaches here because bestPrefix
-		// already matched THIS conversation's previous prompt, so identity is
-		// established. A single slot holding ~expect tokens is therefore ours —
-		// trust it even when smaller slots (other conversations, kept resident by
-		// --no-cache-idle-slots) sit alongside. The stricter "every cached slot
-		// big" rule below over-rejects in that mixed state and sent every one of
-		// David's turns to a full reprocess (measured 2026-09-21).
-		return big > 0
-	}
-	// Standalone probe with no prefix evidence: a big slot may be another client's,
-	// so mine is proven only when EVERY cached conversation is big (2026-09-09).
 	return cached > 0 && big >= cached
 }
 

@@ -131,13 +131,20 @@ func TestUnreadableEngineDoesNotCreateWork(t *testing.T) {
 	}
 }
 
-// TestFlowTrustsOneBigSlot: in the admission flow (slot != ""), bestPrefix has
-// already matched THIS conversation's previous prompt, so identity is
-// established. One slot holding ~expect is then ours even when smaller slots of
-// other conversations sit alongside — the mixed state that --no-cache-idle-slots
-// creates and that the strict rule over-rejected, sending every turn to a full
-// reprocess (2026-09-21).
-func TestFlowTrustsOneBigSlot(t *testing.T) {
+// TestFlowVerifiesResidencyOnPinnedSlot: in the admission flow (slot != "") the
+// decode call will carry id_slot = slot, which forces the engine onto EXACTLY
+// that slot. So residency must be answered by THAT slot, not the aggregate.
+//
+// This replaces the earlier "trust any big slot" rule (2026-09-21), which was
+// too lenient: convSlot goes stale between a user's turns (other tasks on the
+// shared decode clear idle slots), and a neighbour's big slot then answered
+// "yes, resident" for a conversation whose own slot had been evicted. The
+// admission pinned that evicted slot and the decode reprocessed the whole prompt
+// — the ping-pong. Asking the pinned slot directly makes the fast path land only
+// where the KV really is; when it is not there the honest "cold" routes the turn
+// to the handoff, which restores the KV and pins the slot it landed in.
+func TestFlowVerifiesResidencyOnPinnedSlot(t *testing.T) {
+	// slot 0 holds 20k, slot 2 holds only 5k, slot 1 holds 3k.
 	engine := engineWithSlots(t, 20000, 3000, 5000, 0)
 	s := residentServer(t, engine)
 	mine := convo("david conversacion larga " + strings.Repeat("k", 400))
@@ -146,8 +153,14 @@ func TestFlowTrustsOneBigSlot(t *testing.T) {
 	if s.cacheResident(s.kp, mine, 15000, "") {
 		t.Fatal("standalone: slots mezclados no prueban que el grande sea mío")
 	}
-	// flow (slot set): identity already established by bestPrefix -> one big slot is mine
-	if !s.cacheResident(s.kp, mine, 15000, "2") {
-		t.Fatal("en el flujo, un slot con ~expect es mío aunque haya slots pequeños al lado")
+	// flow, pinned to slot 0 which really holds ~expect -> resident (fast path ok)
+	if !s.cacheResident(s.kp, mine, 15000, "0") {
+		t.Fatal("el slot fijado (0) sí tiene la KV: debe leerse residente")
+	}
+	// flow, pinned to slot 2 which holds only 5k: pinning it would reprocess the
+	// whole prompt, so it must read as COLD even though a big slot (0) sits beside
+	// it. This is the stale-convSlot case the ping-pong fix corrects.
+	if s.cacheResident(s.kp, mine, 15000, "2") {
+		t.Fatal("un slot grande VECINO no lo puede usar un pin al slot 2: debe leerse frío")
 	}
 }
