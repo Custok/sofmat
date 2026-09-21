@@ -105,7 +105,7 @@ type Gateway struct {
 	tokens    Tokens               // optional; supersedes count, enables the cache-aware estimate
 	busy      DecodeBusy           // optional; nil = handoff whenever admitted
 	allowed   func(Body) bool      // optional; false = this request must not be handed off
-	resident  func(Body, int) bool // optional; false = the engine no longer holds that prefix
+	resident  func(Body, int, string) bool // optional; false = the engine no longer holds that prefix in the given slot
 	noThink   bool                 // ask the template to skip the chain-of-thought
 	replyRoom func(int) int        // how big a reply the engine can still host
 	mode      string               // ModeBusy / ModeAlways / ModeAuto
@@ -116,6 +116,7 @@ type Gateway struct {
 	log       *RequestLog
 	known     *KnownPrefixes
 	last      *lastPrompts // per prefix key: ids of the last prompt routed (cache lower bound)
+	convSlot  *convSlots   // per conversation: the decode slot its KV actually lives in
 	cost      *costModel   // measured pp / handoff EMAs for ModeAuto
 
 	// circuit breaker: after a prefill-side failure (tokenize, prefill, handoff)
@@ -159,7 +160,7 @@ type Options struct {
 	// was evicted is admitted as cache-hot and the decode silently reprocesses
 	// the whole prompt (measured 2026-09-07: 78 329 tokens, 184.5 s).
 	// nil = assume resident (previous behaviour).
-	CacheResident func(Body, int) bool
+	CacheResident func(Body, int, string) bool
 
 	// HandoffAllowed vetoes the handoff for a request the caller knows must not
 	// take it. With more than one decode engine the restored state lands in the
@@ -256,8 +257,54 @@ func New(o Options) (*Gateway, error) {
 		log:        NewRequestLog(500, o.KeepContent),
 		known:      known,
 		last:       newLastPrompts(8 * n),
+		convSlot:   newConvSlots(8 * n),
 		cost:       newCostModel(),
 	}, nil
+}
+
+// convSlots remembers which decode slot each conversation's KV lives in, so a
+// continuing turn is checked and pinned to THAT slot instead of a freshly hashed
+// one. Without it the ring re-derives a slot from the prefix key while the KV
+// actually landed wherever the handoff restored it, so every turn checked the
+// wrong slot, missed, and reprocessed the whole prompt. Bounded LRU: a stale
+// entry is only a guess the residency probe corrects (a cold slot reads cold).
+type convSlots struct {
+	mu  sync.Mutex
+	m   map[string]string
+	ord []string
+	cap int
+}
+
+func newConvSlots(capacity int) *convSlots {
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &convSlots{m: map[string]string{}, cap: capacity}
+}
+
+func (c *convSlots) get(key string) string {
+	if c == nil || key == "" {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.m[key]
+}
+
+func (c *convSlots) set(key, slot string) {
+	if c == nil || key == "" || slot == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.m[key]; !ok {
+		if len(c.ord) >= c.cap {
+			delete(c.m, c.ord[0])
+			c.ord = c.ord[1:]
+		}
+		c.ord = append(c.ord, key)
+	}
+	c.m[key] = slot
 }
 
 // Mode reports the disaggregation mode in force.
@@ -325,21 +372,21 @@ func (g *Gateway) Chat(h Headers, body Body) (Body, error) {
 
 // residentFor reports whether the engine that will serve this request still
 // holds about expect tokens of its prefix. Unknown (no probe) = assume yes.
-func (g *Gateway) residentFor(body Body, expect int) bool {
+func (g *Gateway) residentFor(body Body, expect int, slot string) bool {
 	if g.resident == nil || expect <= 0 {
 		return true
 	}
 	ok := true
 	func() {
 		defer func() { _ = recover() }() // a probe must never take the request down
-		ok = g.resident(body, expect)
+		ok = g.resident(body, expect, slot)
 	}()
 	return ok
 }
 
 // residentHot zeroes a "hot prefix" the engine no longer holds.
-func (g *Gateway) residentHot(body Body, hot int) int {
-	if hot > 0 && !g.residentFor(body, hot) {
+func (g *Gateway) residentHot(body Body, hot int, slot string) int {
+	if hot > 0 && !g.residentFor(body, hot, slot) {
 		return 0
 	}
 	return hot
@@ -426,9 +473,15 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	if seed := conversationSeed(body); seed != "" {
 		ckey = PrefixKey(systemPrompt+"\x00"+seed, tenant)
 	}
-	slot, err := g.ring.Route(pkey)
-	if err != nil {
-		return nil, err
+	// slot affinity: reuse the slot this conversation's KV already lives in, so it
+	// does not rotate between turns (the ring only seeds it on the first turn).
+	slot := g.convSlot.get(ckey)
+	if slot == "" {
+		s, err := g.ring.Route(pkey)
+		if err != nil {
+			return nil, err
+		}
+		slot = s
 	}
 
 	// admission: decode-direct, or dedicated prefill + KV handoff first.
@@ -437,7 +490,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	decision := ClassifyAdmission(AdmissionInput{
 		PrefixTokens:     prefixToks,
 		TailTokens:       tailToks,
-		HotPrefixTokens:  g.residentHot(body, g.known.HotTokens(pkey)),
+		HotPrefixTokens:  g.residentHot(body, g.known.HotTokens(pkey), slot),
 		Threshold:        g.threshold,
 		PrefillAvailable: g.Disaggregated(),
 	})
@@ -546,7 +599,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 			// sintético o JSON), o sea que no se puede acotar. Cuando no hay conteo
 			// —peticiones pequeñas, que no rozan el techo— se sigue estimando.
 			decodeHeaders[ExactTokensHeader] = strconv.Itoa(n)
-			if newExact < g.exactMin && !g.residentFor(merged, n-newExact) {
+			if newExact < g.exactMin && !g.residentFor(merged, n-newExact, slot) {
 				// the engine no longer holds the prefix we were counting on: this
 				// prompt is cold, whatever the bookkeeping says. Say so out loud
 				// and let the cost model route it (the prefill node can chew it
@@ -572,6 +625,15 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 			if newExact < g.exactMin {
 				if newExact < n {
 					fields["admission"] = "cache-hot"
+					// Pin the decode call to the slot this conversation's KV actually
+					// lives in (convSlot, updated from the last handoff's restore slot).
+					// Without this the engine picks a slot by itself and usually misses
+					// the resident KV (measured 2026-09-21: 15k reusable, 484 used) —
+					// pickIdleSlot rotated the KV across slots, so LCP found nothing.
+					if si, err := strconv.Atoi(slot); err == nil {
+						merged["id_slot"] = si
+						merged["cache_prompt"] = true
+					}
 				} else {
 					fields["admission"] = "exact-below-floor"
 				}
@@ -644,6 +706,11 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 			g.last.remember(pkey, ids)
 		}
 	}
+
+	// The conversation's KV now lives in `slot` (processed there, or the handoff
+	// restored it there and updated `slot` to where it landed). Remember it so the
+	// next turn checks and pins THIS slot instead of a freshly hashed one.
+	g.convSlot.set(ckey, slot)
 
 	return &Plan{
 		Body:       merged,

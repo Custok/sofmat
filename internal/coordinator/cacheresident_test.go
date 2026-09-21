@@ -81,7 +81,7 @@ func TestBigSlotOfAnotherConversationIsNotMine(t *testing.T) {
 	s := residentServer(t, engine)
 
 	mine := convo("proyecto tres " + strings.Repeat("x", 400))
-	if s.cacheResident(s.kp, mine, 15000) {
+	if s.cacheResident(s.kp, mine, 15000, "") {
 		t.Fatal("un slot grande de OTRA conversación se atribuyó a la mía: " +
 			"eso es lo que costó 18 s de prefill en frío")
 	}
@@ -95,7 +95,7 @@ func TestAloneOnTheEngineStillTrustsItsSlot(t *testing.T) {
 	s := residentServer(t, engine)
 
 	only := convo("una sola conversación " + strings.Repeat("y", 400))
-	if !s.cacheResident(s.kp, only, 15000) {
+	if !s.cacheResident(s.kp, only, 15000, "") {
 		t.Fatal("con UNA sola conversación en el motor, su slot grande es suyo: " +
 			"desconfiar aquí manda al prefill algo que ya está caliente")
 	}
@@ -108,7 +108,7 @@ func TestEnoughBigSlotsForEveryone(t *testing.T) {
 	engine := engineWithSlots(t, 20000, 20000, 20000, 0)
 	s := residentServer(t, engine)
 	mine := convo("gamma " + strings.Repeat("z", 400))
-	if !s.cacheResident(s.kp, mine, 15000) {
+	if !s.cacheResident(s.kp, mine, 15000, "") {
 		t.Fatal("tres conversaciones y tres slots grandes: hay uno para cada una")
 	}
 }
@@ -126,7 +126,28 @@ func TestUnreadableEngineDoesNotCreateWork(t *testing.T) {
 	t.Cleanup(dead.Close)
 	s := residentServer(t, dead)
 	c := convo("lo que sea " + strings.Repeat("w", 400))
-	if !s.cacheResident(s.kp, c, 15000) {
+	if !s.cacheResident(s.kp, c, 15000, "") {
 		t.Fatal("una sonda que no se puede leer no debe convertirse en trabajo extra")
+	}
+}
+
+// TestFlowTrustsOneBigSlot: in the admission flow (slot != ""), bestPrefix has
+// already matched THIS conversation's previous prompt, so identity is
+// established. One slot holding ~expect is then ours even when smaller slots of
+// other conversations sit alongside — the mixed state that --no-cache-idle-slots
+// creates and that the strict rule over-rejected, sending every turn to a full
+// reprocess (2026-09-21).
+func TestFlowTrustsOneBigSlot(t *testing.T) {
+	engine := engineWithSlots(t, 20000, 3000, 5000, 0)
+	s := residentServer(t, engine)
+	mine := convo("david conversacion larga " + strings.Repeat("k", 400))
+
+	// standalone probe (slot ""): a lone big slot may be another client's -> cold
+	if s.cacheResident(s.kp, mine, 15000, "") {
+		t.Fatal("standalone: slots mezclados no prueban que el grande sea mío")
+	}
+	// flow (slot set): identity already established by bestPrefix -> one big slot is mine
+	if !s.cacheResident(s.kp, mine, 15000, "2") {
+		t.Fatal("en el flujo, un slot con ~expect es mío aunque haya slots pequeños al lado")
 	}
 }

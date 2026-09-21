@@ -390,7 +390,7 @@ func TestEvictedCacheIsNotBelieved(t *testing.T) {
 	ids := append(seq(40000, 0), seq(300, 90000)...)
 	gw, c := newTestGW(t, func(o *Options) {
 		o.Tokens = func(Body) ([]int, error) { return ids, nil }
-		o.CacheResident = func(_ Body, expect int) bool { return resident }
+		o.CacheResident = func(_ Body, expect int, _ string) bool { return resident }
 	})
 	// first turn: cold, goes through the prefill and is recorded
 	gw.Chat(Headers{}, chatBody(bigPrompt, "primera "+bigPrompt))

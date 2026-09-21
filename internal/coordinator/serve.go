@@ -96,7 +96,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		// the engine itself is the only honest source on whether a conversation's
 		// prefix survived: the gateway records what it routed, not what the engine
 		// evicted to make room for somebody else.
-		opts.CacheResident = func(b gateway.Body, expect int) bool { return s.cacheResident(kp, b, expect) }
+		opts.CacheResident = func(b gateway.Body, expect int, slot string) bool { return s.cacheResident(kp, b, expect, slot) }
 		// symmetric routing: the prefill runs on the engine where the conversation
 		// does NOT live, and the state is restored into the engine that will serve
 		// it. So every conversation can take the handoff — no veto needed.
@@ -568,7 +568,7 @@ func (e *engineError) Error() string {
 // configuration most installations run. Being wrong this
 // way costs a handoff that was not needed; being wrong the other way costs a
 // full cold prefill on the engine that should have been protected from it.
-func (s *Server) cacheResident(kp *kvPipe, b gateway.Body, expect int) bool {
+func (s *Server) cacheResident(kp *kvPipe, b gateway.Body, expect int, slot string) bool {
 	if s.bal == nil || s.bal.Len() == 0 || kp == nil {
 		return true
 	}
@@ -576,12 +576,29 @@ func (s *Server) cacheResident(kp *kvPipe, b gateway.Body, expect int) bool {
 	if n == nil {
 		return true
 	}
+	// Slot-pinned path: the conversation is routed to ONE slot deterministically
+	// (id_slot imposed on the decode call), so residency is identity by
+	// construction — ask that EXACT slot, not the aggregate. This is what makes
+	// reuse reliable once the engine keeps idle slots (--no-cache-idle-slots): the
+	// conversation's KV stays in ITS slot and only that slot can confirm it, with
+	// no risk of attributing another conversation's big slot to this one (the
+	// 2026-09-09 misattribution the aggregate rule below was added to avoid).
 	big, cached, ok := kp.slotsHolding(n.url, expect)
 	if !ok {
 		return true // unreadable: a probe failure must not create work
 	}
-	// Every cached conversation is big => mine is big too. Some are small =>
-	// mine may be one of those, and "unknown" has to read as cold.
+	if slot != "" {
+		// Called from the admission flow: it only reaches here because bestPrefix
+		// already matched THIS conversation's previous prompt, so identity is
+		// established. A single slot holding ~expect tokens is therefore ours —
+		// trust it even when smaller slots (other conversations, kept resident by
+		// --no-cache-idle-slots) sit alongside. The stricter "every cached slot
+		// big" rule below over-rejects in that mixed state and sent every one of
+		// David's turns to a full reprocess (measured 2026-09-21).
+		return big > 0
+	}
+	// Standalone probe with no prefix evidence: a big slot may be another client's,
+	// so mine is proven only when EVERY cached conversation is big (2026-09-09).
 	return cached > 0 && big >= cached
 }
 
