@@ -350,6 +350,7 @@ type Plan struct {
 	prefixToks int
 	alphaKey   string
 	viaPrefill bool
+	tokenized  bool // Prepare already ran the tokenizer this turn (success or fail)
 	start      time.Time
 }
 
@@ -552,7 +553,8 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	decodeHeaders := Headers{"x-sofmat-slot": slot}
 	admittedVia := decision.Route
 	viaPrefill := false
-	var ids []int // exact prompt ids when tokenized this request (cache bookkeeping)
+	var ids []int      // exact prompt ids when tokenized this request (cache bookkeeping)
+	tokenized := false // whether the prefill tokenizer was dialled this turn (success or fail)
 	if decision.Route == "prefill" {
 		// fail-soft: any prefill/handoff problem degrades to decode-direct.
 		admittedVia = "decode-fallback"
@@ -586,6 +588,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		switch {
 		case !goPrefill:
 		case g.tokens != nil:
+			tokenized = true
 			var err error
 			ids, err = g.tokensSafe(merged)
 			if err != nil {
@@ -743,6 +746,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		prefixToks: prefixToks,
 		alphaKey:   alphaKey,
 		viaPrefill: viaPrefill,
+		tokenized:  tokenized,
 		start:      start,
 	}, nil
 }
@@ -781,6 +785,21 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 		// record lets the next turn recognise the continuation and serve decode-direct;
 		// if the KV really is gone the engine content-matches and reprocesses honestly.
 		p.fields["prefix_cold"] = true
+	}
+	// Keep g.last fresh across DECODE-DIRECT turns too. Prepare only records g.last
+	// when it tokenized (the prefill route); a run of decode-direct turns
+	// (small-new-prefill / prefix-hot) leaves g.last stale, so the next turn that
+	// crosses the est_new threshold finds bestPrefix ~0, counts the whole resident
+	// conversation as new, and is shipped to a wasteful prefill+handoff with
+	// prompt_n=1 — the engine had the conversation ENTIRE (measured 2026-09-22 on
+	// David's live turns: 33 s wasted over 3 turns, each reprocessing ~20-30k it
+	// already held). Tokenize here, AFTER the response, so it never adds latency to
+	// the turn; the next turn's bestPrefix then recognises the prefix and stays
+	// decode-direct. Best-effort: a tokenizer hiccup just leaves g.last as it was.
+	if !p.tokenized && !g.prefillDown() && g.tokens != nil && p.ckey != "" {
+		if ids, err := g.tokensSafe(p.Body); err == nil && len(ids) > 0 {
+			g.last.remember(p.ckey, ids)
+		}
 	}
 	// feed the cost model with what the engines just measured.
 	g.cost.observe(p.fields, resp, p.viaPrefill)

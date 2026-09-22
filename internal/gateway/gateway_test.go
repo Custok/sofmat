@@ -199,6 +199,59 @@ func TestColdPrefixForgottenAfterEngineMiss(t *testing.T) {
 	}
 }
 
+// A run of DECODE-DIRECT turns must keep g.last fresh, so when the conversation
+// finally crosses the est_new threshold the exact recount recognises the resident
+// prefix and stays decode-direct instead of shipping the whole thing to a
+// prefill+handoff. Before the fix, decode-direct turns never tokenized, g.last
+// stayed empty, bestPrefix returned ~0, and the crossing turn went large-new-prefill
+// with prompt_n=1 — the engine held the conversation ENTIRE (2026-09-22, David's
+// live turns: 33 s wasted over 3 turns reprocessing ~20-30k it already had).
+func TestDecodeDirectTurnsKeepPrefixWarm(t *testing.T) {
+	gw, c := newTestGW(t, func(o *Options) {
+		o.Tokens = func(b Body) ([]int, error) {
+			raw, _ := json.Marshal(b["messages"]) // shared content -> shared leading ids
+			ids := make([]int, len(raw)/4)
+			for i := range ids {
+				h := 0
+				for _, ch := range raw[4*i : 4*i+4] {
+					h = h*31 + int(ch)
+				}
+				ids[i] = 1000 + h%50000
+			}
+			return ids, nil
+		}
+	})
+	base := strings.Repeat("y", 22000) // ~5.5k est. tokens: turn 1 stays UNDER the 6144 threshold
+	conv := func(extra string) Body {
+		msgs := []any{
+			map[string]any{"role": "system", "content": "s"},
+			map[string]any{"role": "user", "content": base},
+		}
+		if extra != "" {
+			msgs = append(msgs,
+				map[string]any{"role": "assistant", "content": "ok"},
+				map[string]any{"role": "user", "content": extra})
+		}
+		return Body{"messages": msgs}
+	}
+	// turn 1: decode-direct (small-new-prefill), so Prepare does NOT tokenize.
+	// Its Finish must tokenize + remember g.last so the next turn can recognise it.
+	gw.Chat(Headers{}, conv(""))
+	if a, _ := lastRecord(t, gw)["admission"].(string); a != "small-new-prefill" && a != "prefix-hot" {
+		t.Fatalf("test premise: turn 1 must be decode-direct (got %q)", a)
+	}
+	pBefore := len(c.prefill)
+	// turn 2: same conversation + a delta that pushes the whole prompt over exactMin
+	// (8192). Warm g.last -> only the delta is new -> decode-direct. Cold -> the whole
+	// ~9k counts as new -> large-new-prefill.
+	gw.Chat(Headers{}, conv(strings.Repeat("z", 14000)))
+	rec := lastRecord(t, gw)
+	if len(c.prefill) != pBefore {
+		t.Fatalf("crossing turn re-prefilled a resident conversation: prefill %d->%d, admission=%v new_tokens=%v",
+			pBefore, len(c.prefill), rec["admission"], rec["new_tokens"])
+	}
+}
+
 // An engine miss on the SHARED system prefix must not forget the CONVERSATION's
 // own last-prompt record. It used to (g.last.forget(ckey) on any cache-cold
 // reply), so the next turn's bestPrefix returned ~0, the whole still-resident
