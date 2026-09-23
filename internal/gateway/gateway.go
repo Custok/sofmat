@@ -118,6 +118,7 @@ type Gateway struct {
 	log         *RequestLog
 	known       *KnownPrefixes
 	prefixExact *KnownPrefixes // per prefix key: the EXACT prefix token count (tokenizer), cached
+	convLast    *convTurns     // per conversation: shape + tokens the decode slot held after its last turn
 	last        *lastPrompts   // per prefix key: ids of the last prompt routed (cache lower bound)
 	convSlot    *convSlots     // per conversation: the decode slot its KV actually lives in
 	cost        *costModel     // measured pp / handoff EMAs for ModeAuto
@@ -282,6 +283,7 @@ func New(o Options) (*Gateway, error) {
 		log:         NewRequestLog(500, o.KeepContent),
 		known:       known,
 		prefixExact: mustKnownPrefixes(64),
+		convLast:    newConvTurns(8 * n),
 		last:        newLastPrompts(8 * n),
 		convSlot:    newConvSlots(8 * n),
 		cost:        newCostModel(),
@@ -374,6 +376,7 @@ type Plan struct {
 	pkey       string
 	ckey       string
 	prefixToks int
+	tailToks   int // estimated tail: with prefixToks, the SHAPE of this prompt (fix#10 credit)
 	alphaKey   string
 	viaPrefill bool
 	tokenized  bool // Prepare already ran the tokenizer this turn (success or fail)
@@ -448,6 +451,46 @@ func (g *Gateway) prefixTokens(pkey string, body Body) (int, bool) {
 	}
 	g.prefixExact.Record(pkey, n)
 	return n, true
+}
+
+// convTurn is what a conversation's last turn left in its decode slot, plus the
+// shape of the prompt that built it (estimated prefix and tail), so the next
+// turn is credited only when it continues THAT prompt.
+type convTurn struct {
+	prefix int // estimated prefix tokens of the prompt that built the slot
+	tail   int // estimated tail tokens of that prompt
+	total  int // tokens the slot held afterwards (cache_n + prompt_n + predicted_n)
+}
+
+// convTurns is a bounded map of ckey → convTurn (cleared wholesale when full:
+// a lost entry only costs one conservative estimate).
+type convTurns struct {
+	mu  sync.Mutex
+	cap int
+	m   map[string]convTurn
+}
+
+func newConvTurns(capacity int) *convTurns {
+	if capacity <= 0 {
+		capacity = 32
+	}
+	return &convTurns{cap: capacity, m: map[string]convTurn{}}
+}
+
+func (c *convTurns) get(key string) (convTurn, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t, ok := c.m[key]
+	return t, ok
+}
+
+func (c *convTurns) set(key string, t convTurn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.m) >= c.cap {
+		c.m = map[string]convTurn{}
+	}
+	c.m[key] = t
 }
 
 // mustKnownPrefixes builds a registry with a capacity that is a constant here,
@@ -600,10 +643,27 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	// shares the system prompt. Behaviour is unchanged: same call, same value.
 	knownHot := g.known.HotTokens(pkey)
 	hotPrefix := g.residentHot(body, knownHot, slot)
+	// fix#10: tokens of THIS conversation the slot verifiably still holds from
+	// its last turn (prefix + history + reply). Without it the whole tail counted
+	// as new and an agentic turn whose tool results pile up in the history was
+	// shipped to a prefill that rebuilt 51 817 tokens when the decode lacked
+	// 8 226 (2026-09-23 23:05, 41 s). Unknown or not resident = 0 (as before).
+	// Credited ONLY when this request has the SAME SHAPE as the turn that left
+	// those tokens — same estimated prefix (a closing call without tools[]
+	// renders another prompt from the start: 2 415 vs 13 616, ids 18/25) and a
+	// tail that only grew (append-only) — and the learned slot still holds
+	// ≥ 0.8× of them. Occupancy alone is NOT reuse (id 25: 52 724 held, 2 473
+	// matched); a mismatch credits nothing and the estimate is as before.
+	resident := 0
+	if ct, ok := g.convLast.get(ckey); ok && ct.total > 0 && ct.prefix == prefixToks && tailToks >= ct.tail &&
+		g.residentFor(body, ct.total, slot) {
+		resident = ct.total
+	}
 	decision := ClassifyAdmission(AdmissionInput{
 		PrefixTokens:     prefixToks,
 		TailTokens:       tailToks,
 		HotPrefixTokens:  hotPrefix,
+		ResidentTokens:   resident,
 		Threshold:        g.threshold,
 		PrefillAvailable: g.Disaggregated(),
 	})
@@ -649,6 +709,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		"ckey":              ckey,
 		"known_hot_tokens":  knownHot,
 		"hot_prefix_tokens": hotPrefix,
+		"resident_toks":     resident, // this conversation's tokens still in its slot (credited against est_new)
 		"prefix_toks":       prefixToks,
 		"prefix_exact":      prefixExact, // true = tokenizer count (cached per pkey); false = chars/4
 		"tail_toks":         tailToks,
@@ -855,6 +916,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		pkey:       pkey,
 		ckey:       ckey,
 		prefixToks: prefixToks,
+		tailToks:   tailToks,
 		alphaKey:   alphaKey,
 		viaPrefill: viaPrefill,
 		tokenized:  tokenized,
@@ -890,6 +952,12 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 			// the slot keeps the reply too: /slots reports prompt + generated (+1
 			// for the stop token), measured 2026-09-23 22:31 (16 481 + 123 -> 16 605).
 			gen, _ := timingInt(resp, "predicted_n")
+			// what the slot holds of this conversation now, with the shape of the
+			// prompt that built it: the next turn's admission credits it (fix#10)
+			// only if it keeps that shape and the slot still has it.
+			if p.ckey != "" && cn+pn+gen > 0 {
+				g.convLast.set(p.ckey, convTurn{prefix: p.prefixToks, tail: p.tailToks, total: cn + pn + gen})
+			}
 			if s, ok := g.slotOfSafe(cn + pn + gen); ok && s != "" {
 				p.fields["slot_engine"] = s
 				if recorded, _ := p.fields["slot"].(string); recorded != "" && recorded != s {

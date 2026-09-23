@@ -135,9 +135,16 @@ func (k *KnownPrefixes) HotTokens(key string) int {
 
 // AdmissionInput carries the estimates ClassifyAdmission decides on.
 type AdmissionInput struct {
-	PrefixTokens     int  // stable shared prefix (system prompt / tenant header)
-	TailTokens       int  // rest of the prompt (conversation + new turn)
-	HotPrefixTokens  int  // tokens of this prefix already hot in a decode slot
+	PrefixTokens    int // stable shared prefix (system prompt / tenant header)
+	TailTokens      int // rest of the prompt (conversation + new turn)
+	HotPrefixTokens int // tokens of this prefix already hot in a decode slot
+	// ResidentTokens: tokens of THIS conversation (prefix + history) that the
+	// decode slot verifiably still holds from its previous turn. Without it the
+	// whole tail counted as new, so an agentic loop whose tool results pile up
+	// in the history was sent to a prefill+handoff that rebuilt 51 817 tokens
+	// from scratch when the decode only lacked 8 226 (measured 2026-09-23 23:05,
+	// David's turn: est_new 47 291 vs 8 226 real, 5.7x, 41 s). 0 = unknown.
+	ResidentTokens   int
 	Threshold        int  // 0 means PrefillThresholdTokens
 	PrefillAvailable bool // false degrades to decode-direct (fail-soft)
 }
@@ -149,11 +156,21 @@ func ClassifyAdmission(in AdmissionInput) AdmissionDecision {
 	if threshold == 0 {
 		threshold = PrefillThresholdTokens
 	}
+	// what is new = the whole prompt minus what the slot already holds of it:
+	// the hot prefix, or the conversation's resident total when that is known
+	// (it always covers the prefix, so the larger of the two is the credit).
 	newTokens := in.PrefixTokens - in.HotPrefixTokens
 	if newTokens < 0 {
 		newTokens = 0
 	}
 	newTokens += in.TailTokens
+	if in.ResidentTokens > 0 {
+		// the resident total covers prefix AND history: only what exceeds it is new
+		newTokens = in.PrefixTokens + in.TailTokens - in.ResidentTokens
+		if newTokens < 0 {
+			newTokens = 0
+		}
+	}
 	if !in.PrefillAvailable {
 		return AdmissionDecision{"decode", "prefill-unavailable", newTokens}
 	}

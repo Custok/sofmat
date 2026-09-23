@@ -877,6 +877,73 @@ func TestPrefixCountedExactlyOncePerPrefix(t *testing.T) {
 	}
 }
 
+// fix#10: what the slot verifiably holds of THIS conversation is credited
+// against the estimate — but only for a request with the SAME SHAPE as the
+// turn that built it (same estimated prefix, tail that only grew). An agentic
+// turn whose history is mostly resident is then decode-direct instead of a
+// prefill that rebuilds it; a closing call without tools[] (another prompt from
+// the start) gets no credit. RED before: est_new counted the whole tail.
+func TestResidentCreditOnlySameShape(t *testing.T) {
+	gw, c := newTestGW(t, func(o *Options) {
+		o.BackendCall = func(body Body, extra Headers) (Body, error) {
+			r := okResp()
+			// the engine reports it now holds the whole prompt (+ a short reply)
+			pt := EstimateTokens(prefixTextOf(body), nil) + EstimateTokens(tailTextOf(body), nil)
+			r["timings"] = map[string]any{"cache_n": 0.0, "prompt_n": float64(pt), "predicted_n": 20.0}
+			return r, nil
+		}
+	})
+	long := strings.Repeat("resultado de la herramienta ", 1100) // ~8k tokens of history
+	turn1 := toolsBody("sys", 40, long)                          // ~9.4k prefix + 8k tail: cold -> prefill
+	gw.Chat(Headers{}, turn1)
+	if len(c.prefill) != 1 {
+		t.Fatalf("test premise: turn 1 is a cold large prompt (prefill), got %d prefills", len(c.prefill))
+	}
+	// turn 2: same shape, the history grew by a short exchange (~250 tokens)
+	turn2 := toolsBody("sys", 40, long, "respuesta", strings.Repeat("sigue ", 160))
+	gw.Chat(Headers{}, turn2)
+	rec := lastRecord(t, gw)
+	if res, _ := rec["resident_toks"].(int); res <= 0 {
+		t.Fatalf("turn 2 must be credited with the resident conversation: %v", rec)
+	}
+	if got, _ := rec["est_new_tokens"].(int); got >= 6144 {
+		t.Fatalf("turn 2 est_new must be the growth only (< 6144), got %d", got)
+	}
+	if len(c.prefill) != 1 {
+		t.Fatalf("turn 2 must stay decode-direct, got %d prefills", len(c.prefill))
+	}
+	// turn 3: same conversation but WITHOUT the catalogue: another prompt shape -> no credit
+	turn3 := map[string]any{"messages": turn2["messages"]}
+	gw.Chat(Headers{}, Body(turn3))
+	rec = lastRecord(t, gw)
+	if res, _ := rec["resident_toks"].(int); res != 0 {
+		t.Fatalf("a call without tools[] renders another prompt: no credit, got %v", res)
+	}
+}
+
+// The resident total of the conversation (when verifiably still in its slot)
+// is credited against the whole prompt: a 15k prefix + 47k tail of which the
+// slot holds 43.6k is ~19k of new work, not 47k (measured 2026-09-23 23:05:
+// est 47 291 vs a threshold of 40 000). Without a resident figure the old rule
+// holds; the credit never goes negative.
+func TestAdmissionCreditsResidentConversation(t *testing.T) {
+	d := ClassifyAdmission(AdmissionInput{PrefixTokens: 15000, TailTokens: 47000,
+		HotPrefixTokens: 15000, ResidentTokens: 43600, Threshold: 40000, PrefillAvailable: true})
+	if d.Route != "decode" || d.EstNewTokens != 18400 {
+		t.Fatalf("resident conversation must be new-work only: %+v", d)
+	}
+	d = ClassifyAdmission(AdmissionInput{PrefixTokens: 15000, TailTokens: 47000,
+		HotPrefixTokens: 15000, Threshold: 40000, PrefillAvailable: true})
+	if d.Route != "prefill" || d.EstNewTokens != 47000 {
+		t.Fatalf("without a resident figure the tail counts as new (old rule): %+v", d)
+	}
+	d = ClassifyAdmission(AdmissionInput{PrefixTokens: 15000, TailTokens: 100,
+		HotPrefixTokens: 15000, ResidentTokens: 20000, Threshold: 40000, PrefillAvailable: true})
+	if d.EstNewTokens != 0 || d.Route != "decode" {
+		t.Fatalf("a shrunken prompt is not negative work: %+v", d)
+	}
+}
+
 func itoa(i int) string {
 	return strings.TrimSpace(strings.Repeat(" ", 0) + string(rune('0'+i)))
 }
