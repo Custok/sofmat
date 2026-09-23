@@ -1247,6 +1247,7 @@ func (c *convGate) acquire(key string, limit time.Duration) (waited time.Duratio
 	}
 	t0 := time.Now()
 	deadline := t0.Add(limit)
+	blocked := false // 0 means "did not wait", not "waited a few microseconds for the lock"
 	for {
 		c.mu.Lock()
 		e := c.entries[key]
@@ -1257,8 +1258,12 @@ func (c *convGate) acquire(key string, limit time.Duration) (waited time.Duratio
 			}
 			e.n++
 			c.mu.Unlock()
+			if !blocked {
+				return 0, false
+			}
 			return time.Since(t0), capped
 		}
+		blocked = true
 		done := e.done
 		c.mu.Unlock()
 		remaining := time.Until(deadline)
