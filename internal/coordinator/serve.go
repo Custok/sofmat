@@ -133,6 +133,10 @@ func NewServer(cfg *config.Config) (*Server, error) {
 			opts.Threshold = cfg.PrefillThresholdTokens
 			log.Printf("gateway: umbral de admisión al prefill = %d tokens estimados (config)", cfg.PrefillThresholdTokens)
 		}
+		if cfg.ConvWaitMs > 0 {
+			opts.ConvWait = time.Duration(cfg.ConvWaitMs) * time.Millisecond
+			log.Printf("gateway: peticiones de una misma conversación en serie (fix#15): espera máxima %d ms (config)", cfg.ConvWaitMs)
+		}
 		log.Printf("gateway: KV handoff prefill→decode ACTIVO modo %s (prefill %s via %s → decode %s via %s; umbral exacto %d tokens)",
 			mode, kp.prefillURL, kp.prefillCtl, kp.decodeURL, kp.decodeCtl, gateway.PrefillExactMinTokens)
 		// el prefill ingiere varios prompts a la vez hasta su presupuesto real de KV

@@ -945,6 +945,43 @@ func TestToolCallsCountedPerRequest(t *testing.T) {
 	}
 }
 
+// conv_wait_ms in the config turns fix#15 on for the served gateway: two
+// overlapping requests of one conversation are served one after the other and
+// the second row says how long it waited. Unset, both go at once (0).
+func TestConvWaitFromConfig(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		r := newRig(t, func(e *fakeEngine) string { return e.dir }, func(c *config.Config) {
+			if on {
+				c.ConvWaitMs = 5000
+			}
+		})
+		for _, e := range []*fakeEngine{r.decode, r.prefill} {
+			e.queueBeforeFirstToken = 300 * time.Millisecond
+			e.promptMs, e.predictedMs = 10, 10
+		}
+		body := map[string]any{"stream": true, "messages": []any{map[string]any{"role": "user", "content": "hola"}}}
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() { defer wg.Done(); postChat(t, r.gateway.URL, body) }()
+		time.Sleep(50 * time.Millisecond)
+		if code, _ := postChat(t, r.gateway.URL, body); code != 200 {
+			t.Fatalf("on=%v: chat failed: %d", on, code)
+		}
+		rec := lastRequestRecord(t, r.gateway.URL)
+		wg.Wait()
+		w, ok := rec["wait_conv_ms"].(float64)
+		if !ok {
+			t.Fatalf("on=%v: wait_conv_ms must always be written: %v", on, rec)
+		}
+		if on && w < 200 {
+			t.Fatalf("conv_wait_ms set: the second request must wait for the first (~250 ms), got %v", w)
+		}
+		if !on && w != 0 {
+			t.Fatalf("conv_wait_ms unset: no waiting (0), got %v", w)
+		}
+	}
+}
+
 // A stream the CLIENT cuts (2026-09-23 id 61: the HUD's no-progress guard
 // aborted a workflow step at 21 s while the engine was streaming fine) must
 // record how long the stream lived and how many events the engine had sent,

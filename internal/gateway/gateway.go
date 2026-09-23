@@ -122,6 +122,8 @@ type Gateway struct {
 	last        *lastPrompts   // per prefix key: ids of the last prompt routed (cache lower bound)
 	convSlot    *convSlots     // per conversation: the decode slot its KV actually lives in
 	cost        *costModel     // measured pp / handoff EMAs for ModeAuto
+	convWait    time.Duration  // fix#15: how long a request waits for its conversation's in-flight request (0 = off)
+	convGate    *convGate
 
 	// circuit breaker: after a prefill-side failure (tokenize, prefill, handoff)
 	// the prefill route is skipped without contacting the node for breakerFor,
@@ -193,6 +195,15 @@ type Options struct {
 	HandoffAllowed func(Body) bool
 	Mode           string // ModeBusy (default when DecodeBusy is set), ModeAlways, ModeAuto
 	Threshold      int
+	// ConvWait serialises the requests of ONE conversation (fix#15): a request
+	// whose conversation already has a request in flight waits up to ConvWait
+	// for it to finish before the decode is dialled. 0 = off (default). Why: with
+	// kv_unified the engine puts an overlapping request of the same conversation
+	// in ANOTHER slot and cannot reuse its own KV although it is in VRAM
+	// (reproduced 2026-09-24 01:29 by debian-dev: overlap -> other slot -> cold,
+	// 8 of 8; David's id 185, 15.9k reprocessed, 10 s). Waiting removes the
+	// overlap, the identified cause; it does not promise every cold turn away.
+	ConvWait       time.Duration
 	ExactMinTokens int
 	NSlots         int
 	KeepContent    bool
@@ -283,6 +294,8 @@ func New(o Options) (*Gateway, error) {
 		log:         NewRequestLog(500, o.KeepContent),
 		known:       known,
 		prefixExact: mustKnownPrefixes(64),
+		convWait:    o.ConvWait,
+		convGate:    newConvGate(),
 		convLast:    newConvTurns(8 * n),
 		last:        newLastPrompts(8 * n),
 		convSlot:    newConvSlots(8 * n),
@@ -380,6 +393,7 @@ type Plan struct {
 	alphaKey   string
 	viaPrefill bool
 	tokenized  bool // Prepare already ran the tokenizer this turn (success or fail)
+	gated      bool // holds its conversation's gate until the record is written (fix#15)
 	start      time.Time
 }
 
@@ -628,6 +642,19 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		}
 		slot = s
 	}
+	// fix#15: one request of a conversation at a time. Taken BEFORE the
+	// residency probes so that, once through, the slot is idle and holds the
+	// conversation and the admission sees it. Always recorded: wait_conv_ms (0 =
+	// did not wait) and wait_conv_capped (the cap ran out and the request went
+	// on anyway, overlapping — its own value, never confused with "did not
+	// wait"). Released when the record is written, on every path.
+	waitConv, capped := g.convGate.acquire(ckey, g.convWait)
+	planned := false
+	defer func() {
+		if !planned {
+			g.convGate.release(ckey)
+		}
+	}()
 
 	// admission: decode-direct, or dedicated prefill + KV handoff first.
 	// The prefix is what the ENGINE sees ahead of the conversation: system prompt
@@ -897,7 +924,10 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	// tokenizer, prefill + handoff when taken). With first_byte_ms, the reply's
 	// generation and finish_ms, total_ms decomposes: an unexplained residual was
 	// being read as engine queueing (2026-09-23 23:23, ids 10/11: 0.7-2.5 s).
-	fields["admit_ms"] = msSince(start)
+	// admit_ms excludes the conversation wait: it is the coordinator's own work.
+	fields["admit_ms"] = msSince(start) - float64(waitConv)/float64(time.Millisecond)
+	fields["wait_conv_ms"] = float64(waitConv) / float64(time.Millisecond)
+	fields["wait_conv_capped"] = capped
 	if ids != nil {
 		// whichever path ran, the decode slot now holds this prompt (either it
 		// processed it or the restored state carries it).
@@ -914,12 +944,14 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	// next turn checks and pins THIS slot instead of a freshly hashed one.
 	g.convSlot.set(ckey, slot)
 
+	planned = true // the gate is now the Plan's: released by finishRecord
 	return &Plan{
 		Body:       merged,
 		Headers:    decodeHeaders,
 		fields:     fields,
 		pkey:       pkey,
 		ckey:       ckey,
+		gated:      true,
 		prefixToks: prefixToks,
 		tailToks:   tailToks,
 		alphaKey:   alphaKey,
@@ -1185,8 +1217,84 @@ func headerMs(h Headers, key string, def float64) float64 {
 const kvMissPromptTokens = 64
 
 func (g *Gateway) finishRecord(p *Plan) {
+	if p.gated {
+		p.gated = false
+		g.convGate.release(p.ckey)
+	}
 	p.fields["total_ms"] = msSince(p.start)
 	g.log.RecordEntry(p.fields, nil)
+}
+
+// convGate serialises the requests of one conversation (fix#15). An entry
+// counts the requests in flight for a key; acquire waits while the count is
+// positive, up to the cap, then joins anyway (capped) so a stuck request can
+// never block its conversation for good. Zero cap = no waiting at all.
+type convGate struct {
+	mu      sync.Mutex
+	entries map[string]*convGateEntry
+}
+
+type convGateEntry struct {
+	n    int
+	done chan struct{} // closed when n drops to 0
+}
+
+func newConvGate() *convGate { return &convGate{entries: map[string]*convGateEntry{}} }
+
+func (c *convGate) acquire(key string, limit time.Duration) (waited time.Duration, capped bool) {
+	if key == "" {
+		return 0, false
+	}
+	t0 := time.Now()
+	deadline := t0.Add(limit)
+	for {
+		c.mu.Lock()
+		e := c.entries[key]
+		if e == nil || e.n == 0 || limit <= 0 {
+			if e == nil {
+				e = &convGateEntry{done: make(chan struct{})}
+				c.entries[key] = e
+			}
+			e.n++
+			c.mu.Unlock()
+			return time.Since(t0), capped
+		}
+		done := e.done
+		c.mu.Unlock()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			// the cap ran out: go on overlapping, and say so
+			c.mu.Lock()
+			if e2 := c.entries[key]; e2 != nil {
+				e2.n++
+			} else {
+				c.entries[key] = &convGateEntry{n: 1, done: make(chan struct{})}
+			}
+			c.mu.Unlock()
+			return time.Since(t0), true
+		}
+		select {
+		case <-done:
+		case <-time.After(remaining):
+		}
+	}
+}
+
+func (c *convGate) release(key string) {
+	if key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e := c.entries[key]
+	if e == nil {
+		return
+	}
+	e.n--
+	if e.n <= 0 {
+		close(e.done)
+		delete(c.entries, key)
+	}
 }
 
 // callPrefillSafe isolates the prefill call: an error OR a panic in the

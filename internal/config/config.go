@@ -113,6 +113,15 @@ type Config struct {
 	// decode-direct; a high threshold reserves the handoff for one-shot batches.
 	PrefillThresholdTokens int `json:"prefill_threshold_tokens"`
 
+	// ConvWaitMs serialises the requests of one conversation (fix#15): a request
+	// whose conversation already has one in flight waits up to this many ms for
+	// it to finish before the decode is dialled; 0 = off (the default, and the
+	// behaviour before fix#15). Why: with kv_unified an overlapping request of the
+	// same conversation lands in another slot and reprocesses everything although
+	// its KV is in VRAM (reproduced 2026-09-24). Turning it on changes WHEN the
+	// HUD's parallel calls are answered, so it is a product decision (David).
+	ConvWaitMs int `json:"conv_wait_ms"`
+
 	// NoThink turns the model's chain-of-thought OFF for every chat request
 	// (chat_template_kwargs.enable_thinking = false), unless the client sets
 	// that field itself.

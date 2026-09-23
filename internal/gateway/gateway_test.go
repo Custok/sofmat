@@ -5,7 +5,10 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 var bigPrompt = strings.Repeat("x", 40000) // ~10000 est. tokens > threshold (6144)
@@ -1029,4 +1032,87 @@ func TestAdmissionCreditsResidentConversation(t *testing.T) {
 
 func itoa(i int) string {
 	return strings.TrimSpace(strings.Repeat(" ", 0) + string(rune('0'+i)))
+}
+
+// fix#15: the requests of ONE conversation go to the decode one at a time.
+// With kv_unified an overlapping request of the same conversation lands in
+// another slot and reprocesses everything although its KV is in VRAM
+// (reproduced 2026-09-24 01:29 by debian-dev: overlap -> other slot -> cold,
+// 8 of 8; David's id 185, 15.9k reprocessed, 10 s). The wait is recorded on
+// every row (wait_conv_ms, 0 = did not wait), the cap has its own mark
+// (wait_conv_capped), other conversations never wait, and OFF (the default)
+// is the behaviour before the fix: overlap allowed, nothing recorded but 0.
+func TestConversationRequestsAreSerialised(t *testing.T) {
+	// a backend that blocks its FIRST call for 300 ms and counts overlapping calls
+	build := func(wait time.Duration) (*Gateway, *int32) {
+		var inflight, overlaps int32
+		var first sync.Once
+		gw, _ := newTestGW(t, func(o *Options) {
+			o.ConvWait = wait
+			o.BackendCall = func(body Body, extra Headers) (Body, error) {
+				if atomic.AddInt32(&inflight, 1) > 1 {
+					atomic.AddInt32(&overlaps, 1)
+				}
+				defer atomic.AddInt32(&inflight, -1)
+				first.Do(func() { time.Sleep(300 * time.Millisecond) })
+				r := okResp()
+				r["timings"] = map[string]any{"cache_n": 0.0, "prompt_n": 10.0, "predicted_n": 5.0}
+				return r, nil
+			}
+		})
+		return gw, &overlaps
+	}
+	// two requests of the same conversation, the second 50 ms after the first
+	pair := func(gw *Gateway, second Body) Record {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() { defer wg.Done(); _, _ = gw.Chat(Headers{}, chatBody("sys", "hola")) }()
+		time.Sleep(50 * time.Millisecond)
+		if _, err := gw.Chat(Headers{}, second); err != nil {
+			t.Fatal(err)
+		}
+		rec := lastRecord(t, gw) // the second's row: the first is still blocked, or finished before it
+		wg.Wait()
+		return rec
+	}
+
+	// ON: the second waits for the first, nothing overlaps
+	gw, overlaps := build(2 * time.Second)
+	rec := pair(gw, chatBody("sys", "hola"))
+	if w, _ := rec["wait_conv_ms"].(float64); w < 200 {
+		t.Fatalf("the second request of a conversation must wait for the first (~250 ms), got %v (record %v)", rec["wait_conv_ms"], rec)
+	}
+	if rec["wait_conv_capped"] != false {
+		t.Fatalf("wait_conv_capped must be an explicit false when the wait completed: %v", rec["wait_conv_capped"])
+	}
+	if atomic.LoadInt32(overlaps) != 0 {
+		t.Fatal("requests of the same conversation overlapped at the backend")
+	}
+	// ON: ANOTHER conversation (another first message) does not wait
+	gw, _ = build(2 * time.Second)
+	rec = pair(gw, chatBody("sys", "otra conversación"))
+	if w, _ := rec["wait_conv_ms"].(float64); w != 0 {
+		t.Fatalf("another conversation must not wait, got %v", rec["wait_conv_ms"])
+	}
+	// CAP: 100 ms cap, the first blocks 300 ms: the second goes on, capped, overlapping
+	gw, overlaps = build(100 * time.Millisecond)
+	rec = pair(gw, chatBody("sys", "hola"))
+	if w, _ := rec["wait_conv_ms"].(float64); w < 80 || w >= 250 {
+		t.Fatalf("a capped wait must be about the cap (100 ms), got %v", rec["wait_conv_ms"])
+	}
+	if rec["wait_conv_capped"] != true {
+		t.Fatalf("the cap must be marked on the row: %v", rec["wait_conv_capped"])
+	}
+	if atomic.LoadInt32(overlaps) != 1 {
+		t.Fatalf("after the cap the request must proceed (overlapping once), overlaps=%d", atomic.LoadInt32(overlaps))
+	}
+	// OFF (default): no wait, overlap happens — the behaviour before fix#15
+	gw, overlaps = build(0)
+	rec = pair(gw, chatBody("sys", "hola"))
+	if w, _ := rec["wait_conv_ms"].(float64); w != 0 || rec["wait_conv_capped"] != false {
+		t.Fatalf("off: wait_conv_ms must be 0 and capped false, got %v / %v", rec["wait_conv_ms"], rec["wait_conv_capped"])
+	}
+	if atomic.LoadInt32(overlaps) != 1 {
+		t.Fatalf("off must not serialise (control), overlaps=%d", atomic.LoadInt32(overlaps))
+	}
 }
