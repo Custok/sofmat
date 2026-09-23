@@ -486,7 +486,9 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	}
 
 	// admission: decode-direct, or dedicated prefill + KV handoff first.
-	prefixToks := EstimateTokens(systemPrompt, nil)
+	// The prefix is what the ENGINE sees ahead of the conversation: system prompt
+	// + tool catalogue (prefixTextOf), not the system prompt alone.
+	prefixToks := EstimateTokens(prefixTextOf(body), nil)
 	tailToks := EstimateTokens(tailTextOf(body), nil)
 	// hotPrefix hoisted to a var so /api/requests can log it alongside pkey/ckey:
 	// the estimate that decides prefill-vs-decode is opaque without these, and the
@@ -978,7 +980,36 @@ func lastUserTextOf(body Body) string {
 	return ""
 }
 
-// tailTextOf is everything after the stable prefix: the non-system turns.
+// prefixTextOf is the stable prefix the engine really sees: the system prompt
+// PLUS the tool catalogue. The chat template renders `tools[]` ahead of the
+// conversation, next to the system prompt, so the engine caches them with it
+// and they belong to the prefix — the same across a conversation's turns, cold
+// only once. Estimating the prefix from the system prompt alone under-counted
+// the HUD's prompt ~4x (measured 2026-09-22 on David's live turns: prefix 2415
+// + tail 1766 = 4181 estimated against prompt_n 17412 received): the admission
+// threshold was deciding on a number the engine never saw, and a turn crossing
+// it by a large tool result was shipped to a handoff its cache did not need.
+func prefixTextOf(body Body) string {
+	return systemPromptOf(body) + toolsTextOf(body)
+}
+
+// toolsTextOf serialises the tool catalogue the way the template will: JSON.
+// Absent or malformed tools estimate as nothing (never fail admission on them).
+func toolsTextOf(body Body) string {
+	tools, ok := body["tools"]
+	if !ok || tools == nil {
+		return ""
+	}
+	b, err := json.Marshal(tools)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// tailTextOf is everything after the stable prefix: the non-system turns,
+// including the assistant's tool_calls (name + arguments), which the template
+// renders into the prompt like any other content.
 func tailTextOf(body Body) string {
 	out := ""
 	for _, m := range messagesOf(body) {
@@ -986,6 +1017,11 @@ func tailTextOf(body Body) string {
 			continue
 		}
 		s, _ := m["content"].(string)
+		if tc, ok := m["tool_calls"]; ok && tc != nil {
+			if b, err := json.Marshal(tc); err == nil {
+				s += string(b)
+			}
+		}
 		if out != "" {
 			out += "\n"
 		}

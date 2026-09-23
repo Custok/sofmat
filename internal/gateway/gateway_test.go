@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -680,6 +681,94 @@ func TestBackendErrorPropagates(t *testing.T) {
 	}
 	if lastRecord(t, gw)["error"] != "engine down" {
 		t.Fatal("a failed decode must still leave a record")
+	}
+}
+
+// toolsBody is the HUD's shape: a short system prompt, a large tool catalogue
+// (what actually fills the prompt) and the conversation turns (user/assistant
+// alternating).
+func toolsBody(system string, ntools int, turns ...string) Body {
+	tools := make([]any, 0, ntools)
+	for i := 0; i < ntools; i++ {
+		tools = append(tools, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "tool_" + strconv.Itoa(i),
+				"description": strings.Repeat("d", 700),
+				"parameters":  map[string]any{"type": "object"},
+			},
+		})
+	}
+	msgs := []any{map[string]any{"role": "system", "content": system}}
+	for i, tt := range turns {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		msgs = append(msgs, map[string]any{"role": role, "content": tt})
+	}
+	return Body{"messages": msgs, "tools": tools}
+}
+
+// The HUD's prompt is mostly its tool catalogue: the chat template renders
+// tools[] ahead of the conversation, so the engine caches them with the system
+// prompt. Estimating the prefix from the system prompt alone made the admission
+// threshold decide on ~1/4 of what the engine received (measured 2026-09-22 on
+// David's live turns: est 4181 vs prompt_n 17412). RED before fix#5.
+func TestPrefixEstimateCountsToolCatalogue(t *testing.T) {
+	gw, c := newTestGW(t, nil)
+	body := toolsBody("sys", 60, "hola")
+	if _, err := gw.Chat(Headers{}, body); err != nil {
+		t.Fatal(err)
+	}
+	rec := lastRecord(t, gw)
+	// what the template renders: the catalogue as JSON (independent of the
+	// gateway's own helper, so this test also compiles against the old code)
+	toolsJSON, _ := json.Marshal(body["tools"])
+	want := EstimateTokens(string(toolsJSON), nil)
+	if got, _ := rec["prefix_toks"].(int); got < want {
+		t.Fatalf("prefix_toks %d must count the tool catalogue (>= %d)", got, want)
+	}
+	// ~10k tokens of tools on a cold slot is a large new prompt: prefill +
+	// handoff, exactly as the same tokens in a system prompt would be.
+	if len(c.prefill) != 1 {
+		t.Fatalf("cold tool-heavy prompt must go through prefill (%d)", len(c.prefill))
+	}
+}
+
+// Once the catalogue is hot in the slot, the next turn is prefix-hot and stays
+// decode-direct: the tools are prefix, not tail, so they are never counted as
+// new again.
+func TestToolCatalogueHotStaysDecodeDirect(t *testing.T) {
+	gw, c := newTestGW(t, nil)
+	gw.Chat(Headers{}, toolsBody("sys", 60, "hola"))
+	gw.Chat(Headers{}, toolsBody("sys", 60, "hola", "respuesta", "otra corta"))
+	if len(c.prefill) != 1 {
+		t.Fatalf("second turn must not prefill again (%d)", len(c.prefill))
+	}
+	if adm := lastRecord(t, gw)["admission"]; adm != "prefix-hot" {
+		t.Fatalf("second turn admission = %v, want prefix-hot", adm)
+	}
+	if _, ok := c.decode[1]["x-sofmat-kv-handoff"]; ok {
+		t.Fatal("second turn must not carry a handoff marker")
+	}
+}
+
+// The assistant's tool_calls (name + arguments) are rendered into the prompt
+// like any content: the tail estimate must count them. RED before fix#5.
+func TestTailCountsAssistantToolCalls(t *testing.T) {
+	body := Body{"messages": []any{
+		map[string]any{"role": "system", "content": "s"},
+		map[string]any{"role": "user", "content": "u"},
+		map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "c1", "type": "function", "function": map[string]any{
+				"name": "f", "arguments": strings.Repeat("a", 400),
+			}},
+		}},
+		map[string]any{"role": "tool", "content": "result"},
+	}}
+	if got := EstimateTokens(tailTextOf(body), nil); got < 100 {
+		t.Fatalf("tail must count tool_calls arguments, got %d tokens", got)
 	}
 }
 
