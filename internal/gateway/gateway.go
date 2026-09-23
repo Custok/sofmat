@@ -99,18 +99,19 @@ type Gateway struct {
 	verify    Verify
 	backend   BackendCall
 	status    StatusProvider
-	prefill   PrefillCall          // optional; nil = no disaggregation
-	handoff   Handoff              // optional; nil = no disaggregation
-	count     CountTokens          // optional; nil = estimate only
-	tokens    Tokens               // optional; supersedes count, enables the cache-aware estimate
-	busy      DecodeBusy           // optional; nil = handoff whenever admitted
-	allowed   func(Body) bool      // optional; false = this request must not be handed off
+	prefill   PrefillCall                  // optional; nil = no disaggregation
+	handoff   Handoff                      // optional; nil = no disaggregation
+	count     CountTokens                  // optional; nil = estimate only
+	tokens    Tokens                       // optional; supersedes count, enables the cache-aware estimate
+	busy      DecodeBusy                   // optional; nil = handoff whenever admitted
+	allowed   func(Body) bool              // optional; false = this request must not be handed off
 	resident  func(Body, int, string) bool // optional; false = the engine no longer holds that prefix in the given slot
-	noThink   bool                 // ask the template to skip the chain-of-thought
-	replyRoom func(int) int        // how big a reply the engine can still host
-	mode      string               // ModeBusy / ModeAlways / ModeAuto
-	threshold int                  // admission threshold on the ESTIMATE
-	exactMin  int                  // floor on the EXACT count (when count != nil)
+	poolHeld  func() (int, bool)           // optional; what the decode's slots hold at admission (request log only)
+	noThink   bool                         // ask the template to skip the chain-of-thought
+	replyRoom func(int) int                // how big a reply the engine can still host
+	mode      string                       // ModeBusy / ModeAlways / ModeAuto
+	threshold int                          // admission threshold on the ESTIMATE
+	exactMin  int                          // floor on the EXACT count (when count != nil)
 	ring      *Ring
 	alpha     *AlphaEma
 	log       *RequestLog
@@ -161,6 +162,14 @@ type Options struct {
 	// the whole prompt (measured 2026-09-07: 78 329 tokens, 184.5 s).
 	// nil = assume resident (previous behaviour).
 	CacheResident func(Body, int, string) bool
+
+	// PoolHeld reports how many prompt tokens the decode's slots hold, all slots
+	// together, at the moment a request is admitted. Evidence only: it is written
+	// to the request log as pool_held_at_admit and never changes a decision. It
+	// answers "what occupied the pool when this turn arrived?" without anyone
+	// sampling /slots at the right second (a restored KV that is gone by the next
+	// turn shows up as a drop between two consecutive rows). nil = not logged.
+	PoolHeld func() (int, bool)
 
 	// HandoffAllowed vetoes the handoff for a request the caller knows must not
 	// take it. With more than one decode engine the restored state lands in the
@@ -247,6 +256,7 @@ func New(o Options) (*Gateway, error) {
 		busy:       o.DecodeBusy,
 		allowed:    o.HandoffAllowed,
 		resident:   o.CacheResident,
+		poolHeld:   o.PoolHeld,
 		noThink:    o.NoThink,
 		replyRoom:  o.ReplyRoom,
 		mode:       mode,
@@ -383,6 +393,19 @@ func (g *Gateway) residentFor(body Body, expect int, slot string) bool {
 		ok = g.resident(body, expect, slot)
 	}()
 	return ok
+}
+
+// poolHeldSafe: a probe error or panic just leaves the field out of the record.
+func (g *Gateway) poolHeldSafe() (held int, ok bool) {
+	if g.poolHeld == nil {
+		return 0, false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			held, ok = 0, false
+		}
+	}()
+	return g.poolHeld()
 }
 
 // residentHot zeroes a "hot prefix" the engine no longer holds.
@@ -551,6 +574,11 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		// t1: wall-clock at admission, so decode occupancy can be crossed against the
 		// instant a turn ARRIVES (not when it finishes appearing in the log).
 		"t1_admit": time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	// what the decode's slots held when this turn ARRIVED (evidence for "who
+	// emptied the slot between two turns": the drop shows between two rows).
+	if held, ok := g.poolHeldSafe(); ok {
+		fields["pool_held_at_admit"] = held
 	}
 	decodeHeaders := Headers{"x-sofmat-slot": slot}
 	admittedVia := decision.Route

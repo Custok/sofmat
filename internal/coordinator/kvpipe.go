@@ -118,6 +118,8 @@ type kvPipe struct {
 	heldMu  sync.Mutex
 	pHeld   map[string]int
 	pHeldAt map[string]time.Time
+	pAll    map[string]int // ALL slots' prompt tokens (evidence only)
+	pAllAt  map[string]time.Time
 
 	tokMu sync.Mutex
 	toks  map[string]tokEntry // body hash → prompt token ids (Count → Prefill reuse)
@@ -142,6 +144,8 @@ func newKVPipe(prefillURL, decodeURL, prefillCtl, decodeCtl string) *kvPipe {
 		routes:     map[string]kvRoute{},
 		pHeld:      map[string]int{},
 		pHeldAt:    map[string]time.Time{},
+		pAll:       map[string]int{},
+		pAllAt:     map[string]time.Time{},
 	}
 	return k
 }
@@ -300,10 +304,11 @@ func (k *kvPipe) takePending(name string) int {
 // possible moment, evicting idle slots cheapest-first (least valuable cache) —
 // and when even that is not enough the handoff is SKIPPED cleanly instead of
 // failing, so the request is served direct and the breaker stays closed.
-func (k *kvPipe) makeDecodeRoom(decodeURL string, need int, want string) (string, error) {
+func (k *kvPipe) makeDecodeRoom(decodeURL string, need int, want string) (string, roomInfo, error) {
+	ri := roomInfo{need: need}
 	slots := k.slotsAt(decodeURL)
 	if slots == nil {
-		return want, nil // cannot read: behave as before
+		return want, ri, nil // cannot read: behave as before
 	}
 	k.slotMu.Lock()
 	budget := k.poolOf(decodeURL).budget
@@ -332,8 +337,9 @@ func (k *kvPipe) makeDecodeRoom(decodeURL string, need int, want string) (string
 		held += n // erasable below, and subtracted as we erase
 		idle = append(idle, slotInfo{id, n})
 	}
+	ri.heldBefore, ri.budget = held, budget
 	if len(idle) == 0 {
-		return "", fmt.Errorf("%w: todos los slots del decode están generando", gateway.ErrSkipHandoff)
+		return "", ri, fmt.Errorf("%w: todos los slots del decode están generando", gateway.ErrSkipHandoff)
 	}
 	sort.Slice(idle, func(i, j int) bool { return idle[i].held < idle[j].held })
 	// restore into the wanted slot when it is idle, else into the cheapest one
@@ -350,8 +356,10 @@ func (k *kvPipe) makeDecodeRoom(decodeURL string, need int, want string) (string
 			log.Printf("kvpipe: erase slot %s: %v", id, err)
 			return
 		}
+		ri.erased++
 		for i := range idle {
 			if idle[i].id == id {
+				ri.erasedTokens += idle[i].held
 				held -= idle[i].held
 				idle[i].held = 0
 			}
@@ -368,10 +376,46 @@ func (k *kvPipe) makeDecodeRoom(decodeURL string, need int, want string) (string
 		erase(s.id)
 	}
 	if held+need > budget {
-		return "", fmt.Errorf("%w: el decode sigue lleno tras vaciar los slots libres (%d ocupados + %d que hacen falta > %d)",
+		return "", ri, fmt.Errorf("%w: el decode sigue lleno tras vaciar los slots libres (%d ocupados + %d que hacen falta > %d)",
 			gateway.ErrSkipHandoff, held, need, budget)
 	}
-	return target.id, nil
+	return target.id, ri, nil
+}
+
+// roomInfo is what makeDecodeRoom found and did, written to the request log so
+// every handoff carries its own evidence of room (who held what, what was
+// erased to fit the restore) instead of someone reading an engine log that
+// only writes errors.
+type roomInfo struct {
+	heldBefore   int // prompt tokens held by all slots before erasing
+	erased       int // slots erased (the target always counts)
+	erasedTokens int // tokens those slots held: what the restore displaced
+	budget       int // the engine's unified budget the room was made in
+	need         int // tokens the restore needed
+}
+
+// poolHeld is what ALL the engine's slots hold, busy and idle, re-read at most
+// once a second: evidence for the request log (pool_held_at_admit), never a
+// decision input. An unreadable engine leaves the field out (ok=false) rather
+// than recording a stale or fake number.
+func (k *kvPipe) poolHeld(engine string) (int, bool) {
+	k.heldMu.Lock()
+	defer k.heldMu.Unlock()
+	if t, seen := k.pAllAt[engine]; seen && time.Since(t) < time.Second {
+		return k.pAll[engine], true
+	}
+	slots := k.slotsAt(engine)
+	if slots == nil {
+		return 0, false
+	}
+	held := 0
+	for _, s := range slots {
+		if v, isNum := s["n_prompt_tokens"].(float64); isNum {
+			held += int(v)
+		}
+	}
+	k.pAll[engine], k.pAllAt[engine] = held, time.Now()
+	return held, true
 }
 
 // setEngineBudget records one engine's real context size (probed at startup).
@@ -878,12 +922,18 @@ func (k *kvPipe) Handoff(hid, slot string) (gateway.Body, error) {
 	// enough of the unified budget for the state RIGHT NOW (the decode filled up
 	// while the prefill ran; llama.cpp does not evict on its own for a restore).
 	need := k.takePending(hid)
-	slot, err = k.makeDecodeRoom(rt.decodeURL, need, k.pickIdleSlot(rt.decodeURL, slot))
+	slot, ri, err := k.makeDecodeRoom(rt.decodeURL, need, k.pickIdleSlot(rt.decodeURL, slot))
 	if err != nil {
 		k.cleanup(hid)
 		return nil, err
 	}
 	out["slot"] = slot
+	// the room this restore was given, as evidence in the request log
+	out["room_held_before"] = ri.heldBefore
+	out["room_erased_slots"] = ri.erased
+	out["room_erased_tokens"] = ri.erasedTokens
+	out["room_budget"] = ri.budget
+	out["room_need"] = ri.need
 	t1 := time.Now()
 	rs, err := k.postJSON(fmt.Sprintf("%s/slots/%s?action=restore", rt.decodeURL, slot),
 		map[string]any{"filename": hid}, 120*time.Second)

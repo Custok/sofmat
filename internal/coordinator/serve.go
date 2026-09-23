@@ -97,6 +97,9 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		// prefix survived: the gateway records what it routed, not what the engine
 		// evicted to make room for somebody else.
 		opts.CacheResident = func(b gateway.Body, expect int, slot string) bool { return s.cacheResident(kp, b, expect, slot) }
+		// evidence per request: what the decode's slots held when the turn arrived
+		// (re-read at most once a second, never a decision input).
+		opts.PoolHeld = func() (int, bool) { return kp.poolHeld(kp.decodeURL) }
 		// symmetric routing: the prefill runs on the engine where the conversation
 		// does NOT live, and the state is restored into the engine that will serve
 		// it. So every conversation can take the handoff — no veto needed.

@@ -583,6 +583,39 @@ func TestStalePinnedSlotDoesNotReprocess(t *testing.T) {
 	}
 }
 
+// Every handoff carries its own evidence of room in the request log (what the
+// slots held, what was erased to fit the restore, the budget, the need), and
+// every request records what the pool held when it arrived. Evidence only:
+// the fields never change a decision, but without them "who emptied the slot
+// between two turns" is answered by reading an engine log that only writes
+// errors.
+func TestHandoffRecordsRoomEvidence(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	if code, _ := postChat(t, r.gateway.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": longUser}},
+	}); code != 200 {
+		t.Fatal("chat failed")
+	}
+	rec := lastRequestRecord(t, r.gateway.URL)
+	if rec["admitted_via"] != "prefill" {
+		t.Fatalf("test premise: the large prompt must hand off: %v", rec)
+	}
+	for _, k := range []string{"room_held_before", "room_erased_slots", "room_erased_tokens", "room_budget", "room_need"} {
+		if _, ok := rec[k].(float64); !ok {
+			t.Fatalf("handoff record must carry %s: %v", k, rec)
+		}
+	}
+	if erased, _ := rec["room_erased_slots"].(float64); erased < 1 {
+		t.Fatalf("the target slot is always erased before a restore, got %v", rec["room_erased_slots"])
+	}
+	if need, _ := rec["room_need"].(float64); need <= 0 {
+		t.Fatalf("room_need must be the saved state's tokens, got %v", rec["room_need"])
+	}
+	if _, ok := rec["pool_held_at_admit"].(float64); !ok {
+		t.Fatalf("every request must record pool_held_at_admit: %v", rec)
+	}
+}
+
 // A short prompt is served on the PREFILL engine's chat endpoint, NOT on the
 // decode engine. These throwaway, no-state calls (emotion tagging, tool routing)
 // must not land on the decode engine, because the decode runs unified KV and every

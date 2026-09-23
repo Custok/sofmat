@@ -772,6 +772,28 @@ func TestTailCountsAssistantToolCalls(t *testing.T) {
 	}
 }
 
+// The pool occupancy at admission is evidence, logged per request and never a
+// decision input: a probe that answers is recorded, one that fails or panics
+// just leaves the field out.
+func TestPoolHeldAtAdmitLogged(t *testing.T) {
+	gw, _ := newTestGW(t, func(o *Options) {
+		o.PoolHeld = func() (int, bool) { return 12345, true }
+	})
+	gw.Chat(Headers{}, chatBody("sys", "hola"))
+	if got := lastRecord(t, gw)["pool_held_at_admit"]; got != 12345 {
+		t.Fatalf("pool_held_at_admit = %v, want 12345", got)
+	}
+	gw2, _ := newTestGW(t, func(o *Options) {
+		o.PoolHeld = func() (int, bool) { panic("slots down") }
+	})
+	if _, err := gw2.Chat(Headers{}, chatBody("sys", "hola")); err != nil {
+		t.Fatalf("a panicking probe must not fail the request: %v", err)
+	}
+	if _, ok := lastRecord(t, gw2)["pool_held_at_admit"]; ok {
+		t.Fatal("a failed probe must leave the field out, not record a fake number")
+	}
+}
+
 func itoa(i int) string {
 	return strings.TrimSpace(strings.Repeat(" ", 0) + string(rune('0'+i)))
 }
