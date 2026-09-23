@@ -58,11 +58,14 @@ type fakeEngine struct {
 	// hangAfterFirstChunk: the engine streams one token and then stalls until
 	// its request is cancelled (the client went away upstream).
 	hangAfterFirstChunk bool
-	restored            []string
-	restoreSlot         string
-	restoreFail         string           // when set, /slots/N?action=restore answers 500 with this
-	chats               []map[string]any // bodies received by /v1/chat/completions
-	srv                 *httptest.Server
+	// toolCallReply: the model answers with TWO tool calls (streamed as deltas
+	// keyed by index, like llama-server; whole when not streamed) instead of text.
+	toolCallReply bool
+	restored      []string
+	restoreSlot   string
+	restoreFail   string           // when set, /slots/N?action=restore answers 500 with this
+	chats         []map[string]any // bodies received by /v1/chat/completions
+	srv           *httptest.Server
 }
 
 func writeTestJSON(w http.ResponseWriter, code int, v any) {
@@ -288,7 +291,18 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 				}
 			}
 			time.Sleep(e.queueBeforeFirstToken + time.Duration(e.promptMs*float64(time.Millisecond)))
-			_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hola\"}}]}\n\n")
+			if e.toolCallReply {
+				// call 0 in two deltas (name, then arguments), call 1 in one; the
+				// second write lands mid-event to exercise reassembly across reads
+				_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"topic_post\",\"arguments\":\"\"}}]}}]}\n\n"+
+					"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,")
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+				_, _ = io.WriteString(w, "\"id\":\"c2\",\"type\":\"function\",\"function\":{\"name\":\"rag_search\",\"arguments\":\"{}\"}}]}}]}\n\n")
+			} else {
+				_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hola\"}}]}\n\n")
+			}
 			if e.hangAfterFirstChunk {
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
@@ -305,8 +319,15 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 			return
 		}
 		time.Sleep(e.queueBeforeFirstToken + time.Duration((e.promptMs+e.predictedMs)*float64(time.Millisecond)))
+		message := map[string]any{"role": "assistant", "content": "resumen"}
+		if e.toolCallReply {
+			message = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+				map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "topic_post", "arguments": "{}"}},
+				map[string]any{"id": "c2", "type": "function", "function": map[string]any{"name": "rag_search", "arguments": "{}"}},
+			}}
+		}
 		writeTestJSON(w, 200, map[string]any{
-			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "resumen"}}},
+			"choices": []any{map[string]any{"message": message}},
 			"timings": tm,
 		})
 	})
@@ -863,6 +884,38 @@ func TestWaitSlotIsFirstTokenMinusPrompt(t *testing.T) {
 			if !ok || ft < 500 {
 				t.Fatalf("a streamed reply records its first token (>= queue+prompt = 500 ms): %v", rec["first_token_ms"])
 			}
+		}
+	}
+}
+
+// Every record says how many tool calls the model returned (tool_calls_n):
+// distinct calls, not deltas, streamed or whole. The HUD claimed actions in
+// turns that called nothing (2026-09-24, "acabo de publicar el post" with zero
+// calls); the guard for that needs a count taken outside the HUD.
+func TestToolCallsCountedPerRequest(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	body := func(stream bool) map[string]any {
+		return map[string]any{"stream": stream, "messages": []any{map[string]any{"role": "user", "content": "hola"}}}
+	}
+	for _, stream := range []bool{true, false} {
+		for _, e := range []*fakeEngine{r.decode, r.prefill} {
+			e.toolCallReply = false
+		}
+		if code, _ := postChat(t, r.gateway.URL, body(stream)); code != 200 {
+			t.Fatalf("chat (stream=%v) failed: %d", stream, code)
+		}
+		if n, _ := lastRequestRecord(t, r.gateway.URL)["tool_calls_n"].(float64); n != 0 {
+			t.Fatalf("stream=%v: a text reply has 0 tool calls, got %v", stream, n)
+		}
+		for _, e := range []*fakeEngine{r.decode, r.prefill} {
+			e.toolCallReply = true
+		}
+		if code, _ := postChat(t, r.gateway.URL, body(stream)); code != 200 {
+			t.Fatalf("chat (stream=%v) failed: %d", stream, code)
+		}
+		rec := lastRequestRecord(t, r.gateway.URL)
+		if n, _ := rec["tool_calls_n"].(float64); n != 2 {
+			t.Fatalf("stream=%v: two tool calls (three deltas) must count 2, got %v (record %v)", stream, rec["tool_calls_n"], rec)
 		}
 	}
 }

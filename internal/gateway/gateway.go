@@ -1095,6 +1095,14 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 	if n, ok := timingInt(resp, "predicted_n"); ok {
 		p.fields["predicted_n"] = n
 	}
+	// tool_calls_n: how many tool calls the model returned in this reply. The
+	// streamed path counts them on the wire (distinct tool_calls indexes) and
+	// leaves a note; a whole reply is counted here. Asked for 2026-09-24: the
+	// HUD claimed actions ("acabo de publicar el post") in turns that called
+	// nothing, and the guard for that needs a count taken outside the HUD.
+	if _, ok := p.fields["tool_calls_n"]; !ok {
+		p.fields["tool_calls_n"] = toolCallsIn(resp)
+	}
 	if v, ok := timingFloat(resp, "predicted_per_second"); ok {
 		p.fields["tg_tokps"] = v
 	}
@@ -1361,6 +1369,20 @@ func timingInt(resp Body, key string) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// toolCallsIn counts the tool calls of a whole (non-streamed) chat reply.
+func toolCallsIn(resp Body) int {
+	n := 0
+	choices, _ := resp["choices"].([]any)
+	for _, c := range choices {
+		cm, _ := c.(map[string]any)
+		msg, _ := cm["message"].(map[string]any)
+		if tc, ok := msg["tool_calls"].([]any); ok {
+			n += len(tc)
+		}
+	}
+	return n
 }
 
 func timingFloat(resp Body, key string) (float64, bool) {

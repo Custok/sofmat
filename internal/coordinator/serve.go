@@ -377,6 +377,61 @@ func noteWait(extra gateway.Headers, key string, ms float64) {
 	extra[key] = strconv.FormatFloat(ms, 'f', 3, 64)
 }
 
+// sseToolCalls counts the DISTINCT tool calls of a streamed chat reply: every
+// SSE event is reassembled across reads and parsed, and each tool_calls delta
+// is keyed by its index (the first delta of a call carries id/type/name, the
+// rest only argument fragments — counting deltas would count tokens).
+type sseToolCalls struct {
+	pending []byte
+	seen    map[int]bool
+}
+
+func (s *sseToolCalls) feed(chunk []byte) {
+	s.pending = append(s.pending, chunk...)
+	for {
+		i := bytes.Index(s.pending, []byte("\n\n"))
+		if i < 0 {
+			return
+		}
+		event := s.pending[:i]
+		s.pending = s.pending[i+2:]
+		s.event(event)
+	}
+}
+
+func (s *sseToolCalls) event(ev []byte) {
+	ev = bytes.TrimSpace(ev)
+	if !bytes.HasPrefix(ev, []byte("data: {")) {
+		return
+	}
+	var msg struct {
+		Choices []struct {
+			Delta struct {
+				ToolCalls []struct {
+					Index *int `json:"index"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(ev[len("data: "):], &msg); err != nil {
+		return
+	}
+	for _, c := range msg.Choices {
+		for k, tc := range c.Delta.ToolCalls {
+			idx := k
+			if tc.Index != nil {
+				idx = *tc.Index
+			}
+			if s.seen == nil {
+				s.seen = map[int]bool{}
+			}
+			s.seen[idx] = true
+		}
+	}
+}
+
+func (s *sseToolCalls) n() int { return len(s.seen) }
+
 // carriesToken reports whether a streamed chunk holds generated output (text,
 // reasoning or a tool call) rather than only a role/empty delta.
 func carriesToken(chunk []byte) bool {
@@ -1008,6 +1063,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 	const tailKeep = 16 << 10
 	var tail, head []byte
 	streamed, events := 0, 0
+	var toolCalls sseToolCalls
 	var readErr error
 	clientGone := false
 	// A stream that produces nothing used to be recorded as a request with no
@@ -1058,6 +1114,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 		// streamed, then "context canceled" at 21 s — the client, not the engine).
 		plan.Note("stream_ms", msSince(t0))
 		plan.Note("engine_events", events)
+		plan.Note("tool_calls_n", toolCalls.n())
 		logAnomaly(engineName(node), resp.StatusCode, streamed, readErr, why0(readErr))
 		s.gw.Finish(plan, fin)
 	}()
@@ -1074,6 +1131,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 				plan.Note("first_token_ms", msSince(t0))
 			}
 			events += bytes.Count(buf[:n], []byte("data: {"))
+			toolCalls.feed(buf[:n])
 			streamed += n
 			if len(head) < 400 {
 				head = append(head, buf[:min(n, 400-len(head))]...)
