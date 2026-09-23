@@ -921,6 +921,54 @@ func TestResidentCreditOnlySameShape(t *testing.T) {
 	}
 }
 
+// kv_source says where the cached part of a turn's prompt came from, derived
+// from what the coordinator already measures (the engine only reports cache_n):
+// slot = the whole conversation came back and the pool held it at admit;
+// ram = the whole conversation came back although the pool did NOT hold it
+// (the engine's RAM prompt cache); lcp = only the shared catalogue prefix;
+// none = nothing. Asked for on 2026-09-23 (debian): 3 of David's 17 turns came
+// back cold and nobody could say whether the RAM cache ever rescues anything.
+func TestFinishClassifiesKVSource(t *testing.T) {
+	var cacheN float64
+	poolHeld := 0
+	gw, _ := newTestGW(t, func(o *Options) {
+		o.PoolHeld = func() (int, bool) { return poolHeld, true }
+		o.BackendCall = func(body Body, extra Headers) (Body, error) {
+			r := okResp()
+			pt := EstimateTokens(prefixTextOf(body), nil) + EstimateTokens(tailTextOf(body), nil)
+			r["timings"] = map[string]any{"cache_n": cacheN, "prompt_n": float64(pt) - cacheN, "predicted_n": 20.0}
+			return r, nil
+		}
+	})
+	long := strings.Repeat("resultado de la herramienta ", 1100)
+	turn := func(n int) Body { return toolsBody("sys", 40, long, "respuesta", strings.Repeat("sigue ", 160*n)) }
+	total := func(b Body) int { // what the slot holds after serving b: the prompt + the 20-token reply
+		return EstimateTokens(prefixTextOf(b), nil) + EstimateTokens(tailTextOf(b), nil) + 20
+	}
+	want := func(step string, src string) {
+		t.Helper()
+		if got := lastRecord(t, gw)["kv_source"]; got != src {
+			t.Fatalf("%s: kv_source must be %q, got %v (record %v)", step, src, got, lastRecord(t, gw))
+		}
+	}
+	// turn 1: cold, nothing cached anywhere
+	cacheN, poolHeld = 0, 0
+	gw.Chat(Headers{}, turn(1))
+	want("turn 1 cold", "none")
+	// turn 2: the engine hands back the whole conversation and the pool held it
+	cacheN, poolHeld = float64(total(turn(1))), total(turn(1))+5000
+	gw.Chat(Headers{}, turn(2))
+	want("turn 2 resident", "slot")
+	// turn 3: the whole conversation comes back although the pool held almost nothing
+	cacheN, poolHeld = float64(total(turn(2))), 100
+	gw.Chat(Headers{}, turn(3))
+	want("turn 3 restored from RAM", "ram")
+	// turn 4: only the shared catalogue prefix was reused (another slot / copy)
+	cacheN, poolHeld = float64(EstimateTokens(prefixTextOf(turn(4)), nil)), 60000
+	gw.Chat(Headers{}, turn(4))
+	want("turn 4 prefix only", "lcp")
+}
+
 // The resident total of the conversation (when verifiably still in its slot)
 // is credited against the whole prompt: a 15k prefix + 47k tail of which the
 // slot holds 43.6k is ~19k of new work, not 47k (measured 2026-09-23 23:05:

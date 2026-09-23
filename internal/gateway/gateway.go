@@ -964,6 +964,26 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 			// the slot keeps the reply too: /slots reports prompt + generated (+1
 			// for the stop token), measured 2026-09-23 22:31 (16 481 + 123 -> 16 605).
 			gen, _ := timingInt(resp, "predicted_n")
+			// kv_source: where the cached part of this prompt came from, derived
+			// from what was measured (the engine only says cache_n). Read BEFORE
+			// convLast is overwritten with this turn. "slot": the whole conversation
+			// (>= 80 % of what its last turn left) came back and the pool held it at
+			// admit. "ram": the whole conversation came back although the pool held
+			// LESS than that at admit — it cannot have been in VRAM, so the engine's
+			// RAM prompt cache restored it. "lcp": only the shared catalogue prefix
+			// (another conversation's slot, or a copy of the prefix). "none": cold.
+			// Asked for 2026-09-23: three of David's turns came back cold and nobody
+			// could say whether the RAM cache ever rescues anything (fix#12).
+			src := "none"
+			if prev, ok := g.convLast.get(p.ckey); ok && prev.total > 0 && cn >= prev.total*8/10 {
+				src = "slot"
+				if held, ok := p.fields["pool_held_at_admit"].(int); ok && held < prev.total*8/10 {
+					src = "ram"
+				}
+			} else if p.prefixToks > 0 && cn >= p.prefixToks/2 {
+				src = "lcp"
+			}
+			p.fields["kv_source"] = src
 			// what the slot holds of this conversation now, with the shape of the
 			// prompt that built it: the next turn's admission credits it (fix#10)
 			// only if it keeps that shape and the slot still has it.
