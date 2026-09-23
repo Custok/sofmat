@@ -331,6 +331,60 @@ func TestDecodeRoomCountsOnlyGeneratingSlots(t *testing.T) {
 	}
 }
 
+// An engine running --no-kv-unified has PER-SLOT KV: /props reports one slot's
+// capacity as n_ctx and the other slots' cache does not count against it. The
+// room for a restore is then the target slot's own capacity, and erasing a
+// neighbour frees nothing — it only costs that neighbour its conversation.
+// Summing every slot against the per-slot budget (the unified rule) would call
+// this half-empty engine "full" (30k + 25k > 50k) and evict the neighbour.
+func TestSplitKVRoomIsPerSlot(t *testing.T) {
+	var erased []string
+	dec := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slots" {
+			writeTestJSON(w, 200, []any{
+				map[string]any{"id": 0, "is_processing": false, "n_prompt_tokens": 30000.0},
+				map[string]any{"id": 1, "is_processing": false, "n_prompt_tokens": 25000.0},
+			})
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/slots/") && r.URL.Query().Get("action") == "erase" {
+			erased = append(erased, strings.TrimPrefix(r.URL.Path, "/slots/"))
+		}
+		writeTestJSON(w, 200, map[string]any{})
+	}))
+	defer dec.Close()
+
+	k := newKVPipe("http://prefill", dec.URL, "http://pc", "http://dc")
+	k.setEngineBudget(dec.URL, 50048) // what /props says per slot under --no-kv-unified
+
+	// unified rule (control): 30k + 25k + 40k > 50k -> erase the target AND the neighbour
+	slot, ri, err := k.makeDecodeRoom(dec.URL, 40000, "1")
+	if err != nil || slot != "1" || ri.erased != 2 {
+		t.Fatalf("unified control: slot=%q erased=%d err=%v", slot, ri.erased, err)
+	}
+	if free, _, _, ok := k.decodeRoom(dec.URL); !ok || free != 50048 {
+		t.Fatalf("unified control: idle cache is reclaimable, free=%d", free)
+	}
+
+	// per-slot: the same restore only needs slot 1's own 50k -> erase the target only
+	erased = nil
+	k.setEngineSplit(dec.URL, true)
+	slot, ri, err = k.makeDecodeRoom(dec.URL, 40000, "1")
+	if err != nil || slot != "1" {
+		t.Fatalf("split: slot=%q err=%v", slot, err)
+	}
+	if ri.erased != 1 || len(erased) != 1 || erased[0] != "1" {
+		t.Fatalf("split: only the target slot may be erased, got erased=%v (%d)", erased, ri.erased)
+	}
+	// a state bigger than one slot cannot be restored, whatever the neighbours hold
+	if _, _, err := k.makeDecodeRoom(dec.URL, 60000, "1"); !errors.Is(err, gateway.ErrSkipHandoff) {
+		t.Fatalf("split: a 60k state must be skipped on a 50k slot, got %v", err)
+	}
+	if free, _, _, ok := k.decodeRoom(dec.URL); !ok || free != 50048 {
+		t.Fatalf("split: an idle slot offers its whole capacity, free=%d", free)
+	}
+}
+
 // When no engine has room the request is REFUSED, not sent: sending it blows
 // the unified budget and llama-server then fails every concurrent request.
 func TestFullEngineRefusesInsteadOfOverloading(t *testing.T) {

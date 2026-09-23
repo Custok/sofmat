@@ -91,6 +91,9 @@ type enginePool struct {
 	free     []int
 	inflight int
 	budget   int
+	// split: the engine's KV is per slot (--no-kv-unified), so budget is ONE
+	// slot's capacity and the other slots' cache does not count against it.
+	split bool
 }
 
 type kvPipe struct {
@@ -242,7 +245,11 @@ func (k *kvPipe) acquireSlot(engine string, estTokens int) (slot int, release fu
 		p := k.poolOf(engine)
 		room := int(float64(p.budget) * prefillBudgetUse)
 		used := p.inflight
-		if held > used {
+		if p.split {
+			// per-slot KV: a prompt only needs its own slot's capacity; neither the
+			// other prefills in flight nor the decode cache share it.
+			used = 0
+		} else if held > used {
 			// the engine may also be serving decode traffic; that cache occupies
 			// the same unified budget as the prefill sequences
 			used = held
@@ -311,7 +318,7 @@ func (k *kvPipe) makeDecodeRoom(decodeURL string, need int, want string) (string
 		return want, ri, nil // cannot read: behave as before
 	}
 	k.slotMu.Lock()
-	budget := k.poolOf(decodeURL).budget
+	budget, split := k.poolOf(decodeURL).budget, k.poolOf(decodeURL).split
 	k.slotMu.Unlock()
 	if budget <= 0 {
 		budget = defaultCtx
@@ -366,6 +373,18 @@ func (k *kvPipe) makeDecodeRoom(decodeURL string, need int, want string) (string
 		}
 	}
 	erase(target.id) // always: the restore needs its own slot empty
+	if split {
+		// Per-slot KV (--no-kv-unified): the restore only needs the TARGET slot's
+		// own capacity (budget = n_ctx_slot, what /props reports). The other slots
+		// do not share it, so summing their cache against the budget would call a
+		// half-empty engine "full" (30k + 25k > 50k) and erasing a neighbour frees
+		// nothing for this restore — it only costs that neighbour its conversation.
+		if need > budget {
+			return "", ri, fmt.Errorf("%w: el estado (%d tokens) no cabe en un slot de %d",
+				gateway.ErrSkipHandoff, need, budget)
+		}
+		return target.id, ri, nil
+	}
 	for _, s := range idle {
 		if held+need <= budget {
 			break
@@ -426,6 +445,23 @@ func (k *kvPipe) setEngineBudget(engine string, n int) {
 	k.slotMu.Lock()
 	k.poolOf(engine).budget = n
 	k.slotMu.Unlock()
+}
+
+// setEngineSplit records that an engine's KV is split per slot
+// (--no-kv-unified): its budget is one slot's capacity, not a shared pool.
+func (k *kvPipe) setEngineSplit(engine string, split bool) {
+	if engine == "" {
+		return
+	}
+	k.slotMu.Lock()
+	k.poolOf(engine).split = split
+	k.slotMu.Unlock()
+}
+
+func (k *kvPipe) engineSplit(engine string) bool {
+	k.slotMu.Lock()
+	defer k.slotMu.Unlock()
+	return k.poolOf(engine).split
 }
 
 // templateFields are the chat fields that shape the templated prompt; the same
@@ -718,10 +754,15 @@ func (k *kvPipe) decodeRoom(decodeURL string) (free int, evict string, evictHeld
 		evictHeld = 0
 	}
 	k.slotMu.Lock()
-	budget := k.poolOf(decodeURL).budget
+	budget, split := k.poolOf(decodeURL).budget, k.poolOf(decodeURL).split
 	k.slotMu.Unlock()
 	if budget <= 0 {
 		budget = defaultCtx
+	}
+	if split {
+		// per-slot KV: an idle slot, once erased, offers its whole capacity
+		// whatever the generating slots hold (they do not share it).
+		return budget, evict, evictHeld, true
 	}
 	return budget - held, evict, evictHeld, true
 }

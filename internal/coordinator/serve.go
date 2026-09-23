@@ -456,7 +456,15 @@ func kvPipeFrom(cfg *config.Config, bc gateway.BackendConfig) *kvPipe {
 	if preCtl == "" || decCtl == "" {
 		return nil
 	}
-	return newKVPipe(bc.PrefillURL, bc.DecodeEntryURL, preCtl, decCtl)
+	kp := newKVPipe(bc.PrefillURL, bc.DecodeEntryURL, preCtl, decCtl)
+	// an engine running --no-kv-unified has per-slot KV: its room is made per
+	// slot, never by summing every slot's cache against one budget.
+	for _, in := range cfg.Instances {
+		if in.Endpoint != "" && in.KVUnified != nil && !*in.KVUnified {
+			kp.setEngineSplit(in.Endpoint, true)
+		}
+	}
+	return kp
 }
 
 // backendConfigFrom resolves decode/prefill endpoints from the config instances.

@@ -173,6 +173,15 @@ type Instance struct {
 	// the gguf path (informational; the running process owns the real path).
 	ModelName string `json:"model_name"`
 	Model     string `json:"model"`
+
+	// KVUnified says whether the engine's KV cache is ONE pool shared by all its
+	// slots (llama-server's default, --kv-unified) or split per slot
+	// (--no-kv-unified: each slot owns n_ctx/n_parallel and /props reports that
+	// per-slot size as n_ctx). The coordinator makes room for a restore very
+	// differently in the two cases: in a shared pool every slot's cache counts
+	// against the budget; per slot only the target slot's own capacity matters,
+	// and erasing a neighbour frees nothing for this restore. nil = unified.
+	KVUnified *bool `json:"kv_unified,omitempty"`
 }
 
 // Stage is a node's inclusive layer range within an instance's pipeline.
