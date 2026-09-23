@@ -931,42 +931,77 @@ func TestResidentCreditOnlySameShape(t *testing.T) {
 func TestFinishClassifiesKVSource(t *testing.T) {
 	var cacheN float64
 	poolHeld := 0
-	gw, _ := newTestGW(t, func(o *Options) {
+	engSlot := "2" // the engine slot that served (what /slots would show)
+	engine := func(o *Options) {
 		o.PoolHeld = func() (int, bool) { return poolHeld, true }
+		o.SlotHolding = func(n int) (string, bool) { return engSlot, true }
 		o.BackendCall = func(body Body, extra Headers) (Body, error) {
 			r := okResp()
 			pt := EstimateTokens(prefixTextOf(body), nil) + EstimateTokens(tailTextOf(body), nil)
 			r["timings"] = map[string]any{"cache_n": cacheN, "prompt_n": float64(pt) - cacheN, "predicted_n": 20.0}
 			return r, nil
 		}
-	})
-	long := strings.Repeat("resultado de la herramienta ", 1100)
-	turn := func(n int) Body { return toolsBody("sys", 40, long, "respuesta", strings.Repeat("sigue ", 160*n)) }
+	}
+	// decode-direct throughout (the HUD's threshold), so the source is the engine's
+	gw, _ := newTestGW(t, func(o *Options) { engine(o); o.Threshold = 40000 })
+	// a short first message (the conversation's identity) and a history that
+	// grows ~6k tokens per turn, so a re-sliced history is a real shrink
+	long := strings.Repeat("resultado de la herramienta ", 300)
+	turn := func(n int) Body { return toolsBody("sys", 40, long, "respuesta", strings.Repeat("sigue ", 4000*n)) }
 	total := func(b Body) int { // what the slot holds after serving b: the prompt + the 20-token reply
 		return EstimateTokens(prefixTextOf(b), nil) + EstimateTokens(tailTextOf(b), nil) + 20
 	}
-	want := func(step string, src string) {
+	want := func(g *Gateway, step string, src string) {
 		t.Helper()
-		if got := lastRecord(t, gw)["kv_source"]; got != src {
-			t.Fatalf("%s: kv_source must be %q, got %v (record %v)", step, src, got, lastRecord(t, gw))
+		if got := lastRecord(t, g)["kv_source"]; got != src {
+			t.Fatalf("%s: kv_source must be %q, got %v (record %v)", step, src, got, lastRecord(t, g))
 		}
 	}
 	// turn 1: cold, nothing cached anywhere
 	cacheN, poolHeld = 0, 0
 	gw.Chat(Headers{}, turn(1))
-	want("turn 1 cold", "none")
+	want(gw, "turn 1 cold", "none")
 	// turn 2: the engine hands back the whole conversation and the pool held it
 	cacheN, poolHeld = float64(total(turn(1))), total(turn(1))+5000
 	gw.Chat(Headers{}, turn(2))
-	want("turn 2 resident", "slot")
+	want(gw, "turn 2 resident", "slot")
 	// turn 3: the whole conversation comes back although the pool held almost nothing
 	cacheN, poolHeld = float64(total(turn(2))), 100
 	gw.Chat(Headers{}, turn(3))
-	want("turn 3 restored from RAM", "ram")
-	// turn 4: only the shared catalogue prefix was reused (another slot / copy)
+	want(gw, "turn 3 restored from RAM", "ram")
+	// turn 4: only the catalogue prefix was reused, by the SAME slot that holds
+	// the conversation: the prompt diverged inside its own conversation (the HUD
+	// re-sliced the history: id 80 of 2026-09-23), not a copy found elsewhere
 	cacheN, poolHeld = float64(EstimateTokens(prefixTextOf(turn(4)), nil)), 60000
 	gw.Chat(Headers{}, turn(4))
-	want("turn 4 prefix only", "lcp")
+	want(gw, "turn 4 prefix only, own slot", "lcp-self")
+	// turn 4b: the same prefix-only reuse served by ANOTHER slot (a copy)
+	engSlot = "3"
+	gw.Chat(Headers{}, turn(4))
+	want(gw, "turn 4b prefix only, another slot", "lcp")
+	// turn 5: the HUD re-sliced the history (id 12 -> 19 of 2026-09-23: the tail
+	// shrank from 47k to 1.4k) yet the slot served everything the shorter prompt
+	// shares with it: that is the slot, not a prefix-only hit
+	short := toolsBody("sys", 40, long, "respuesta", "sigue")
+	cacheN, poolHeld = float64(total(short)-40), 60000 // all but the last few tokens of the shorter prompt
+	gw.Chat(Headers{}, short)
+	want(gw, "turn 5 shrunken prompt served from its slot", "slot")
+	// a handoff (prefill route): the COORDINATOR restored the state from a file
+	// (id 18 of 2026-09-23: n_restored 51 817). Not the engine's RAM cache, and
+	// the pool at admit did not include it either — it must not count as "ram".
+	gw2, c2 := newTestGW(t, engine)
+	cacheN, poolHeld = 0, 0
+	gw2.Chat(Headers{}, turn(1))
+	if len(c2.prefill) != 1 {
+		t.Fatalf("test premise: a cold large prompt hands off, got %d prefills", len(c2.prefill))
+	}
+	cacheN, poolHeld = float64(total(turn(1))), 100 // the restore lands after admit
+	gw2.Chat(Headers{}, turn(2))
+	if lastRecord(t, gw2)["admitted_via"] == "prefill" {
+		want(gw2, "handoff turn", "handoff")
+	} else {
+		want(gw2, "decode turn after a handoff, whole conversation back with an empty pool", "ram")
+	}
 }
 
 // The resident total of the conversation (when verifiably still in its slot)

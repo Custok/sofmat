@@ -974,16 +974,38 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 			// (another conversation's slot, or a copy of the prefix). "none": cold.
 			// Asked for 2026-09-23: three of David's turns came back cold and nobody
 			// could say whether the RAM cache ever rescues anything (fix#12).
+			// Timing that makes "ram" valid: pool_held_at_admit is read in Prepare,
+			// before the decode is dialled, so before the engine assigns the slot
+			// and restores from its RAM cache (its snapshot is at most 1 s OLDER,
+			// never newer). "handoff": the coordinator itself restored the state
+			// from a file (prefill route) — that is not the engine's cache, and it
+			// must not inflate the "ram" count (id 18 of 2026-09-23 restored 51 817
+			// tokens this way). A conversation the HUD SHRANK (the tail re-sliced)
+			// legitimately reuses less than its last total: "whole" is measured
+			// against the smaller of the last total and this prompt, and only when
+			// the reuse clearly exceeds the catalogue prefix — otherwise it is "lcp".
 			src := "none"
-			if prev, ok := g.convLast.get(p.ckey); ok && prev.total > 0 && cn >= prev.total*8/10 {
+			total := cn + pn
+			prev, hadPrev := g.convLast.get(p.ckey)
+			whole := hadPrev && prev.total > 0 && cn > p.prefixToks*11/10 &&
+				cn >= min(prev.total, total)*8/10
+			switch {
+			case p.viaPrefill:
+				src = "handoff"
+			case whole:
 				src = "slot"
 				if held, ok := p.fields["pool_held_at_admit"].(int); ok && held < prev.total*8/10 {
 					src = "ram"
 				}
-			} else if p.prefixToks > 0 && cn >= p.prefixToks/2 {
+			case p.prefixToks > 0 && cn >= p.prefixToks/2:
 				src = "lcp"
 			}
-			p.fields["kv_source"] = src
+			// the slot this conversation was known to live in BEFORE this turn: an
+			// "lcp" served by that same slot is the prompt diverging inside its own
+			// conversation (the HUD re-slicing the history: id 80 of 2026-09-23,
+			// cache_n = the catalogue with the whole conversation still in slot 2),
+			// not a copy found elsewhere — "lcp-self".
+			prevSlot := g.convSlot.get(p.ckey)
 			// what the slot holds of this conversation now, with the shape of the
 			// prompt that built it: the next turn's admission credits it (fix#10)
 			// only if it keeps that shape and the slot still has it.
@@ -991,6 +1013,9 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 				g.convLast.set(p.ckey, convTurn{prefix: p.prefixToks, tail: p.tailToks, total: cn + pn + gen})
 			}
 			if s, ok := g.slotOfSafe(cn + pn + gen); ok && s != "" {
+				if src == "lcp" && prevSlot != "" && s == prevSlot {
+					src = "lcp-self"
+				}
 				p.fields["slot_engine"] = s
 				if recorded, _ := p.fields["slot"].(string); recorded != "" && recorded != s {
 					p.fields["slot_mismatch"] = true
@@ -999,6 +1024,7 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 					g.convSlot.set(p.ckey, s)
 				}
 			}
+			p.fields["kv_source"] = src
 		}
 	}
 	// ...unless the engine just told us it did NOT have it: a reply whose cache_n
