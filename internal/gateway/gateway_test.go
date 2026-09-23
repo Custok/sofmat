@@ -794,6 +794,52 @@ func TestPoolHeldAtAdmitLogged(t *testing.T) {
 	}
 }
 
+// After a decode turn the gateway LEARNS which slot served it (the engine picks
+// by content; the ring only guessed) and checks the next turn's residency
+// there. RED before fix#6: the record had no slot_engine and the second turn
+// was still pinned/checked on the ring's pick.
+func TestFinishLearnsEngineSlot(t *testing.T) {
+	var seen []Headers // the mutate closure cannot see newTestGW's recorder
+	gw, _ := newTestGW(t, func(o *Options) {
+		o.BackendCall = func(body Body, extra Headers) (Body, error) {
+			seen = append(seen, extra)
+			c2 := okResp()
+			c2["timings"] = map[string]any{"cache_n": 60.0, "prompt_n": 40.0}
+			return c2, nil
+		}
+		o.SlotHolding = func(n int) (string, bool) {
+			if n == 100 {
+				return "1", true // the engine served this 100-token prompt in slot 1
+			}
+			return "", false
+		}
+	})
+	sys := strings.Repeat("s", 4000)
+	if _, err := gw.Chat(Headers{}, chatBody(sys, "hola")); err != nil {
+		t.Fatal(err)
+	}
+	rec := lastRecord(t, gw)
+	if rec["slot_engine"] != "1" {
+		t.Fatalf("record must carry the engine's slot, got %v", rec["slot_engine"])
+	}
+	if rec["slot"] != "1" && rec["slot_mismatch"] != true {
+		t.Fatalf("a slot different from the ring's pick must be flagged: %v", rec)
+	}
+	// the next turn of the SAME conversation is routed to the learned slot
+	gw.Chat(Headers{}, Body{"messages": []any{
+		map[string]any{"role": "system", "content": sys},
+		map[string]any{"role": "user", "content": "hola"},
+		map[string]any{"role": "assistant", "content": "qué tal"},
+		map[string]any{"role": "user", "content": "sigue"},
+	}})
+	if len(seen) != 2 {
+		t.Fatalf("both turns must reach the decode: %d", len(seen))
+	}
+	if got := seen[1]["x-sofmat-slot"]; got != "1" {
+		t.Fatalf("next turn must go to the slot the engine used (1), got %q", got)
+	}
+}
+
 func itoa(i int) string {
 	return strings.TrimSpace(strings.Repeat(" ", 0) + string(rune('0'+i)))
 }

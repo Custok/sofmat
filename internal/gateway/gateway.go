@@ -107,6 +107,7 @@ type Gateway struct {
 	allowed   func(Body) bool              // optional; false = this request must not be handed off
 	resident  func(Body, int, string) bool // optional; false = the engine no longer holds that prefix in the given slot
 	poolHeld  func() (int, bool)           // optional; what the decode's slots hold at admission (request log only)
+	slotOf    func(int) (string, bool)     // optional; which decode slot holds a prompt of exactly n tokens (learns the real slot)
 	noThink   bool                         // ask the template to skip the chain-of-thought
 	replyRoom func(int) int                // how big a reply the engine can still host
 	mode      string                       // ModeBusy / ModeAlways / ModeAuto
@@ -170,6 +171,18 @@ type Options struct {
 	// sampling /slots at the right second (a restored KV that is gone by the next
 	// turn shows up as a drop between two consecutive rows). nil = not logged.
 	PoolHeld func() (int, bool)
+
+	// SlotHolding answers which decode slot holds a prompt of exactly that many
+	// tokens right now ("" / false when none or more than one does). Finish asks
+	// it after every decode turn with cache_n + prompt_n — the engine's own
+	// n_prompt_tokens for the slot that served — to LEARN where the conversation
+	// really lives. Since cache-hot no longer pins id_slot, the engine picks the
+	// slot by content and the ring's pick is a guess: the residency probe then
+	// read a slot the conversation was never in, called it evicted, counted the
+	// whole resident prompt as new and only an idle decode saved the turn from a
+	// handoff (measured 2026-09-23 22:16, five turns: known_hot 13 616,
+	// hot_prefix 0, cache_n 15k, engine slot 1 vs recorded slot 3).
+	SlotHolding func(promptTokens int) (slot string, ok bool)
 
 	// HandoffAllowed vetoes the handoff for a request the caller knows must not
 	// take it. With more than one decode engine the restored state lands in the
@@ -257,6 +270,7 @@ func New(o Options) (*Gateway, error) {
 		allowed:    o.HandoffAllowed,
 		resident:   o.CacheResident,
 		poolHeld:   o.PoolHeld,
+		slotOf:     o.SlotHolding,
 		noThink:    o.NoThink,
 		replyRoom:  o.ReplyRoom,
 		mode:       mode,
@@ -393,6 +407,19 @@ func (g *Gateway) residentFor(body Body, expect int, slot string) bool {
 		ok = g.resident(body, expect, slot)
 	}()
 	return ok
+}
+
+// slotOfSafe: a probe error or panic just leaves the slot as it was.
+func (g *Gateway) slotOfSafe(n int) (slot string, ok bool) {
+	if g.slotOf == nil || n <= 0 {
+		return "", false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slot, ok = "", false
+		}
+	}()
+	return g.slotOf(n)
 }
 
 // poolHeldSafe: a probe error or panic just leaves the field out of the record.
@@ -799,6 +826,24 @@ func (p *Plan) Note(key string, v any) {
 func (g *Gateway) Finish(p *Plan, resp Body) {
 	// the slot now holds this prefix's KV — record it for later admissions.
 	g.known.Record(p.pkey, p.prefixToks)
+	// Learn where the conversation REALLY lives: the engine picks the slot by
+	// content, the coordinator only guessed. cache_n + prompt_n is the engine's
+	// n_prompt_tokens for the slot that just served, so the slot reporting exactly
+	// that many tokens is it (unique, or we keep the guess). Written to the record
+	// as slot_engine (+ slot_mismatch) and used by the next turn's residency probe.
+	if cn, okc := timingInt(resp, "cache_n"); okc {
+		if pn, okp := timingInt(resp, "prompt_n"); okp {
+			if s, ok := g.slotOfSafe(cn + pn); ok && s != "" {
+				p.fields["slot_engine"] = s
+				if recorded, _ := p.fields["slot"].(string); recorded != "" && recorded != s {
+					p.fields["slot_mismatch"] = true
+				}
+				if p.ckey != "" {
+					g.convSlot.set(p.ckey, s)
+				}
+			}
+		}
+	}
 	// ...unless the engine just told us it did NOT have it: a reply whose cache_n
 	// is well below the prefix means the registry was stale (evicted slot, other
 	// route). Forget it so the next admission counts the whole prompt again.

@@ -37,7 +37,15 @@ type fakeEngine struct {
 	// slot reprocesses the whole prompt. Modelling placement per slot (not a
 	// single "held" number that always sat on slot 0) is what lets a test
 	// reproduce the stale-pin ping-pong: KV on slot X, the pin points at slot Y.
-	heldBySlot  map[int]int
+	heldBySlot map[int]int
+	// lcp models the real llama-server's slot choice for an UNPINNED request: it
+	// reuses the slot that already holds this conversation (longest common
+	// prefix) and otherwise takes directSlot — which need not be the slot the
+	// coordinator's ring guessed. slotConv remembers which conversation each
+	// slot holds. Off by default so the older tests keep their fixed semantics.
+	lcp         bool
+	directSlot  int
+	slotConv    map[int]string
 	restored    []string
 	restoreSlot string
 	restoreFail string           // when set, /slots/N?action=restore answers 500 with this
@@ -182,8 +190,30 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 		if pinned {
 			slotID = int(idSlotF)
 		}
+		// the conversation's identity, the way LCP would see it: its first turn
+		convKey := ""
+		if msgs, _ := b["messages"].([]any); len(msgs) > 0 {
+			for _, m := range msgs {
+				mm, _ := m.(map[string]any)
+				if mm != nil && mm["role"] != "system" {
+					c, _ := mm["content"].(string)
+					convKey = c
+					break
+				}
+			}
+		}
 		e.mu.Lock()
 		e.chats = append(e.chats, b)
+		lcpHit := false
+		if !pinned && e.lcp {
+			slotID = e.directSlot
+			for id, ck := range e.slotConv {
+				if ck != "" && ck == convKey && e.heldBySlot[id] > 0 {
+					slotID, lcpHit = id, true
+					break
+				}
+			}
+		}
 		// The engine reuses cache ONLY when pinned to a slot that actually holds
 		// this conversation's KV. A pin to an evicted slot reprocesses the whole
 		// prompt (prompt_n = the full count, cache_n 0) — the exact ping-pong the
@@ -199,7 +229,22 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 			promptN = 1
 			cacheN = float64(e.heldBySlot[slotID])
 		}
+		if lcpHit {
+			// the real engine: cache_n + prompt_n == the slot's new n_prompt_tokens
+			cacheN = float64(e.heldBySlot[slotID])
+			promptN = float64(promptTokens) - cacheN
+			if promptN < 1 {
+				promptN = 1
+				cacheN = float64(promptTokens) - 1
+			}
+		}
 		e.heldBySlot[slotID] = promptTokens
+		if e.lcp {
+			if e.slotConv == nil {
+				e.slotConv = map[int]string{}
+			}
+			e.slotConv[slotID] = convKey
+		}
 		e.mu.Unlock()
 		tm := map[string]any{"prompt_n": promptN, "cache_n": cacheN, "predicted_n": 43, "predicted_per_second": 40.5}
 		if s, _ := b["stream"].(bool); s {
@@ -580,6 +625,74 @@ func TestStalePinnedSlotDoesNotReprocess(t *testing.T) {
 	// the pinned slot really held (or was restored with) the KV, so the turn reuses it
 	if pn != 1.0 {
 		t.Fatalf("turn 2 must reuse the KV (prompt_n 1), got %v: %v", rec["prompt_n"], rec)
+	}
+}
+
+// The engine picks the slot for a direct (unpinned) turn by content; the ring
+// only guessed. Without learning the real slot the next turn's residency probe
+// reads the guessed slot (empty), calls the prefix evicted, counts the whole
+// resident prompt as new and only an idle decode keeps it off a handoff
+// (measured 2026-09-23 22:16: five turns, hot_prefix 0, engine slot 1 vs
+// recorded 3). RED before fix#6: no slot_engine, hot_prefix_tokens 0 on turn 2.
+func TestCoordinatorLearnsEngineSlot(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	r.decode.mu.Lock()
+	r.decode.lcp, r.decode.directSlot = true, 1 // the engine will serve in slot 1
+	r.decode.busy = false                       // idle decode: direct turns
+	r.decode.mu.Unlock()
+	// ~5k tokens: above the short-prompt cut-off (served on the decode) and below
+	// the prefill threshold (no handoff) — the plain decode-direct turn.
+	sys := strings.Repeat("Reglas de la flota LocalStation. ", 625)
+	conv := func(extra ...map[string]any) map[string]any {
+		msgs := []any{
+			map[string]any{"role": "system", "content": sys},
+			map[string]any{"role": "user", "content": "primera pregunta de la conversación"},
+		}
+		for _, m := range extra {
+			msgs = append(msgs, m)
+		}
+		return map[string]any{"messages": msgs}
+	}
+	if code, _ := postChat(t, r.gateway.URL, conv()); code != 200 {
+		t.Fatal("turn 1 failed")
+	}
+	rec := lastRequestRecord(t, r.gateway.URL)
+	if rec["admitted_via"] != "decode" {
+		t.Fatalf("test premise: turn 1 must be decode-direct: %v", rec)
+	}
+	if rec["slot_engine"] != "1" {
+		t.Fatalf("turn 1 must learn the engine's slot (1): %v", rec)
+	}
+	if code, _ := postChat(t, r.gateway.URL, conv(
+		map[string]any{"role": "assistant", "content": "una respuesta"},
+		map[string]any{"role": "user", "content": "y ahora sigue"},
+	)); code != 200 {
+		t.Fatal("turn 2 failed")
+	}
+	rec = lastRequestRecord(t, r.gateway.URL)
+	if rec["slot"] != "1" {
+		t.Fatalf("turn 2 must be checked/pinned on the learned slot 1, got %v", rec["slot"])
+	}
+	if cn, _ := rec["cache_n"].(float64); cn <= 0 {
+		t.Fatalf("turn 2 must reuse the cache in the engine's slot: %v", rec)
+	}
+	// Turn 1 was a cold miss, so Finish forgot the shared prefix (by design); turn
+	// 2 re-recorded it as hot. Turn 3 is the first one whose residency probe can
+	// credit the prefix — and it must credit it in the LEARNED slot.
+	if code, _ := postChat(t, r.gateway.URL, conv(
+		map[string]any{"role": "assistant", "content": "una respuesta"},
+		map[string]any{"role": "user", "content": "y ahora sigue"},
+		map[string]any{"role": "assistant", "content": "otra respuesta"},
+		map[string]any{"role": "user", "content": "y termina"},
+	)); code != 200 {
+		t.Fatal("turn 3 failed")
+	}
+	rec = lastRequestRecord(t, r.gateway.URL)
+	if hot, _ := rec["hot_prefix_tokens"].(float64); hot <= 0 {
+		t.Fatalf("turn 3 must find its prefix resident in the learned slot: %v", rec)
+	}
+	if rec["admission"] != "prefix-hot" {
+		t.Fatalf("turn 3 must be admitted prefix-hot on the learned slot, got %v", rec["admission"])
 	}
 }
 

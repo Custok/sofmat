@@ -100,6 +100,9 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		// evidence per request: what the decode's slots held when the turn arrived
 		// (re-read at most once a second, never a decision input).
 		opts.PoolHeld = func() (int, bool) { return kp.poolHeld(kp.decodeURL) }
+		// after each decode turn: which slot holds exactly that prompt (the engine
+		// chose it, the coordinator learns it; single decode engine today).
+		opts.SlotHolding = func(n int) (string, bool) { return kp.slotHoldingExactly(kp.decodeURL, n) }
 		// symmetric routing: the prefill runs on the engine where the conversation
 		// does NOT live, and the state is restored into the engine that will serve
 		// it. So every conversation can take the handoff — no veto needed.

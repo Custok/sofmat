@@ -413,6 +413,36 @@ type roomInfo struct {
 	need         int // tokens the restore needed
 }
 
+// slotHoldingExactly is the slot whose n_prompt_tokens is exactly n, read fresh
+// (no cache: it is asked right after a turn, about that turn). "" / false when
+// the engine cannot be read, no slot matches, or more than one does — then the
+// caller keeps whatever it believed, which is never worse than before.
+func (k *kvPipe) slotHoldingExactly(engine string, n int) (string, bool) {
+	if n <= 0 {
+		return "", false
+	}
+	slots := k.slotsAt(engine)
+	if slots == nil {
+		return "", false
+	}
+	found := ""
+	for _, s := range slots {
+		v, isNum := s["n_prompt_tokens"].(float64)
+		if !isNum || int(v) != n {
+			continue
+		}
+		id, isNum := s["id"].(float64)
+		if !isNum {
+			continue
+		}
+		if found != "" {
+			return "", false // ambiguous: two slots with the same prompt size
+		}
+		found = fmt.Sprintf("%d", int(id))
+	}
+	return found, found != ""
+}
+
 // poolHeld is what ALL the engine's slots hold, busy and idle, re-read at most
 // once a second: evidence for the request log (pool_held_at_admit), never a
 // decision input. An unreadable engine leaves the field out (ok=false) rather
