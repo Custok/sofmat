@@ -418,7 +418,11 @@ type roomInfo struct {
 // right after a turn, about that turn. "" / false when the engine cannot be
 // read, no slot matches, or more than one does — then the caller keeps whatever
 // it believed, which is never worse than before.
-const slotMatchSlack = 2
+// Measured 2026-09-23 22:41 on David's turns: the slot ends 0-3 tokens above
+// cache_n + prompt_n + predicted_n (stop token, tool-call terminators), so a
+// slack of 2 missed 1 turn in 9 (id 7: target 16 399, slot 16 402). 8 covers
+// that with margin; uniqueness still protects against a same-sized neighbour.
+const slotMatchSlack = 8
 
 func (k *kvPipe) slotHoldingExactly(engine string, n int) (string, bool) {
 	if n <= 0 {
