@@ -8,6 +8,7 @@ package coordinator
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -43,15 +44,25 @@ type fakeEngine struct {
 	// prefix) and otherwise takes directSlot — which need not be the slot the
 	// coordinator's ring guessed. slotConv remembers which conversation each
 	// slot holds. Off by default so the older tests keep their fixed semantics.
-	lcp         bool
-	directSlot  int
-	slotConv    map[int]string
-	leaked      []string // coordinator timing notes (x-sofmat-t-*) seen as request headers
-	restored    []string
-	restoreSlot string
-	restoreFail string           // when set, /slots/N?action=restore answers 500 with this
-	chats       []map[string]any // bodies received by /v1/chat/completions
-	srv         *httptest.Server
+	lcp        bool
+	directSlot int
+	slotConv   map[int]string
+	leaked     []string // coordinator timing notes (x-sofmat-t-*) seen as request headers
+	// queueBeforeFirstToken models the real llama-server: a streamed reply's HTTP
+	// headers go out at once, the first chunk only after the queue in front of
+	// the slot AND the prompt processing (promptMs, reported in timings). A
+	// non-streamed reply sends everything together, after the generation too
+	// (predictedMs).
+	queueBeforeFirstToken time.Duration
+	promptMs, predictedMs float64
+	// hangAfterFirstChunk: the engine streams one token and then stalls until
+	// its request is cancelled (the client went away upstream).
+	hangAfterFirstChunk bool
+	restored            []string
+	restoreSlot         string
+	restoreFail         string           // when set, /slots/N?action=restore answers 500 with this
+	chats               []map[string]any // bodies received by /v1/chat/completions
+	srv                 *httptest.Server
 }
 
 func writeTestJSON(w http.ResponseWriter, code int, v any) {
@@ -258,15 +269,42 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 		}
 		e.mu.Unlock()
 		tm := map[string]any{"prompt_n": promptN, "cache_n": cacheN, "predicted_n": 43, "predicted_per_second": 40.5}
+		if e.promptMs > 0 {
+			tm["prompt_ms"] = e.promptMs
+			tm["predicted_ms"] = e.predictedMs
+		}
 		if s, _ := b["stream"].(bool); s {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(200)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush() // headers on the wire before any queueing, like llama-server
+			}
+			if e.queueBeforeFirstToken > 0 {
+				// some llama-server builds also emit an empty role chunk at once:
+				// it carries no token and must not count as the first one
+				_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n")
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+			time.Sleep(e.queueBeforeFirstToken + time.Duration(e.promptMs*float64(time.Millisecond)))
 			_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hola\"}}]}\n\n")
+			if e.hangAfterFirstChunk {
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+				select {
+				case <-r.Context().Done():
+				case <-time.After(5 * time.Second):
+				}
+				return
+			}
 			last, _ := json.Marshal(map[string]any{"choices": []any{}, "timings": tm})
 			_, _ = io.WriteString(w, "data: "+string(last)+"\n\n")
 			_, _ = io.WriteString(w, "data: [DONE]\n\n")
 			return
 		}
+		time.Sleep(e.queueBeforeFirstToken + time.Duration((e.promptMs+e.predictedMs)*float64(time.Millisecond)))
 		writeTestJSON(w, 200, map[string]any{
 			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "resumen"}}},
 			"timings": tm,
@@ -334,6 +372,24 @@ func postChat(t *testing.T, base string, body map[string]any) (int, []byte) {
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, data
+}
+
+// requestRecordIfAny is lastRequestRecord without the failure: false while the
+// log is still empty.
+func requestRecordIfAny(t *testing.T, base string) (map[string]any, bool) {
+	t.Helper()
+	resp, err := http.Get(base + "/api/requests?n=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Requests []map[string]any `json:"requests"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || len(out.Requests) == 0 {
+		return nil, false
+	}
+	return out.Requests[len(out.Requests)-1], true
 }
 
 func lastRequestRecord(t *testing.T, base string) map[string]any {
@@ -765,6 +821,94 @@ func TestWaitFieldsAlwaysWritten(t *testing.T) {
 	defer r.decode.mu.Unlock()
 	if len(r.decode.leaked) != 0 {
 		t.Fatalf("timing notes leaked to the engine as headers: %v", r.decode.leaked)
+	}
+}
+
+// wait_slot_ms is the queue in front of the slot: the time the engine takes to
+// START on the prompt. It was derived as first_byte_ms - prompt_ms, but the
+// first byte the coordinator sees is the HTTP HEADER, which llama-server sends
+// BEFORE processing the prompt (live 2026-09-23 id 13: headers 27 ms, prompt
+// 5 847 ms) — so the subtraction undercounted the wait by exactly prompt_ms
+// and read 0 under real contention. The wait must come from the first TOKEN
+// (streamed) minus the prompt processing; a non-streamed reply's headers come
+// after the generation too, so that also comes off.
+func TestWaitSlotIsFirstTokenMinusPrompt(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	// a short prompt may be balanced onto either engine: both queue the same way
+	for _, e := range []*fakeEngine{r.decode, r.prefill} {
+		e.queueBeforeFirstToken = 300 * time.Millisecond
+		e.promptMs, e.predictedMs = 200, 50
+	}
+	for _, stream := range []bool{true, false} {
+		body := map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hola"}}}
+		if stream {
+			body["stream"] = true
+		}
+		if code, _ := postChat(t, r.gateway.URL, body); code != 200 {
+			t.Fatalf("chat (stream=%v) failed: %d", stream, code)
+		}
+		rec := lastRequestRecord(t, r.gateway.URL)
+		if rec["admitted_via"] != "decode" {
+			t.Fatalf("test premise: a short prompt goes decode-direct: %v", rec)
+		}
+		ws, _ := rec["wait_slot_ms"].(float64)
+		// the engine queued 300 ms: anything below ~250 is the old undercount
+		// (headers arrive at once, minus prompt_ms => 0); anything at or above
+		// 300 + prompt is counting the prompt processing as waiting.
+		if ws < 250 || ws >= 480 {
+			t.Fatalf("stream=%v: wait_slot_ms must be the queue before the slot (~300 ms), got %v (record %v)", stream, ws, rec)
+		}
+		if stream {
+			ft, ok := rec["first_token_ms"].(float64)
+			if !ok || ft < 500 {
+				t.Fatalf("a streamed reply records its first token (>= queue+prompt = 500 ms): %v", rec["first_token_ms"])
+			}
+		}
+	}
+}
+
+// A stream the CLIENT cuts (2026-09-23 id 61: the HUD's no-progress guard
+// aborted a workflow step at 21 s while the engine was streaming fine) must
+// record how long the stream lived and how many events the engine had sent,
+// so a cut is told from a stall without asking anyone.
+func TestAbortedStreamRecordsLifetime(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	for _, e := range []*fakeEngine{r.decode, r.prefill} {
+		e.hangAfterFirstChunk = true
+	}
+	raw, _ := json.Marshal(map[string]any{"stream": true,
+		"messages": []any{map[string]any{"role": "user", "content": "hola"}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, r.gateway.URL+"/v1/chat/completions", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4096)
+	if _, err := resp.Body.Read(buf); err != nil {
+		t.Fatalf("first chunk: %v", err)
+	}
+	time.Sleep(400 * time.Millisecond)
+	cancel()
+	resp.Body.Close()
+	// the record is written when the gateway notices the client is gone
+	var rec map[string]any
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if got, ok := requestRecordIfAny(t, r.gateway.URL); ok {
+			rec = got
+			break
+		}
+	}
+	if rec == nil {
+		t.Fatal("the aborted request never reached the request log")
+	}
+	if sm, _ := rec["stream_ms"].(float64); sm < 350 {
+		t.Fatalf("stream_ms must say how long the stream lived before the cut (>= 350 ms): %v (record %v)", rec["stream_ms"], rec)
+	}
+	if ev, _ := rec["engine_events"].(float64); ev < 1 {
+		t.Fatalf("engine_events must count what the engine sent before the cut: %v (record %v)", rec["engine_events"], rec)
 	}
 }
 

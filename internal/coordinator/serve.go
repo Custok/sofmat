@@ -377,6 +377,28 @@ func noteWait(extra gateway.Headers, key string, ms float64) {
 	extra[key] = strconv.FormatFloat(ms, 'f', 3, 64)
 }
 
+// carriesToken reports whether a streamed chunk holds generated output (text,
+// reasoning or a tool call) rather than only a role/empty delta.
+func carriesToken(chunk []byte) bool {
+	if bytes.Contains(chunk, []byte(`"tool_calls"`)) {
+		return true
+	}
+	for _, key := range [][]byte{[]byte(`"content":"`), []byte(`"reasoning_content":"`)} {
+		rest := chunk
+		for {
+			i := bytes.Index(rest, key)
+			if i < 0 {
+				break
+			}
+			rest = rest[i+len(key):]
+			if len(rest) > 0 && rest[0] != '"' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isTimingNote reports whether a decode header is a coordinator timing note
 // (x-sofmat-t-*) that must not travel to the engine.
 func isTimingNote(k string) bool { return strings.HasPrefix(strings.ToLower(k), "x-sofmat-t-") }
@@ -985,7 +1007,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 	w.WriteHeader(resp.StatusCode)
 	const tailKeep = 16 << 10
 	var tail, head []byte
-	streamed := 0
+	streamed, events := 0, 0
 	var readErr error
 	clientGone := false
 	// A stream that produces nothing used to be recorded as a request with no
@@ -1030,13 +1052,28 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 			}
 			emitSSEError(w, flusher, resp.StatusCode, why)
 		}
+		// how long the stream lived and how many SSE events the engine sent (≈ one
+		// per token, plus the final timings): a cut stream (client gone, engine
+		// stalled) then says at a glance how far it got (2026-09-23 id 61: 220 KB
+		// streamed, then "context canceled" at 21 s — the client, not the engine).
+		plan.Note("stream_ms", msSince(t0))
+		plan.Note("engine_events", events)
 		logAnomaly(engineName(node), resp.StatusCode, streamed, readErr, why0(readErr))
 		s.gw.Finish(plan, fin)
 	}()
 	buf := make([]byte, 8192)
+	firstToken := false
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
+			if !firstToken && carriesToken(buf[:n]) {
+				// the first TOKEN, not the first byte: the headers (and an empty
+				// role chunk on some builds) leave the engine before it has even
+				// started on the prompt. This is what the slot wait derives from.
+				firstToken = true
+				plan.Note("first_token_ms", msSince(t0))
+			}
+			events += bytes.Count(buf[:n], []byte("data: {"))
 			streamed += n
 			if len(head) < 400 {
 				head = append(head, buf[:min(n, 400-len(head))]...)

@@ -893,6 +893,11 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		}
 	}
 	fields["admitted_via"] = admittedVia
+	// admit_ms: the coordinator's own time BEFORE the decode is dialled (probes,
+	// tokenizer, prefill + handoff when taken). With first_byte_ms, the reply's
+	// generation and finish_ms, total_ms decomposes: an unexplained residual was
+	// being read as engine queueing (2026-09-23 23:23, ids 10/11: 0.7-2.5 s).
+	fields["admit_ms"] = msSince(start)
 	if ids != nil {
 		// whichever path ran, the decode slot now holds this prompt (either it
 		// processed it or the restored state carries it).
@@ -940,6 +945,13 @@ func (p *Plan) Note(key string, v any) {
 // only {"timings": ...} — the streaming path reconstructs that from the last
 // SSE chunk.
 func (g *Gateway) Finish(p *Plan, resp Body) {
+	finishStart := time.Now()
+	defer func() {
+		// finish_ms: bookkeeping AFTER the reply (slot probe, the fix#4 tokenize of
+		// the whole prompt on decode-direct turns). It is inside total_ms but the
+		// streaming client has already got its answer by then.
+		p.fields["finish_ms"] = msSince(finishStart)
+	}()
 	// the slot now holds this prefix's KV — record it for later admissions.
 	g.known.Record(p.pkey, p.prefixToks)
 	// Learn where the conversation REALLY lives: the engine picks the slot by
@@ -1055,13 +1067,31 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 	if _, ok := p.fields["first_byte_ms"]; !ok {
 		p.fields["first_byte_ms"] = headerMs(p.Headers, "x-sofmat-t-first-byte-ms", -1)
 	}
-	// wait_slot_ms: what the engine took to START streaming beyond its own prompt
-	// processing — the queue in front of the slot. Derivable only when both the
-	// first byte and prompt_ms are known.
+	if v, ok := timingFloat(resp, "predicted_ms"); ok {
+		p.fields["predicted_ms"] = v
+	}
+	if _, ok := p.fields["first_token_ms"]; !ok {
+		p.fields["first_token_ms"] = -1.0
+	}
+	// wait_slot_ms: the queue in front of the slot — what the engine took to
+	// START on the prompt. llama-server sends a streamed reply's HTTP headers
+	// BEFORE processing the prompt (live 2026-09-23 id 13: first_byte 27 ms for
+	// a 13k-token prompt of 5.8 s), so first_byte - prompt_ms undercounted the
+	// wait by exactly prompt_ms and read 0 under real contention. Streamed: the
+	// first TOKEN minus prompt_ms. Non-streamed: the reply arrives whole, after
+	// the generation as well, so that comes off too. Needs prompt_ms.
 	p.fields["wait_slot_ms"] = -1.0
-	if fb, _ := p.fields["first_byte_ms"].(float64); fb >= 0 {
-		if pm, ok := p.fields["prompt_ms"].(float64); ok {
-			ws := fb - pm
+	if pm, ok := p.fields["prompt_ms"].(float64); ok {
+		ws, derived := 0.0, false
+		if ft, _ := p.fields["first_token_ms"].(float64); ft >= 0 {
+			ws, derived = ft-pm, true
+		} else if fb, _ := p.fields["first_byte_ms"].(float64); fb >= 0 {
+			ws, derived = fb-pm, true
+			if gm, ok := p.fields["predicted_ms"].(float64); ok {
+				ws -= gm
+			}
+		}
+		if derived {
 			if ws < 0 {
 				ws = 0
 			}
