@@ -945,13 +945,12 @@ func (p *Plan) Note(key string, v any) {
 // only {"timings": ...} — the streaming path reconstructs that from the last
 // SSE chunk.
 func (g *Gateway) Finish(p *Plan, resp Body) {
+	// finish_ms: bookkeeping AFTER the reply (slot probe, the fix#4 tokenize of
+	// the whole prompt on decode-direct turns). It is inside total_ms but the
+	// streaming client has already got its answer by then. Written right before
+	// the record is stored — a deferred write landed after finishRecord and the
+	// field never appeared (live rows 1-6 of 2026-09-24 00:51: finish_ms null).
 	finishStart := time.Now()
-	defer func() {
-		// finish_ms: bookkeeping AFTER the reply (slot probe, the fix#4 tokenize of
-		// the whole prompt on decode-direct turns). It is inside total_ms but the
-		// streaming client has already got its answer by then.
-		p.fields["finish_ms"] = msSince(finishStart)
-	}()
 	// the slot now holds this prefix's KV — record it for later admissions.
 	g.known.Record(p.pkey, p.prefixToks)
 	// Learn where the conversation REALLY lives: the engine picks the slot by
@@ -1134,24 +1133,32 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 	// wait by exactly prompt_ms and read 0 under real contention. Streamed: the
 	// first TOKEN minus prompt_ms. Non-streamed: the reply arrives whole, after
 	// the generation as well, so that comes off too. Needs prompt_ms.
+	// wait_slot_src says which derivation produced the number, so a streamed
+	// row ("first-token") and a whole-reply row ("whole-reply": headers arrive
+	// after prompt AND generation, both come off) are never compared blindly.
+	// A whole reply without predicted_ms is NOT derivable: the headers-minus-
+	// prompt figure is the undercount fix#11 removed, so it stays -1 (review
+	// by debian-dev 2026-09-24 00:52: "prefiero un -1 honesto").
 	p.fields["wait_slot_ms"] = -1.0
+	p.fields["wait_slot_src"] = ""
 	if pm, ok := p.fields["prompt_ms"].(float64); ok {
-		ws, derived := 0.0, false
+		ws, src := 0.0, ""
 		if ft, _ := p.fields["first_token_ms"].(float64); ft >= 0 {
-			ws, derived = ft-pm, true
+			ws, src = ft-pm, "first-token"
 		} else if fb, _ := p.fields["first_byte_ms"].(float64); fb >= 0 {
-			ws, derived = fb-pm, true
 			if gm, ok := p.fields["predicted_ms"].(float64); ok {
-				ws -= gm
+				ws, src = fb-pm-gm, "whole-reply"
 			}
 		}
-		if derived {
+		if src != "" {
 			if ws < 0 {
 				ws = 0
 			}
 			p.fields["wait_slot_ms"] = ws
+			p.fields["wait_slot_src"] = src
 		}
 	}
+	p.fields["finish_ms"] = msSince(finishStart)
 	g.finishRecord(p)
 }
 

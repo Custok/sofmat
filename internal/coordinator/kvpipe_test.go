@@ -55,6 +55,7 @@ type fakeEngine struct {
 	// (predictedMs).
 	queueBeforeFirstToken time.Duration
 	promptMs, predictedMs float64
+	noPredictedMs         bool // timings without predicted_ms (older builds)
 	// hangAfterFirstChunk: the engine streams one token and then stalls until
 	// its request is cancelled (the client went away upstream).
 	hangAfterFirstChunk bool
@@ -274,7 +275,9 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 		tm := map[string]any{"prompt_n": promptN, "cache_n": cacheN, "predicted_n": 43, "predicted_per_second": 40.5}
 		if e.promptMs > 0 {
 			tm["prompt_ms"] = e.promptMs
-			tm["predicted_ms"] = e.predictedMs
+			if !e.noPredictedMs {
+				tm["predicted_ms"] = e.predictedMs
+			}
 		}
 		if s, _ := b["stream"].(bool); s {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -879,12 +882,34 @@ func TestWaitSlotIsFirstTokenMinusPrompt(t *testing.T) {
 		if ws < 250 || ws >= 480 {
 			t.Fatalf("stream=%v: wait_slot_ms must be the queue before the slot (~300 ms), got %v (record %v)", stream, ws, rec)
 		}
+		wantSrc := "whole-reply"
 		if stream {
+			wantSrc = "first-token"
 			ft, ok := rec["first_token_ms"].(float64)
 			if !ok || ft < 500 {
 				t.Fatalf("a streamed reply records its first token (>= queue+prompt = 500 ms): %v", rec["first_token_ms"])
 			}
 		}
+		// the derivation is named on the row: streamed and whole-reply figures
+		// come from different arithmetic and must not be compared blindly
+		if rec["wait_slot_src"] != wantSrc {
+			t.Fatalf("stream=%v: wait_slot_src must be %q, got %v", stream, wantSrc, rec["wait_slot_src"])
+		}
+		if fm, ok := rec["finish_ms"].(float64); !ok || fm < 0 {
+			t.Fatalf("stream=%v: finish_ms must be written on every served row, got %v", stream, rec["finish_ms"])
+		}
+	}
+	// a whole reply WITHOUT predicted_ms cannot be derived: headers minus prompt
+	// is the undercount fix#11 removed, so the row says -1, not a plausible number
+	for _, e := range []*fakeEngine{r.decode, r.prefill} {
+		e.noPredictedMs = true
+	}
+	if code, _ := postChat(t, r.gateway.URL, map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hola"}}}); code != 200 {
+		t.Fatal("chat failed")
+	}
+	rec := lastRequestRecord(t, r.gateway.URL)
+	if ws, _ := rec["wait_slot_ms"].(float64); ws != -1 || rec["wait_slot_src"] != "" {
+		t.Fatalf("whole reply without predicted_ms: wait_slot_ms must be -1 with an empty source, got %v / %v", rec["wait_slot_ms"], rec["wait_slot_src"])
 	}
 }
 
