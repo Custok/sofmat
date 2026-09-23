@@ -103,6 +103,16 @@ type Config struct {
 	//   "always": offload every admitted prompt.
 	KVHandoff string `json:"kv_handoff"`
 
+	// PrefillThresholdTokens is the ESTIMATED prompt size (new tokens) from which
+	// the gateway considers the prefill+handoff route at all; 0 = the built-in
+	// default (6 144). Why a knob: with the tool catalogue counted in the prefix
+	// (2026-09-23) every new HUD conversation (~15-17k) crosses the default, and a
+	// restored state carries no context checkpoints on this hybrid model, so the
+	// turn after a handoff reprocesses the whole prompt (measured 22:31: 10.6 s
+	// handoff + 11.8 s reprocess). Conversations that continue are better served
+	// decode-direct; a high threshold reserves the handoff for one-shot batches.
+	PrefillThresholdTokens int `json:"prefill_threshold_tokens"`
+
 	// NoThink turns the model's chain-of-thought OFF for every chat request
 	// (chat_template_kwargs.enable_thinking = false), unless the client sets
 	// that field itself.

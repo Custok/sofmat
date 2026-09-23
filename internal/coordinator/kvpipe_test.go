@@ -240,6 +240,9 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 		}
 		e.heldBySlot[slotID] = promptTokens
 		if e.lcp {
+			// like the real engine: the slot keeps the reply too (+ the stop token),
+			// so /slots reports prompt + generated + 1, never the bare prompt
+			e.heldBySlot[slotID] = promptTokens + 43 + 1
 			if e.slotConv == nil {
 				e.slotConv = map[int]string{}
 			}
@@ -693,6 +696,31 @@ func TestCoordinatorLearnsEngineSlot(t *testing.T) {
 	}
 	if rec["admission"] != "prefix-hot" {
 		t.Fatalf("turn 3 must be admitted prefix-hot on the learned slot, got %v", rec["admission"])
+	}
+}
+
+// prefill_threshold_tokens (config) raises the estimated size from which the
+// prefill+handoff route is even considered: with the tool catalogue in the
+// prefix every new HUD conversation (~15-17k) crossed the default 6 144, was
+// handed off when the decode was busy, and its next turn reprocessed the whole
+// prompt (hybrid restore, no checkpoints — measured on David's turn 2026-09-23
+// 22:31: 10.6 s + 11.8 s). A high threshold keeps conversations decode-direct
+// and reserves the handoff for one-shot batches. RED before: longUser hands off.
+func TestPrefillThresholdFromConfig(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir }, func(c *config.Config) { c.PrefillThresholdTokens = 40000 })
+	if code, _ := postChat(t, r.gateway.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": longUser}},
+	}); code != 200 {
+		t.Fatal("chat failed")
+	}
+	rec := lastRequestRecord(t, r.gateway.URL)
+	if rec["admitted_via"] != "decode" || rec["admission"] != "small-new-prefill" {
+		t.Fatalf("an 11k prompt under a 40k threshold must stay decode-direct: %v", rec)
+	}
+	r.prefill.mu.Lock()
+	defer r.prefill.mu.Unlock()
+	if len(r.prefill.completions) != 0 {
+		t.Fatalf("no prefill must run under the raised threshold: %+v", r.prefill.completions)
 	}
 }
 

@@ -833,7 +833,10 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 	// as slot_engine (+ slot_mismatch) and used by the next turn's residency probe.
 	if cn, okc := timingInt(resp, "cache_n"); okc {
 		if pn, okp := timingInt(resp, "prompt_n"); okp {
-			if s, ok := g.slotOfSafe(cn + pn); ok && s != "" {
+			// the slot keeps the reply too: /slots reports prompt + generated (+1
+			// for the stop token), measured 2026-09-23 22:31 (16 481 + 123 -> 16 605).
+			gen, _ := timingInt(resp, "predicted_n")
+			if s, ok := g.slotOfSafe(cn + pn + gen); ok && s != "" {
 				p.fields["slot_engine"] = s
 				if recorded, _ := p.fields["slot"].(string); recorded != "" && recorded != s {
 					p.fields["slot_mismatch"] = true

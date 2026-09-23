@@ -413,10 +413,13 @@ type roomInfo struct {
 	need         int // tokens the restore needed
 }
 
-// slotHoldingExactly is the slot whose n_prompt_tokens is exactly n, read fresh
-// (no cache: it is asked right after a turn, about that turn). "" / false when
-// the engine cannot be read, no slot matches, or more than one does — then the
-// caller keeps whatever it believed, which is never worse than before.
+// slotHoldingExactly is the slot whose n_prompt_tokens is n (± slotMatchSlack:
+// the engine counts its stop token too), read fresh — no cache: it is asked
+// right after a turn, about that turn. "" / false when the engine cannot be
+// read, no slot matches, or more than one does — then the caller keeps whatever
+// it believed, which is never worse than before.
+const slotMatchSlack = 2
+
 func (k *kvPipe) slotHoldingExactly(engine string, n int) (string, bool) {
 	if n <= 0 {
 		return "", false
@@ -428,7 +431,7 @@ func (k *kvPipe) slotHoldingExactly(engine string, n int) (string, bool) {
 	found := ""
 	for _, s := range slots {
 		v, isNum := s["n_prompt_tokens"].(float64)
-		if !isNum || int(v) != n {
+		if !isNum || int(v) < n-slotMatchSlack || int(v) > n+slotMatchSlack {
 			continue
 		}
 		id, isNum := s["id"].(float64)
