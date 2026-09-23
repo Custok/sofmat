@@ -840,6 +840,43 @@ func TestFinishLearnsEngineSlot(t *testing.T) {
 	}
 }
 
+// With a tokenizer wired, the prefix (system + tools) is counted EXACTLY, once
+// per prefix key, on a body that carries only the prefix — never re-counted on
+// the next turn of the same conversation. RED before fix#5b: prefix_toks was
+// the chars/4 estimate and no count ran.
+func TestPrefixCountedExactlyOncePerPrefix(t *testing.T) {
+	calls := 0 // prefix-only counts (the same counter also serves the stage-2 recount)
+	gw, _ := newTestGW(t, func(o *Options) {
+		o.CountTokens = func(body Body) (int, error) {
+			msgs, _ := body["messages"].([]any)
+			if len(msgs) != 1 {
+				return 12345, nil // stage-2 exact recount of the whole prompt: not the prefix count
+			}
+			calls++
+			if body["tools"] == nil {
+				t.Fatal("the prefix count must carry the tool catalogue")
+			}
+			return 12000, nil
+		}
+	})
+	body := toolsBody("sys", 20, "hola")
+	gw.Chat(Headers{}, body)
+	rec := lastRecord(t, gw)
+	if got, _ := rec["prefix_toks"].(int); got != 12000 {
+		t.Fatalf("prefix_toks must be the tokenizer's count (12000), got %v", rec["prefix_toks"])
+	}
+	if rec["prefix_exact"] != true {
+		t.Fatalf("the record must say the prefix was counted exactly: %v", rec["prefix_exact"])
+	}
+	gw.Chat(Headers{}, toolsBody("sys", 20, "hola", "respuesta", "otra"))
+	if calls != 1 {
+		t.Fatalf("the same prefix must be counted once, counted %d times", calls)
+	}
+	if got, _ := lastRecord(t, gw)["prefix_toks"].(int); got != 12000 {
+		t.Fatalf("second turn must reuse the cached exact count, got %d", got)
+	}
+}
+
 func itoa(i int) string {
 	return strings.TrimSpace(strings.Repeat(" ", 0) + string(rune('0'+i)))
 }

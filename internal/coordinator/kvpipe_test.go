@@ -46,6 +46,7 @@ type fakeEngine struct {
 	lcp         bool
 	directSlot  int
 	slotConv    map[int]string
+	leaked      []string // coordinator timing notes (x-sofmat-t-*) seen as request headers
 	restored    []string
 	restoreSlot string
 	restoreFail string           // when set, /slots/N?action=restore answers 500 with this
@@ -181,6 +182,13 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
+		for k := range r.Header {
+			if strings.HasPrefix(strings.ToLower(k), "x-sofmat-t-") {
+				e.mu.Lock()
+				e.leaked = append(e.leaked, k)
+				e.mu.Unlock()
+			}
+		}
 		promptTokens := 0
 		if msgs, _ := json.Marshal(b["messages"]); len(msgs) > 0 {
 			promptTokens = len(msgs) / 4
@@ -721,6 +729,42 @@ func TestPrefillThresholdFromConfig(t *testing.T) {
 	defer r.prefill.mu.Unlock()
 	if len(r.prefill.completions) != 0 {
 		t.Fatalf("no prefill must run under the raised threshold: %+v", r.prefill.completions)
+	}
+}
+
+// Waits are ALWAYS written (0 = did not wait, -1 = not measurable), as two
+// separate numbers — the balancer's budget wait and the engine-side wait before
+// the first byte — on both the JSON and the streaming path. A field that only
+// appears in the bad case makes null mean two things (measured the hard way
+// 2026-09-23 with slot_engine). RED before: none of the fields existed.
+func TestWaitFieldsAlwaysWritten(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	for _, stream := range []bool{false, true} {
+		body := map[string]any{"messages": []any{map[string]any{"role": "user", "content": longUser}}}
+		if stream {
+			body["stream"] = true
+		}
+		if code, _ := postChat(t, r.gateway.URL, body); code != 200 {
+			t.Fatalf("chat (stream=%v) failed: %d", stream, code)
+		}
+		rec := lastRequestRecord(t, r.gateway.URL)
+		wb, ok := rec["wait_budget_ms"].(float64)
+		if !ok || wb < 0 {
+			t.Fatalf("stream=%v: wait_budget_ms must always be written (>= 0): %v", stream, rec["wait_budget_ms"])
+		}
+		fb, ok := rec["first_byte_ms"].(float64)
+		if !ok || fb < 0 {
+			t.Fatalf("stream=%v: first_byte_ms must be measured on a served request: %v", stream, rec["first_byte_ms"])
+		}
+		if _, ok := rec["wait_slot_ms"].(float64); !ok {
+			t.Fatalf("stream=%v: wait_slot_ms must always be written: %v", stream, rec["wait_slot_ms"])
+		}
+	}
+	// and the timing notes never travel to the engine as headers
+	r.decode.mu.Lock()
+	defer r.decode.mu.Unlock()
+	if len(r.decode.leaked) != 0 {
+		t.Fatalf("timing notes leaked to the engine as headers: %v", r.decode.leaked)
 	}
 }
 

@@ -356,10 +356,30 @@ func (s *Server) pickDecode(body gateway.Body, extra gateway.Headers) (*decodeNo
 		est := bodyTokens(body, extra)
 		n.claim(est)
 		s.bal.remember(sessionKey(body), n)
+		noteWait(extra, "x-sofmat-t-wait-budget-ms", 0)
 		return n, func() { n.release(est); n.invalidateHeld() }, nil
 	}
-	return s.bal.pick(sessionKey(body), bodyTokens(body, extra))
+	// how long this request queued for room in an engine's KV budget: written
+	// into the decode headers under the x-sofmat-t- prefix (never forwarded to
+	// the engine), which is how the gateway's request record gets it.
+	t0 := time.Now()
+	n, done, err := s.bal.pick(sessionKey(body), bodyTokens(body, extra))
+	noteWait(extra, "x-sofmat-t-wait-budget-ms", msSince(t0))
+	return n, done, err
 }
+
+// noteWait leaves a millisecond figure for the gateway's record in the decode
+// headers. Keys under x-sofmat-t- are timing notes, not headers for the engine.
+func noteWait(extra gateway.Headers, key string, ms float64) {
+	if extra == nil {
+		return
+	}
+	extra[key] = strconv.FormatFloat(ms, 'f', 3, 64)
+}
+
+// isTimingNote reports whether a decode header is a coordinator timing note
+// (x-sofmat-t-*) that must not travel to the engine.
+func isTimingNote(k string) bool { return strings.HasPrefix(strings.ToLower(k), "x-sofmat-t-") }
 
 // estBodyTokens is what a request will occupy in the engine's KV: the prompt
 // plus the reply it is allowed to generate.
@@ -506,13 +526,21 @@ func httpBackend(endpoint string) gateway.BackendCall {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range extra {
+			if isTimingNote(k) {
+				continue
+			}
 			req.Header.Set(k, v)
 		}
+		t0 := time.Now()
 		resp, err := client.Do(req)
 		if err != nil {
 			return nil, err
 		}
 		defer resp.Body.Close()
+		// time to the response headers: the engine's queue + prompt processing
+		// (for a non-streamed reply also the generation, since headers arrive with
+		// the body). The gateway derives wait_slot_ms from it and prompt_ms.
+		noteWait(extra, "x-sofmat-t-first-byte-ms", msSince(t0))
 		data, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return nil, err
@@ -929,17 +957,23 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	for k, v := range plan.Headers {
+		if isTimingNote(k) {
+			continue
+		}
 		req.Header.Set(k, v)
 	}
 	if a := r.Header.Get("Authorization"); a != "" {
 		req.Header.Set("Authorization", a)
 	}
+	t0 := time.Now()
 	resp, err := s.client.Do(req)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, gateway.Body{"error": err.Error()})
 		return
 	}
 	defer resp.Body.Close()
+	// first byte of the stream: the engine's queue (slot wait) + prompt processing
+	plan.Note("first_byte_ms", msSince(t0))
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
 		ct = "text/event-stream"

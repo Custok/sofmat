@@ -96,30 +96,31 @@ type DecodeBusy func() bool
 type StatusProvider func() Body
 
 type Gateway struct {
-	verify    Verify
-	backend   BackendCall
-	status    StatusProvider
-	prefill   PrefillCall                  // optional; nil = no disaggregation
-	handoff   Handoff                      // optional; nil = no disaggregation
-	count     CountTokens                  // optional; nil = estimate only
-	tokens    Tokens                       // optional; supersedes count, enables the cache-aware estimate
-	busy      DecodeBusy                   // optional; nil = handoff whenever admitted
-	allowed   func(Body) bool              // optional; false = this request must not be handed off
-	resident  func(Body, int, string) bool // optional; false = the engine no longer holds that prefix in the given slot
-	poolHeld  func() (int, bool)           // optional; what the decode's slots hold at admission (request log only)
-	slotOf    func(int) (string, bool)     // optional; which decode slot holds a prompt of exactly n tokens (learns the real slot)
-	noThink   bool                         // ask the template to skip the chain-of-thought
-	replyRoom func(int) int                // how big a reply the engine can still host
-	mode      string                       // ModeBusy / ModeAlways / ModeAuto
-	threshold int                          // admission threshold on the ESTIMATE
-	exactMin  int                          // floor on the EXACT count (when count != nil)
-	ring      *Ring
-	alpha     *AlphaEma
-	log       *RequestLog
-	known     *KnownPrefixes
-	last      *lastPrompts // per prefix key: ids of the last prompt routed (cache lower bound)
-	convSlot  *convSlots   // per conversation: the decode slot its KV actually lives in
-	cost      *costModel   // measured pp / handoff EMAs for ModeAuto
+	verify      Verify
+	backend     BackendCall
+	status      StatusProvider
+	prefill     PrefillCall                  // optional; nil = no disaggregation
+	handoff     Handoff                      // optional; nil = no disaggregation
+	count       CountTokens                  // optional; nil = estimate only
+	tokens      Tokens                       // optional; supersedes count, enables the cache-aware estimate
+	busy        DecodeBusy                   // optional; nil = handoff whenever admitted
+	allowed     func(Body) bool              // optional; false = this request must not be handed off
+	resident    func(Body, int, string) bool // optional; false = the engine no longer holds that prefix in the given slot
+	poolHeld    func() (int, bool)           // optional; what the decode's slots hold at admission (request log only)
+	slotOf      func(int) (string, bool)     // optional; which decode slot holds a prompt of exactly n tokens (learns the real slot)
+	noThink     bool                         // ask the template to skip the chain-of-thought
+	replyRoom   func(int) int                // how big a reply the engine can still host
+	mode        string                       // ModeBusy / ModeAlways / ModeAuto
+	threshold   int                          // admission threshold on the ESTIMATE
+	exactMin    int                          // floor on the EXACT count (when count != nil)
+	ring        *Ring
+	alpha       *AlphaEma
+	log         *RequestLog
+	known       *KnownPrefixes
+	prefixExact *KnownPrefixes // per prefix key: the EXACT prefix token count (tokenizer), cached
+	last        *lastPrompts   // per prefix key: ids of the last prompt routed (cache lower bound)
+	convSlot    *convSlots     // per conversation: the decode slot its KV actually lives in
+	cost        *costModel     // measured pp / handoff EMAs for ModeAuto
 
 	// circuit breaker: after a prefill-side failure (tokenize, prefill, handoff)
 	// the prefill route is skipped without contacting the node for breakerFor,
@@ -258,31 +259,32 @@ func New(o Options) (*Gateway, error) {
 		breaker = PrefillBreakerDefault
 	}
 	return &Gateway{
-		breakerFor: breaker,
-		verify:     o.Verify,
-		backend:    o.BackendCall,
-		status:     o.StatusProvider,
-		prefill:    o.PrefillCall,
-		handoff:    o.Handoff,
-		count:      o.CountTokens,
-		tokens:     o.Tokens,
-		busy:       o.DecodeBusy,
-		allowed:    o.HandoffAllowed,
-		resident:   o.CacheResident,
-		poolHeld:   o.PoolHeld,
-		slotOf:     o.SlotHolding,
-		noThink:    o.NoThink,
-		replyRoom:  o.ReplyRoom,
-		mode:       mode,
-		threshold:  th,
-		exactMin:   em,
-		ring:       NewRing(members, 64),
-		alpha:      alpha,
-		log:        NewRequestLog(500, o.KeepContent),
-		known:      known,
-		last:       newLastPrompts(8 * n),
-		convSlot:   newConvSlots(8 * n),
-		cost:       newCostModel(),
+		breakerFor:  breaker,
+		verify:      o.Verify,
+		backend:     o.BackendCall,
+		status:      o.StatusProvider,
+		prefill:     o.PrefillCall,
+		handoff:     o.Handoff,
+		count:       o.CountTokens,
+		tokens:      o.Tokens,
+		busy:        o.DecodeBusy,
+		allowed:     o.HandoffAllowed,
+		resident:    o.CacheResident,
+		poolHeld:    o.PoolHeld,
+		slotOf:      o.SlotHolding,
+		noThink:     o.NoThink,
+		replyRoom:   o.ReplyRoom,
+		mode:        mode,
+		threshold:   th,
+		exactMin:    em,
+		ring:        NewRing(members, 64),
+		alpha:       alpha,
+		log:         NewRequestLog(500, o.KeepContent),
+		known:       known,
+		prefixExact: mustKnownPrefixes(64),
+		last:        newLastPrompts(8 * n),
+		convSlot:    newConvSlots(8 * n),
+		cost:        newCostModel(),
 	}, nil
 }
 
@@ -407,6 +409,55 @@ func (g *Gateway) residentFor(body Body, expect int, slot string) bool {
 		ok = g.resident(body, expect, slot)
 	}()
 	return ok
+}
+
+// prefixTokens is the token count of the stable prefix (system prompt + tool
+// catalogue, as the template renders them). With a tokenizer wired it is the
+// EXACT count, asked once per prefix key and cached: the prefix is identical
+// across a conversation's turns, so a new count only happens when the system
+// prompt or the catalogue changes. Without one (or with the prefill side down)
+// it is the chars/4 estimate, which under-counts the tool JSON by ~11 %
+// (measured 2026-09-23: 13 616 estimated vs 15 350 rendered — 3.54 chars per
+// token in Spanish JSON plus ~200 tokens of template scaffolding). The second
+// result says which one it was.
+func (g *Gateway) prefixTokens(pkey string, body Body) (int, bool) {
+	est := EstimateTokens(prefixTextOf(body), nil)
+	// Only a tool catalogue is worth a tokenizer round trip: on prose chars/4 is
+	// within a percent, on tool JSON it is ~11 % short. Text-only prefixes keep
+	// the estimate and never dial the tokenizer on the request path.
+	if g.count == nil || pkey == "" || est == 0 || body["tools"] == nil || g.prefillDown() {
+		return est, false
+	}
+	if n := g.prefixExact.HotTokens(pkey); n > 0 {
+		return n, true
+	}
+	pb := Body{"messages": []any{}}
+	if sp := systemPromptOf(body); sp != "" {
+		pb["messages"] = []any{map[string]any{"role": "system", "content": sp}}
+	}
+	for _, k := range []string{"tools", "tool_choice", "chat_template_kwargs", "reasoning_format", "parallel_tool_calls"} {
+		if v, ok := body[k]; ok {
+			pb[k] = v
+		}
+	}
+	n, err := g.countSafe(pb)
+	if err != nil || n <= 0 {
+		// a tokenizer hiccup is not a prefill failure: keep the estimate, do not
+		// trip the breaker, try again next request.
+		return est, false
+	}
+	g.prefixExact.Record(pkey, n)
+	return n, true
+}
+
+// mustKnownPrefixes builds a registry with a capacity that is a constant here,
+// so the only failure mode (capacity <= 0) cannot happen at runtime.
+func mustKnownPrefixes(capacity int) *KnownPrefixes {
+	k, err := NewKnownPrefixes(capacity)
+	if err != nil {
+		panic(err)
+	}
+	return k
 }
 
 // slotOfSafe: a probe error or panic just leaves the slot as it was.
@@ -537,8 +588,10 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 
 	// admission: decode-direct, or dedicated prefill + KV handoff first.
 	// The prefix is what the ENGINE sees ahead of the conversation: system prompt
-	// + tool catalogue (prefixTextOf), not the system prompt alone.
-	prefixToks := EstimateTokens(prefixTextOf(body), nil)
+	// + tool catalogue (prefixTextOf), not the system prompt alone — counted with
+	// the engine's tokenizer once per prefix when one is wired (fix#5b), else
+	// estimated.
+	prefixToks, prefixExact := g.prefixTokens(pkey, body)
 	tailToks := EstimateTokens(tailTextOf(body), nil)
 	// hotPrefix hoisted to a var so /api/requests can log it alongside pkey/ckey:
 	// the estimate that decides prefill-vs-decode is opaque without these, and the
@@ -597,6 +650,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		"known_hot_tokens":  knownHot,
 		"hot_prefix_tokens": hotPrefix,
 		"prefix_toks":       prefixToks,
+		"prefix_exact":      prefixExact, // true = tokenizer count (cached per pkey); false = chars/4
 		"tail_toks":         tailToks,
 		// t1: wall-clock at admission, so decode occupancy can be crossed against the
 		// instant a turn ARRIVES (not when it finishes appearing in the log).
@@ -921,7 +975,49 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 	if v, ok := timingFloat(resp, "prompt_ms"); ok {
 		p.fields["prompt_ms"] = v
 	}
+	// Waits, ALWAYS written (0 = did not wait; -1 = not measurable this way), in
+	// two separate numbers because they are two different queues with two
+	// different fixes: the balancer's budget wait (room in the engine's KV) and
+	// the engine-side wait before the first byte (a busy slot / prompt queue).
+	// The coordinator measures them and hands them over either as plan notes
+	// (streaming path) or as x-sofmat-t-* entries in the decode headers.
+	if _, ok := p.fields["wait_budget_ms"]; !ok {
+		p.fields["wait_budget_ms"] = headerMs(p.Headers, "x-sofmat-t-wait-budget-ms", 0)
+	}
+	if _, ok := p.fields["first_byte_ms"]; !ok {
+		p.fields["first_byte_ms"] = headerMs(p.Headers, "x-sofmat-t-first-byte-ms", -1)
+	}
+	// wait_slot_ms: what the engine took to START streaming beyond its own prompt
+	// processing — the queue in front of the slot. Derivable only when both the
+	// first byte and prompt_ms are known.
+	p.fields["wait_slot_ms"] = -1.0
+	if fb, _ := p.fields["first_byte_ms"].(float64); fb >= 0 {
+		if pm, ok := p.fields["prompt_ms"].(float64); ok {
+			ws := fb - pm
+			if ws < 0 {
+				ws = 0
+			}
+			p.fields["wait_slot_ms"] = ws
+		}
+	}
 	g.finishRecord(p)
+}
+
+// headerMs reads a millisecond figure the coordinator left in the decode headers
+// (never forwarded to the engine), or def when absent/unparseable.
+func headerMs(h Headers, key string, def float64) float64 {
+	if h == nil {
+		return def
+	}
+	v, ok := h[key]
+	if !ok || v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return f
 }
 
 // kvMissPromptTokens: after a handoff the decode should process ~1 token (the
