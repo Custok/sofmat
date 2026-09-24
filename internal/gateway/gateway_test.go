@@ -236,6 +236,12 @@ func TestPrefixKeyCoversToolCatalogue(t *testing.T) {
 	if r1["ckey"] != r2["ckey"] {
 		t.Fatalf("a catalogue change must NOT change the conversation: %v != %v", r1["ckey"], r2["ckey"])
 	}
+	// the first turn of a conversation has no learned slot: its "slot" is a
+	// ring seed and the row must say so (the same seed for every conversation
+	// of the catalogue — it carries no information about where the KV lives).
+	if r1["slot_src"] != "ring" {
+		t.Fatalf("first turn: slot is a ring seed, slot_src must say it: %v", r1["slot_src"])
+	}
 	p1, _ := r1["prefix_toks"].(int)
 	p2, _ := r2["prefix_toks"].(int)
 	if p2 <= p1 {

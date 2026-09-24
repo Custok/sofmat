@@ -738,12 +738,21 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	// slot affinity: reuse the slot this conversation's KV already lives in, so it
 	// does not rotate between turns (the ring only seeds it on the first turn).
 	slot := g.convSlot.get(ckey)
+	// slot_src (fix#19): "learned" = the slot the engine was SEEN to use for
+	// this conversation on a previous turn; "ring" = a seed from the prefix
+	// key, before any turn taught us — every conversation of the same
+	// catalogue gets the same seed, so two rows can legitimately claim one
+	// slot in the same second (15 such pairs in 482 rows on 2026-09-24). The
+	// coordinator never pins id_slot; the engine chooses. Only "learned" says
+	// anything about where the KV lives; slot_engine says where it ended up.
+	slotSrc := "learned"
 	if slot == "" {
 		s, err := g.ring.Route(pkey)
 		if err != nil {
 			return nil, err
 		}
 		slot = s
+		slotSrc = "ring"
 	}
 	// fix#15: one request of a conversation at a time. Taken BEFORE the
 	// residency probes so that, once through, the slot is idle and holds the
@@ -829,6 +838,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		"route":          "/api/chat",
 		"tenant":         tenant,
 		"slot":           slot,
+		"slot_src":       slotSrc, // "learned" (seen on a previous turn) | "ring" (seed by prefix: no information)
 		"n_max":          merged[SpeculativeNMaxKey],
 		"admission":      decision.Reason,
 		"est_new_tokens": decision.EstNewTokens,
