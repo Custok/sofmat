@@ -59,6 +59,10 @@ type fakeEngine struct {
 	// hangAfterFirstChunk: the engine streams one token and then stalls until
 	// its request is cancelled (the client went away upstream).
 	hangAfterFirstChunk bool
+	// busyAfterAbort: the engine keeps the slot busy 2 s after the first chunk
+	// whatever the client does (a real llama-server only notices a gone client
+	// on its next write): what a request the client abandoned looks like.
+	busyAfterAbort bool
 	// toolCallReply: the model answers with TWO tool calls (streamed as deltas
 	// keyed by index, like llama-server; whole when not streamed) instead of text.
 	toolCallReply bool
@@ -305,6 +309,13 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 				_, _ = io.WriteString(w, "\"id\":\"c2\",\"type\":\"function\",\"function\":{\"name\":\"rag_search\",\"arguments\":\"{}\"}}]}}]}\n\n")
 			} else {
 				_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hola\"}}]}\n\n")
+			}
+			if e.busyAfterAbort {
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+				time.Sleep(2 * time.Second) // ignores the client: the slot stays busy
+				return
 			}
 			if e.hangAfterFirstChunk {
 				if f, ok := w.(http.Flusher); ok {
@@ -979,6 +990,51 @@ func TestConvWaitFromConfig(t *testing.T) {
 		if !on && w != 0 {
 			t.Fatalf("conv_wait_ms unset: no waiting (0), got %v", w)
 		}
+	}
+}
+
+// fix#15 must not make a conversation wait for a request its client already
+// ABANDONED (debian-dev, 2026-09-24 09:18: the HUD's guards abort a stream and
+// fire the next call at once; id 61 lived 21 s before its cut was seen). The
+// gate is released the moment the abort is detected — the client's context
+// cancels the engine call and the read returns — not when the engine's slot
+// finally goes idle. Here the fake engine stays busy 2 s after the abort and
+// the next request of the same conversation still goes through at once.
+func TestAbortedRequestReleasesConversationGate(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir }, func(c *config.Config) { c.ConvWaitMs = 30000 })
+	for _, e := range []*fakeEngine{r.decode, r.prefill} {
+		e.busyAfterAbort = true
+	}
+	raw, _ := json.Marshal(map[string]any{"stream": true,
+		"messages": []any{map[string]any{"role": "user", "content": "hola"}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, r.gateway.URL+"/v1/chat/completions", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4096)
+	if _, err := resp.Body.Read(buf); err != nil {
+		t.Fatalf("first chunk: %v", err)
+	}
+	cancel() // the client abandons the request while the engine is still busy
+	resp.Body.Close()
+	t0 := time.Now()
+	// the next request of the SAME conversation: served now, not after the 2 s
+	for _, e := range []*fakeEngine{r.decode, r.prefill} {
+		e.busyAfterAbort = false
+	}
+	if code, _ := postChat(t, r.gateway.URL, map[string]any{"stream": true,
+		"messages": []any{map[string]any{"role": "user", "content": "hola"}}}); code != 200 {
+		t.Fatalf("chat after the abort failed: %d", code)
+	}
+	if took := time.Since(t0); took > 1200*time.Millisecond {
+		t.Fatalf("the request after an abort waited for the abandoned one (%v): the gate must be released at the abort", took)
+	}
+	rec := lastRequestRecord(t, r.gateway.URL)
+	if w, _ := rec["wait_conv_ms"].(float64); w > 1000 {
+		t.Fatalf("wait_conv_ms after an abort must be ~0, got %v (record %v)", w, rec)
 	}
 }
 
