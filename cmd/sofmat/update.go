@@ -269,7 +269,7 @@ const apiTimeout = 8 * time.Second
 var downloadClient = &http.Client{Timeout: 5 * time.Minute}
 
 // descargasPorIntento: reintentos dentro de la MISMA vuelta del updater. Idea de
-// metahuman-dev, y es mas barata que las otras dos correcciones juntas: sus 46
+// el operador del nodo main, y es mas barata que las otras dos correcciones juntas: sus 46
 // fallos historicos eran hipos, y el siguiente intento —media hora despues—
 // funcionaba. Reintentar a los pocos segundos habria evitado casi todos sin
 // esperar al siguiente tick ni gastar un intento.

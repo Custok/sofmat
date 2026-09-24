@@ -1037,7 +1037,7 @@ func itoa(i int) string {
 // fix#15: the requests of ONE conversation go to the decode one at a time.
 // With kv_unified an overlapping request of the same conversation lands in
 // another slot and reprocesses everything although its KV is in VRAM
-// (reproduced 2026-09-24 01:29 by debian-dev: overlap -> other slot -> cold,
+// (reproduced 2026-09-24 01:29 by a fleet reviewer: overlap -> other slot -> cold,
 // 8 of 8; David's id 185, 15.9k reprocessed, 10 s). The wait is recorded on
 // every row (wait_conv_ms, 0 = did not wait), the cap has its own mark
 // (wait_conv_capped), other conversations never wait, and OFF (the default)

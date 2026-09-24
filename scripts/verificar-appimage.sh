@@ -2,7 +2,7 @@
 # verificar-appimage.sh — comprueba que soflink-x86_64.AppImage es bit a bit un
 # asset oficial de las releases de GitHub Custok/sofmat antes de arrancarlo.
 #
-# Extraído de levantar.sh (metahuman-dev, 2026-09-07) para poder usarlo como
+# Extraído de levantar.sh (el operador del nodo main, 2026-09-07) para poder usarlo como
 # ExecStartPre de la unidad systemd: el arranque manual y el gestionado por
 # systemd comparten EXACTAMENTE la misma verificación de integridad.
 #
@@ -13,7 +13,7 @@
 # Sin coincidencia con ninguna release ni con REF_SHA → posible binario
 # re-etiquetado: NO arrancar (salida 1).
 #
-# 2026-09-09 (metahuman-dev, orden de David): se añade la comprobación
+# 2026-09-09 (el operador del nodo main, orden de David): se añade la comprobación
 # ETIQUETA ↔ VERSIÓN DECLARADA. Motivo: entre el 07-09 13:29 y las 20:11 se
 # publicaron CATORCE releases con el MISMO binario (sha d51d181d…), que declara
 # `202609071545`. El hash era oficial en las catorce, así que esta verificación

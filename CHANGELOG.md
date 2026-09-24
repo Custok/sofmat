@@ -3,16 +3,16 @@
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
 ## v202609101226 (2026-09-10)
-`installed` se escribe TAMBIEN al arrancar. Hallazgo de debian-dev, medido en `.51` a los cuatro minutos de publicarse la anterior: cogio `1217` y `soflink-update-state.json` **no tenia `installed`**. Por que: `noteInstalled` corre dentro de `applyUpdate`, en el binario VIEJO que hace la instalacion — y el viejo no tenia la funcion. **El primer binario con la feature llega sin ella**, asi que el lanzador que lee `installed.sha` no tenia nada que leer y `.63` seguia expuesto al no-arranque tras apagon. Ahora `bootstrapInstalled()` en el arranque: version compilada + sha de si mismo. Idempotente; no pisa un estado corrupto (fail-closed). Cuatro pruebas con controles; sabotaje que tumba dos.
+`installed` se escribe TAMBIEN al arrancar. Hallazgo del revisor de la flota, medido en `.51` a los cuatro minutos de publicarse la anterior: cogio `1217` y `soflink-update-state.json` **no tenia `installed`**. Por que: `noteInstalled` corre dentro de `applyUpdate`, en el binario VIEJO que hace la instalacion — y el viejo no tenia la funcion. **El primer binario con la feature llega sin ella**, asi que el lanzador que lee `installed.sha` no tenia nada que leer y `.63` seguia expuesto al no-arranque tras apagon. Ahora `bootstrapInstalled()` en el arranque: version compilada + sha de si mismo. Idempotente; no pisa un estado corrupto (fail-closed). Cuatro pruebas con controles; sabotaje que tumba dos.
 
 Y se corrige una afirmacion de la entrada anterior: `.51` NO tiene opcion C ni `REF_SHA` (arranca siempre, degradado). El patron del downgrade/no-arranque era de `.63` y `.30`; generalice un fichero de `flota/infra` a dos nodos sin preguntar a uno.
 
 ## v202609101217 (2026-09-10)
-Revision completa del auto-update tras el cambio de modelo en `.30`: **seis fallos demostrados y cerrados de una vez**, con un segundo desarrollador (debian-dev) leyendo el fuente publico y citando lineas, y un tercero (metahuman-dev) midiendo desde fuera lo que el codigo no ve de si mismo. Anoche los tres firmaron conclusiones sobre este codigo leyendo la lectura del autor; hoy no.
+Revision completa del auto-update tras el cambio de modelo en `.30`: **seis fallos demostrados y cerrados de una vez**, con un segundo desarrollador (el revisor de la flota) leyendo el fuente publico y citando lineas, y un tercero (el operador del nodo main) midiendo desde fuera lo que el codigo no ve de si mismo. Anoche los tres firmaron conclusiones sobre este codigo leyendo la lectura del autor; hoy no.
 
 **De mas grave a menos, cada uno con su prueba en rojo contra la version anterior y su sabotaje que compila:**
 
-**1. Una descarga CORRUPTA bloqueaba la version para siempre.** `admitArtifact` comparaba el digest **despues** de descargar y, si no cuadraba, escribia `Refused[sha]` + `RefusedTags[version]` permanentes y gastaba intento: el ciclo siguiente ni volvia a descargar (*«ya se rechazo y no ha cambiado»*). Unos bytes corruptos por la red se trataban como un release mal publicado. **Ahora el digest se comprueba DENTRO de `bajarArtefacto`, en el bucle de reintentos: corrupcion = `ErrDescarga` = se reintenta y NO gasta intento.** Solo tres descargas seguidas que no cuadren se consideran un release malo. *(Hallazgo de debian-dev; prueba `TestUnaDescargaCorruptaNoDebeBloquearLaVersionParaSiempre`.)*
+**1. Una descarga CORRUPTA bloqueaba la version para siempre.** `admitArtifact` comparaba el digest **despues** de descargar y, si no cuadraba, escribia `Refused[sha]` + `RefusedTags[version]` permanentes y gastaba intento: el ciclo siguiente ni volvia a descargar (*«ya se rechazo y no ha cambiado»*). Unos bytes corruptos por la red se trataban como un release mal publicado. **Ahora el digest se comprueba DENTRO de `bajarArtefacto`, en el bucle de reintentos: corrupcion = `ErrDescarga` = se reintenta y NO gasta intento.** Solo tres descargas seguidas que no cuadren se consideran un release malo. *(Hallazgo de el revisor de la flota; prueba `TestUnaDescargaCorruptaNoDebeBloquearLaVersionParaSiempre`.)*
 
 **2. El lanzador de arranque hacia DOWNGRADE (Windows) o NO ARRANCABA (Linux) tras un autoupdate si el oraculo no contestaba.** El updater verificaba digest + version declarada e instalaba, **y tiraba esa verificacion**; el lanzador solo confiaba en `REF_SHA`, que escribe el propio lanzador y solo cuando su oraculo (Gitea en `.30`, GitHub en `.51`/`.63`) responde. Medido en `.63`: `REF_SHA` **dos versiones por detras** porque el re-exec en sitio no pasa por el `ExecStartPre`; con GitHub caido, los once respaldos descartados y `exit 1`. **Ahora el updater deja constancia en `soflink-update-state.json` → `installed {version, sha, at}`**, y el lanzador de `.30` la lee como anclaje de confianza sin red. **Ademas, guarda anti-downgrade: nunca se sustituye un binario que ejecuta y declara un sello valido por un respaldo con sello mas viejo** (acotada a sellos de 12 digitos: un binario roto que imprime basura no puede bloquear el rescate). Los lanzadores Linux tienen el mismo patron y el campo `installed` ya esta ahi para que lo lean.
 
@@ -31,7 +31,7 @@ Revision completa del auto-update tras el cambio de modelo en `.30`: **seis fall
 ## v202609101124 (2026-09-10)
 Un tropiezo de red deja de tener consecuencias permanentes.
 
-**El dato que lo destapa, del log de `.63`** (lo encontró metahuman-dev mientras comprobaba otra cosa):
+**El dato que lo destapa, del log de `.63`** (lo encontró el operador del nodo main mientras comprobaba otra cosa):
 ```
 46  "auto-update fallo"      TODOS "Client.Timeout exceeded while awaiting headers"
     19 seguidos contra la MISMA version, v202609072206
@@ -47,7 +47,7 @@ client := &http.Client{Timeout: 8 * time.Second}   // se pasaba a applyUpdate
 ```
 En Go `Timeout` cubre la petición **entera, incluida la lectura del cuerpo**. Ocho segundos están bien para preguntar «cuál es la última versión» y son absurdos para bajar un binario. **Nadie lo roza con la red sana** —medido: `.30` baja sus 6,86 MB en **0,70 s** y `.63` sus 3,55 MB en **0,35 s**, márgenes de 11x y 15x— **pero un cronómetro corto no falla por el tamaño: falla porque no deja término medio entre «va bien» y «fallo total».** Ahora la descarga tiene su propio `downloadClient` con 5 minutos, y `apiTimeout` queda para lo que es.
 
-**2. No había un solo reintento** dentro de `applyUpdate`. Una respuesta lenta y a esperar media hora al siguiente tick. Ahora **3 intentos con pausa creciente** dentro de la misma vuelta. *(Idea de metahuman-dev, y es la más barata de las tres: sus 46 fallos históricos eran hipos y el intento siguiente funcionaba.)*
+**2. No había un solo reintento** dentro de `applyUpdate`. Una respuesta lenta y a esperar media hora al siguiente tick. Ahora **3 intentos con pausa creciente** dentro de la misma vuelta. *(Idea del operador del nodo main, y es la más barata de las tres: sus 46 fallos históricos eran hipos y el intento siguiente funcionaba.)*
 
 **3. La que dejaba clavado el nodo: un fallo de RED gastaba intento.**
 ```

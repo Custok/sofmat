@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Hallazgo de debian-dev (10-09, medido en .51): noteInstalled corre en el
+// Hallazgo del revisor de la flota (10-09, medido en .51): noteInstalled corre en el
 // binario VIEJO que hace la instalacion, asi que el primer binario con la
 // feature llega sin `installed` escrito y el lanzador no tiene ancla. Al
 // arrancar, el binario que corre ES el instalado y lo deja escrito el mismo.

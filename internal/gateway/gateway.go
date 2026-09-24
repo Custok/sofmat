@@ -200,7 +200,7 @@ type Options struct {
 	// for it to finish before the decode is dialled. 0 = off (default). Why: with
 	// kv_unified the engine puts an overlapping request of the same conversation
 	// in ANOTHER slot and cannot reuse its own KV although it is in VRAM
-	// (reproduced 2026-09-24 01:29 by debian-dev: overlap -> other slot -> cold,
+	// (reproduced 2026-09-24 01:29 by a fleet reviewer: overlap -> other slot -> cold,
 	// 8 of 8; David's id 185, 15.9k reprocessed, 10 s). Waiting removes the
 	// overlap, the identified cause; it does not promise every cold turn away.
 	ConvWait       time.Duration
@@ -1170,7 +1170,7 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 	// after prompt AND generation, both come off) are never compared blindly.
 	// A whole reply without predicted_ms is NOT derivable: the headers-minus-
 	// prompt figure is the undercount fix#11 removed, so it stays -1 (review
-	// by debian-dev 2026-09-24 00:52: "prefiero un -1 honesto").
+	// by a fleet reviewer 2026-09-24 00:52: "prefiero un -1 honesto").
 	p.fields["wait_slot_ms"] = -1.0
 	p.fields["wait_slot_src"] = ""
 	if pm, ok := p.fields["prompt_ms"].(float64); ok {

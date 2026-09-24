@@ -1,10 +1,10 @@
-# /etc/systemd/system/soflink.service — tal cual corre en .63 (metahuman-dev).
-# Referencia para otros nodos: rutas y User son de .63. En .100 (radxa-dev)
+# /etc/systemd/system/soflink.service — tal cual corre en el nodo main (.63). Rutas y usuario son marcadores: ajústalos a tu instalación.
+# Referencia para otros nodos: rutas y User son de .63. En .100 (el operador del nodo edge)
 # va como unidad de USUARIO (~/.config/systemd/user/), igual que su ComfyUI.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 [Unit]
-# soflink (coordinador sofmat) en node-d .63 — metahuman-dev 2026-09-07.
+# soflink (coordinador sofmat) en node-d .63 — el operador del nodo main, 2026-09-07.
 # Motivo (topic prefill-decode-desagregado-kv-handoff, 06-09 23:38): soflink se
 # lanzaba con `setsid nohup` desde levantar.sh, así que NO sobrevivía a un
 # reinicio del host. Le pasó a .51 tras su reboot de las 23:19: su soflink no
@@ -18,13 +18,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=custok
-WorkingDirectory=/home/custok/soflink
+User=soflink
+WorkingDirectory=/opt/soflink
 # Integridad ANTES de arrancar: el AppImage debe ser un asset oficial de las
 # releases de GitHub (mismo script que usa el arranque manual de levantar.sh).
 # Si no cuadra, la unidad no arranca (binario re-etiquetado = no se ejecuta).
-ExecStartPre=/home/custok/soflink/verificar-appimage.sh
-ExecStart=/home/custok/soflink/soflink-x86_64.AppImage serve -no-update --config config.local.json
+ExecStartPre=/opt/soflink/verificar-appimage.sh
+ExecStart=/opt/soflink/soflink-x86_64.AppImage serve -no-update --config config.local.json
 Restart=always
 RestartSec=5
 # 2026-09-09 (orden de David): `-no-update`. El autoupdate integrado entro en
@@ -33,8 +33,8 @@ RestartSec=5
 # mismo. 272 reinicios, ~940 MB y 51 API keys rotadas en 24 h, sin una sola
 # linea de error. La actualizacion ahora es DELIBERADA: ./actualizar-soflink.sh
 # (verifica hash Y que el artefacto declare la version de su etiqueta).
-StandardOutput=append:/home/custok/soflink/soflink.log
-StandardError=append:/home/custok/soflink/soflink.log
+StandardOutput=append:/opt/soflink/soflink.log
+StandardError=append:/opt/soflink/soflink.log
 
 [Install]
 WantedBy=multi-user.target
@@ -61,4 +61,4 @@ WantedBy=multi-user.target
 #
 #   [Service]
 #   ExecStart=
-#   ExecStart=/home/custok/soflink/soflink-x86_64.AppImage serve --config config.local.json
+#   ExecStart=/opt/soflink/soflink-x86_64.AppImage serve --config config.local.json

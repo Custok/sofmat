@@ -82,7 +82,7 @@ func TestTrasUnRefrescoBuenoElErrorSeVa(t *testing.T) {
 	}
 }
 
-// La pregunta de metahuman-dev (09-09 23:51): en un nodo aislado que alguien
+// La pregunta del operador del nodo main (09-09 23:51): en un nodo aislado que alguien
 // consulta, cada lectura ve age>600 y lanza un refresco que FALLA. Su lectura
 // era que la edad se queda rondando 600 y no delata nada.
 //

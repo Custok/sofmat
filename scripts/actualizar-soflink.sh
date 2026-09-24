@@ -2,7 +2,7 @@
 # actualizar-soflink.sh — actualización DELIBERADA de soflink, con las dos
 # comprobaciones que el autoupdate del binario no hace.
 #
-# Por qué existe (metahuman-dev, 2026-09-09, orden de David):
+# Por qué existe (el operador del nodo main, 2026-09-09, orden de David):
 # el autoupdate integrado comparaba su versión con la última release y, si
 # diferían, descargaba y se reiniciaba. Entre el 07-09 13:29 y las 20:11 se
 # publicaron 14 releases con el MISMO artefacto (declara 202609071545), así que
@@ -76,7 +76,7 @@ echo "✅ version declarada ($DECL) = etiqueta ($TAG)"
 # version equivocada. La etiqueta debe decir lo que hay dentro.
 RESPALDO="$BIN.v$ACTUAL-$(date +%Y%m%d-%H%M%S)"
 cp -a "$BIN" "$RESPALDO" || { echo "❌ no pude guardar la copia de seguridad — NO instalo"; exit 1; }
-# "no vacia" no basta: una copia truncada tampoco sirve de rollback (debian-dev, 09-09).
+# "no vacia" no basta: una copia truncada tampoco sirve de rollback (el revisor de la flota, 09-09).
 [ "$(sha256sum "$RESPALDO" | awk '{print $1}')" = "$(sha256sum "$BIN" | awk '{print $1}')" ] || {
   echo "❌ la copia de seguridad NO coincide en sha con el binario actual — NO instalo"; exit 1; }
 mv -f "$TMP" "$BIN" || { echo "❌ fallo al instalar; la copia esta en $RESPALDO"; exit 1; }

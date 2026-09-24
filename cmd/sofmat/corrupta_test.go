@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// Hallazgo de debian-dev (10-09): una descarga CORRUPTA por la red —cuerpo
+// Hallazgo del revisor de la flota (10-09): una descarga CORRUPTA por la red —cuerpo
 // >1 MB, HTTP 200, pero bytes distintos al digest publicado— se trata como
 // artefacto MALO: rechazo permanente por sha + RefusedTags + intento gastado.
 // El siguiente ciclo ni siquiera vuelve a descargar. Una corrupcion de red

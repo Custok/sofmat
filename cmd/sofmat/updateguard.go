@@ -378,7 +378,7 @@ func noteInstalled(version, sha string) {
 // Hace falta porque noteInstalled corre dentro de applyUpdate, en el binario
 // VIEJO que hace la instalacion; un nodo que llega a la primera version con
 // esta feature desde una anterior se queda sin `installed` hasta que el nuevo
-// binario instale otra cosa. Medido por debian-dev en .51 el 10-09: cogio
+// binario instale otra cosa. Medido por el revisor de la flota en .51 el 10-09: cogio
 // v202609101217 y el fichero de estado no tenia `installed`, asi que el
 // lanzador que lo lee no tenia nada que leer y .63 seguia expuesto al
 // no-arranque tras apagon. Escribirlo al arrancar cierra el hueco: el binario

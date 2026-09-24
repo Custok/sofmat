@@ -994,7 +994,7 @@ func TestConvWaitFromConfig(t *testing.T) {
 }
 
 // fix#15 must not make a conversation wait for a request its client already
-// ABANDONED (debian-dev, 2026-09-24 09:18: the HUD's guards abort a stream and
+// ABANDONED (a fleet reviewer, 2026-09-24 09:18: the HUD's guards abort a stream and
 // fire the next call at once; id 61 lived 21 s before its cut was seen). The
 // gate is released the moment the abort is detected — the client's context
 // cancels the engine call and the read returns — not when the engine's slot

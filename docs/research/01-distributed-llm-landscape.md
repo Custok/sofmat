@@ -24,7 +24,7 @@ Decode = **memory-bandwidth-bound**: `tok/s`_etapa ≈ `mem_bw / bytes_de_capas_
 ## 4. Aumentar CAPACIDAD (clave para nuestro objetivo)
 - **Cuantización:** GGUF k-quants (Q4_K_M ~4.5 bpw), AWQ/GPTQ (4-bit GPU-friendly), FP8 (nativo Blackwell — ⚠ MoE sm_121 frágil, gateway-lane). Q4 ~½ del footprint vs bf16 → **160 GB sostiene ~300B params en Q4.** Palanca principal.
 - **KV-cache:** PagedAttention, KV cuantizado (Q8/Q4), **offload de KV a RAM CPU** (crítico en contexto largo). KV = restricción DURA en el particionador.
-- **Offload de pesos a RAM:** llama.cpp `-ngl` parcial; el DGX Spark (128 GB unificada) es "offload en caja". Velocidad ↔ capacidad.
+- **Offload de pesos a RAM:** llama.cpp `-ngl` parcial; un equipo de escritorio con 128 GB de memoria unificada es "offload en caja". Velocidad ↔ capacidad.
 
 ## 5. Network-transparency (que el límite sea el cómputo)
 - **Micro-batching** para llenar la pipeline (tapa la burbuja) — en 1-user batch=1 la burbuja es inherente; ayuda al throughput, no a la latencia single-stream.
