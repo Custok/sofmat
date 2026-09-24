@@ -358,6 +358,26 @@ func (c *convSlots) get(key string) string {
 	return c.m[key]
 }
 
+// forget drops the learned slot of a conversation: the engine just showed it
+// was not there (fix#18), so the next turn must not be credited on that slot.
+func (c *convSlots) forget(key string) {
+	if c == nil || key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.m[key]; !ok {
+		return
+	}
+	delete(c.m, key)
+	for i, k := range c.ord {
+		if k == key {
+			c.ord = append(c.ord[:i], c.ord[i+1:]...)
+			break
+		}
+	}
+}
+
 func (c *convSlots) set(key, slot string) {
 	if c == nil || key == "" || slot == "" {
 		return
@@ -557,6 +577,20 @@ func (g *Gateway) slotOfSafe(n int) (slot string, ok bool) {
 }
 
 // poolHeldSafe: a probe error or panic just leaves the field out of the record.
+// poolCouldHold is the cheap bound on the residency probe (fix#18): the probe
+// only sees the SIZE of the learned slot, so another conversation of the same
+// catalogue sitting there passes for this one (2026-09-24 10:20, seq 131:
+// 15 703 credited, 0 reused, after a bench pushed 47 conversations through).
+// If the whole pool holds fewer tokens than this conversation had, it cannot
+// be in VRAM whatever the slot's size says. Unknown pool = no opinion.
+func (g *Gateway) poolCouldHold(total int) bool {
+	held, ok := g.poolHeldSafe()
+	if !ok {
+		return true
+	}
+	return held >= total*8/10
+}
+
 func (g *Gateway) poolHeldSafe() (held int, ok bool) {
 	if g.poolHeld == nil {
 		return 0, false
@@ -726,7 +760,7 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	// matched); a mismatch credits nothing and the estimate is as before.
 	resident := 0
 	if ct, ok := g.convLast.get(ckey); ok && ct.total > 0 && ct.prefix == prefixToks && tailToks >= ct.tail &&
-		g.residentFor(body, ct.total, slot) {
+		g.residentFor(body, ct.total, slot) && g.poolCouldHold(ct.total) {
 		resident = ct.total
 	}
 	decision := ClassifyAdmission(AdmissionInput{
@@ -1093,6 +1127,18 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 			// only if it keeps that shape and the slot still has it.
 			if p.ckey != "" && cn+pn+gen > 0 {
 				g.convLast.set(p.ckey, convTurn{prefix: p.prefixToks, tail: p.tailToks, total: cn + pn + gen})
+			}
+			// resident_wrong (fix#18): the admission credited this conversation as
+			// resident and the engine reused less than half of it — the learned
+			// slot held something else of the same size (a bench conversation of
+			// the same catalogue, 2026-09-24 seq 131). Said on the row, always
+			// (false explicit), and the learned slot is dropped so the next turn
+			// is not credited on it again unless the engine slot is learned anew.
+			resident, _ := p.fields["resident_toks"].(int)
+			wrong := resident > 0 && cn < resident/2
+			p.fields["resident_wrong"] = wrong
+			if wrong {
+				g.convSlot.forget(p.ckey)
 			}
 			if s, ok := g.slotOfSafe(cn + pn + gen); ok && s != "" {
 				if src == "lcp" && prevSlot != "" && s == prevSlot {

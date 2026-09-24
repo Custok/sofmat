@@ -1202,6 +1202,77 @@ func TestToolChoiceRecorded(t *testing.T) {
 	}
 }
 
+// fix#18: the residency probe only sees the SIZE of the learned slot, so a
+// conversation of the same catalogue sitting there passes for this one and
+// the credit is wrong (2026-09-24 10:20, seq 131: 15 703 credited, 0 reused,
+// after a bench pushed 47 conversations through the decode). Two guards: the
+// pool as a bound at admission (if the whole pool holds fewer tokens than the
+// conversation had, it cannot be there), and resident_wrong on the row when
+// the engine reused less than half of what was credited, dropping the learned
+// slot so the next turn is not credited on it again.
+func TestResidentCreditBoundedByPoolAndMarkedWhenWrong(t *testing.T) {
+	var cacheN float64
+	poolHeld, poolKnown := 0, false
+	gw, _ := newTestGW(t, func(o *Options) {
+		o.Threshold = 40000
+		o.PoolHeld = func() (int, bool) { return poolHeld, poolKnown }
+		o.BackendCall = func(body Body, extra Headers) (Body, error) {
+			r := okResp()
+			pt := EstimateTokens(prefixTextOf(body), nil) + EstimateTokens(tailTextOf(body), nil)
+			r["timings"] = map[string]any{"cache_n": cacheN, "prompt_n": float64(pt) - cacheN, "predicted_n": 20.0}
+			return r, nil
+		}
+	})
+	long := strings.Repeat("resultado de la herramienta ", 300)
+	turn := func(n int) Body { return toolsBody("sys", 40, long, "respuesta", strings.Repeat("sigue ", 400*n)) }
+	// turn 1: cold; every row carries resident_wrong, false explicit
+	cacheN = 0
+	gw.Chat(Headers{}, turn(1))
+	if rec := lastRecord(t, gw); rec["resident_wrong"] != false {
+		t.Fatalf("resident_wrong must be an explicit false on a turn that was not credited: %v", rec["resident_wrong"])
+	}
+	// turn 2: same shape, probe says resident, but the pool holds almost nothing -> no credit
+	poolHeld, poolKnown = 100, true
+	cacheN = 0
+	gw.Chat(Headers{}, turn(2))
+	if res, _ := lastRecord(t, gw)["resident_toks"].(int); res != 0 {
+		t.Fatalf("a pool that cannot hold the conversation must void the credit, got resident_toks=%d", res)
+	}
+	// turn 3: pool large enough, credit given, but the engine reuses nothing -> wrong, marked
+	poolHeld = 1_000_000
+	cacheN = 0
+	gw.Chat(Headers{}, turn(3))
+	rec := lastRecord(t, gw)
+	if res, _ := rec["resident_toks"].(int); res <= 0 {
+		t.Fatalf("test premise: turn 3 must be credited (pool large, same shape), got %v", rec["resident_toks"])
+	}
+	if rec["resident_wrong"] != true {
+		t.Fatalf("credited and not reused must be marked resident_wrong: %v (record %v)", rec["resident_wrong"], rec)
+	}
+	// turn 4: the engine reuses the whole conversation -> credited and right
+	prev := EstimateTokens(prefixTextOf(turn(3)), nil) + EstimateTokens(tailTextOf(turn(3)), nil) + 20
+	cacheN = float64(prev)
+	gw.Chat(Headers{}, turn(4))
+	if rec := lastRecord(t, gw); rec["resident_wrong"] != false {
+		t.Fatalf("a credit the engine honoured must not be marked wrong: %v", rec["resident_wrong"])
+	}
+}
+
+func TestConvSlotsForget(t *testing.T) {
+	cs := newConvSlots(4)
+	cs.set("a", "1")
+	cs.set("b", "2")
+	cs.forget("a")
+	if cs.get("a") != "" || cs.get("b") != "2" {
+		t.Fatalf("forget must drop only that conversation: a=%q b=%q", cs.get("a"), cs.get("b"))
+	}
+	cs.forget("missing") // no-op
+	cs.set("a", "3")
+	if cs.get("a") != "3" {
+		t.Fatal("a forgotten conversation can be learned again")
+	}
+}
+
 // fix#15: the requests of ONE conversation go to the decode one at a time.
 // With kv_unified an overlapping request of the same conversation lands in
 // another slot and reprocesses everything although its KV is in VRAM
