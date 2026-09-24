@@ -22,7 +22,7 @@
 Decode = **memory-bandwidth-bound**: `tok/s`_etapa ≈ `mem_bw / bytes_de_capas_en_la_etapa`. → repartir capas **∝ mem_bw** para igualar el tiempo de etapa (no ∝ VRAM). Formulación: **minimizar `max(tiempo_etapa)`** sujeto a `VRAM(pesos+KV) ≤ cap` por nodo, con rangos **contiguos** (lo exige PP). Es *min-max chain partitioning on a line* → **DP** `O(L²·N)` o **binary-search sobre el tiempo + greedy**. (= el solver de partitioner-lane.)
 
 ## 4. Aumentar CAPACIDAD (clave para nuestro objetivo)
-- **Cuantización:** GGUF k-quants (Q4_K_M ~4.5 bpw), AWQ/GPTQ (4-bit GPU-friendly), FP8 (nativo Blackwell — ⚠ MoE sm_121 frágil, gateway-lane). Q4 ~½ del footprint vs bf16 → **160 GB sostiene ~300B params en Q4.** Palanca principal.
+- **Cuantización:** GGUF k-quants (Q4_K_M ~4.5 bpw), AWQ/GPTQ (4-bit GPU-friendly), FP8 (nativo Blackwell — ⚠ MoE en FP8 frágil en la variante de memoria unificada, gateway-lane). Q4 ~½ del footprint vs bf16 → **160 GB sostiene ~300B params en Q4.** Palanca principal.
 - **KV-cache:** PagedAttention, KV cuantizado (Q8/Q4), **offload de KV a RAM CPU** (crítico en contexto largo). KV = restricción DURA en el particionador.
 - **Offload de pesos a RAM:** llama.cpp `-ngl` parcial; un equipo de escritorio con 128 GB de memoria unificada es "offload en caja". Velocidad ↔ capacidad.
 
