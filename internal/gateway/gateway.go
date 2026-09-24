@@ -1134,6 +1134,14 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 			// the same catalogue, 2026-09-24 seq 131). Said on the row, always
 			// (false explicit), and the learned slot is dropped so the next turn
 			// is not credited on it again unless the engine slot is learned anew.
+			// DO NOT try to make the probe exact: /slots exposes sizes, never
+			// content, so any probe by size can collide. The goal is not a probe
+			// that cannot be wrong but one whose mistakes are SEEN on the row and
+			// corrected on the next turn. A rising resident_wrong count is also the
+			// metric of the underlying cause: foreign conversations of the same
+			// size occupying the decode's slots — the decode oversubscribed.
+			// Rule for readers: resident_toks = what the gateway believed by size;
+			// kv_source = what the engine did; when they disagree, kv_source wins.
 			resident, _ := p.fields["resident_toks"].(int)
 			wrong := resident > 0 && cn < resident/2
 			p.fields["resident_wrong"] = wrong
