@@ -995,6 +995,22 @@ func streamRequested(body gateway.Body) bool {
 // same policy as the JSON path. The tail of the stream is kept to Finish the
 // request record from the engine's final-chunk timings.
 func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gateway.Plan) {
+	// fix#21: Prepare took the conversation gate (fix#15) and finishRecord is
+	// the only thing that releases it. Every early return below used to skip
+	// Finish: a client that disconnected before the engine's first byte
+	// ("context canceled" out of client.Do — the HUD's automatic turn aborting
+	// its own request, 2026-09-25 00:34:22) left the gate held for good, and
+	// every later turn of that conversation waited the whole cap (five of
+	// David's turns at 30.0 s each with an idle engine). Finish exactly once,
+	// on every path; the normal path passes the engine's final timings.
+	finished := false
+	finish := func(fin gateway.Body) {
+		if !finished {
+			finished = true
+			s.gw.Finish(plan, fin)
+		}
+	}
+	defer finish(gateway.Body{})
 	if s.bc.DecodeEntryURL == "" {
 		writeJSON(w, http.StatusServiceUnavailable, gateway.Body{"error": "no decode backend"})
 		return
@@ -1010,7 +1026,8 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 		n, dn, perr := s.pickDecode(plan.Body, plan.Headers)
 		if perr != nil {
 			writeJSON(w, http.StatusServiceUnavailable, gateway.Body{"error": perr.Error()})
-			s.gw.Finish(plan, gateway.Body{})
+			plan.Note("error", perr.Error())
+			finish(gateway.Body{})
 			return
 		}
 		node, doneNode = n, dn
@@ -1049,6 +1066,11 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 	t0 := time.Now()
 	resp, err := s.client.Do(req)
 	if err != nil {
+		// the row must say why there was no reply: the client went away (context
+		// canceled) or the engine could not be reached — before, this path left
+		// no row at all, which is how the leaked gate went unseen.
+		plan.Note("engine_read_error", err.Error())
+		plan.Note("engine_bytes", 0)
 		writeJSON(w, http.StatusBadGateway, gateway.Body{"error": err.Error()})
 		return
 	}
@@ -1120,7 +1142,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 		plan.Note("engine_events", events)
 		plan.Note("tool_calls_n", toolCalls.n())
 		logAnomaly(engineName(node), resp.StatusCode, streamed, readErr, why0(readErr))
-		s.gw.Finish(plan, fin)
+		finish(fin)
 	}()
 	buf := make([]byte, 8192)
 	firstToken := false

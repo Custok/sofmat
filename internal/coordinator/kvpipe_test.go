@@ -59,6 +59,11 @@ type fakeEngine struct {
 	// hangAfterFirstChunk: the engine streams one token and then stalls until
 	// its request is cancelled (the client went away upstream).
 	hangAfterFirstChunk bool
+	// delayBeforeHeaders: the engine takes this long before even answering the
+	// HTTP status line (a slot queue on a busy build). A client that gives up in
+	// that window makes the coordinator's client.Do fail with "context canceled"
+	// before any byte arrived — the path that leaked the conversation gate.
+	delayBeforeHeaders time.Duration
 	// busyAfterAbort: the engine keeps the slot busy 2 s after the first chunk
 	// whatever the client does (a real llama-server only notices a gone client
 	// on its next write): what a request the client abandoned looks like.
@@ -284,6 +289,13 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 			}
 		}
 		if s, _ := b["stream"].(bool); s {
+			if e.delayBeforeHeaders > 0 {
+				select {
+				case <-time.After(e.delayBeforeHeaders):
+				case <-r.Context().Done():
+					return
+				}
+			}
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(200)
 			if f, ok := w.(http.Flusher); ok {
@@ -1035,6 +1047,47 @@ func TestAbortedRequestReleasesConversationGate(t *testing.T) {
 	rec := lastRequestRecord(t, r.gateway.URL)
 	if w, _ := rec["wait_conv_ms"].(float64); w > 1000 {
 		t.Fatalf("wait_conv_ms after an abort must be ~0, got %v (record %v)", w, rec)
+	}
+}
+
+// fix#21: a client that disconnects BEFORE the engine's first byte (the HUD's
+// automatic turn aborted its own request at 00:34:22 on 2026-09-25 while the
+// coordinator was still dialling the decode) must release the conversation gate
+// too. Before the fix, chatStream returned from the client.Do error without
+// Finish, the gate stayed held for good, and every later turn of David's
+// conversation waited the whole cap: five turns at 30.0 s with an idle engine.
+func TestClientGoneBeforeFirstByteReleasesConversationGate(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir }, func(c *config.Config) { c.ConvWaitMs = 3000 })
+	for _, e := range []*fakeEngine{r.decode, r.prefill} {
+		e.delayBeforeHeaders = 2 * time.Second
+	}
+	raw, _ := json.Marshal(map[string]any{"stream": true,
+		"messages": []any{map[string]any{"role": "user", "content": "hola"}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, r.gateway.URL+"/v1/chat/completions", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	go func() {
+		time.Sleep(150 * time.Millisecond) // the engine has not answered yet
+		cancel()
+	}()
+	if _, err := http.DefaultClient.Do(req); err == nil {
+		t.Fatal("test premise: the client must have given up before the headers")
+	}
+	for _, e := range []*fakeEngine{r.decode, r.prefill} {
+		e.delayBeforeHeaders = 0
+	}
+	time.Sleep(100 * time.Millisecond) // let the coordinator observe the cancellation
+	t0 := time.Now()
+	if code, _ := postChat(t, r.gateway.URL, map[string]any{"stream": true,
+		"messages": []any{map[string]any{"role": "user", "content": "hola"}}}); code != 200 {
+		t.Fatalf("chat after the abandoned request failed: %d", code)
+	}
+	if took := time.Since(t0); took > 1500*time.Millisecond {
+		t.Fatalf("the request after a client-gone-before-first-byte waited the gate cap (%v): the gate leaked", took)
+	}
+	rec := lastRequestRecord(t, r.gateway.URL)
+	if w, _ := rec["wait_conv_ms"].(float64); w > 1000 {
+		t.Fatalf("wait_conv_ms must be ~0 after the abandoned request, got %v (record %v)", w, rec)
 	}
 }
 
