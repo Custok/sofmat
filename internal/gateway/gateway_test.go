@@ -1158,6 +1158,50 @@ func TestSeqAdmitFollowsArrival(t *testing.T) {
 	}
 }
 
+// fix#17: every row says what the client asked of the tools (tool_choice: the
+// forced function's name, or the mode) and how many it offered, so "forced and
+// ignored" (tool_choice = a name, tool_calls_n = 0) is measurable from outside
+// the client (2026-09-24 10:00: a read was forced twice, the model called
+// nothing and copied its own old reply; nobody could count that from the rows).
+func TestToolChoiceRecorded(t *testing.T) {
+	gw, _ := newTestGW(t, nil)
+	cases := []struct {
+		name   string
+		choice any
+		want   string
+	}{
+		{"forced function", map[string]any{"type": "function", "function": map[string]any{"name": "mis_pendientes"}}, "mis_pendientes"},
+		{"required", "required", "required"},
+		{"none", "none", "none"},
+		{"absent", nil, ""},
+	}
+	for _, c := range cases {
+		body := toolsBody("sys", 3, "hola "+c.name)
+		if c.choice != nil {
+			body["tool_choice"] = c.choice
+		} else {
+			delete(body, "tool_choice")
+		}
+		gw.Chat(Headers{}, body)
+		rec := lastRecord(t, gw)
+		if got, _ := rec["tool_choice"].(string); got != c.want {
+			t.Fatalf("%s: tool_choice must be %q, got %v", c.name, c.want, rec["tool_choice"])
+		}
+		if n, _ := rec["tools_n"].(int); n != 3 {
+			t.Fatalf("%s: tools_n must be 3, got %v", c.name, rec["tools_n"])
+		}
+	}
+	// no catalogue at all: tools_n 0 and an explicit empty tool_choice
+	gw.Chat(Headers{}, chatBody("sys", "sin herramientas"))
+	rec := lastRecord(t, gw)
+	if n, _ := rec["tools_n"].(int); n != 0 {
+		t.Fatalf("tools_n must be 0 without a catalogue, got %v", rec["tools_n"])
+	}
+	if got, ok := rec["tool_choice"].(string); !ok || got != "" {
+		t.Fatalf("tool_choice must be an explicit empty string when none was sent, got %v", rec["tool_choice"])
+	}
+}
+
 // fix#15: the requests of ONE conversation go to the decode one at a time.
 // With kv_unified an overlapping request of the same conversation lands in
 // another slot and reprocesses everything although its KV is in VRAM

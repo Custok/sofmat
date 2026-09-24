@@ -775,10 +775,16 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		// diagnosis columns (2026-09-21): group turns by conversation and see the
 		// estimate's inputs. pkey collision across conversations that share a
 		// system prompt is the suspected cause of resident turns hitting prefill.
-		"pkey":              pkey,
-		"ckey":              ckey,
-		"ckey_src":          ckeySrc, // "header" (declared conversation id) | "first-message" | "prefix"
-		"seq_admit":         seq,     // arrival order; the id is assigned at the end of the request
+		"pkey":      pkey,
+		"ckey":      ckey,
+		"ckey_src":  ckeySrc, // "header" (declared conversation id) | "first-message" | "prefix"
+		"seq_admit": seq,     // arrival order; the id is assigned at the end of the request
+		// what the client asked of the tools: "" (none sent), "auto", "none",
+		// "required", or the function it FORCED. Crossed with tool_calls_n it says
+		// "forced and ignored" from outside the client (2026-09-24 10:00: the HUD
+		// forced a read twice, the model called nothing and copied its old reply).
+		"tool_choice":       toolChoiceOf(body),
+		"tools_n":           toolsCount(body),
 		"known_hot_tokens":  knownHot,
 		"hot_prefix_tokens": hotPrefix,
 		"resident_toks":     resident, // this conversation's tokens still in its slot (credited against est_new)
@@ -1534,6 +1540,33 @@ func timingInt(resp Body, key string) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// toolChoiceOf reads the request's tool_choice: the string modes as they are,
+// a forced function as its name, "" when the client sent none.
+func toolChoiceOf(body Body) string {
+	switch tc := body["tool_choice"].(type) {
+	case string:
+		return tc
+	case map[string]any:
+		if fn, ok := tc["function"].(map[string]any); ok {
+			if name, ok := fn["name"].(string); ok && name != "" {
+				return name
+			}
+		}
+		if t, ok := tc["type"].(string); ok {
+			return t
+		}
+	}
+	return ""
+}
+
+// toolsCount is how many tools the request offered (0 = no catalogue).
+func toolsCount(body Body) int {
+	if tools, ok := body["tools"].([]any); ok {
+		return len(tools)
+	}
+	return 0
 }
 
 // toolCallsIn counts the tool calls of a whole (non-streamed) chat reply.
