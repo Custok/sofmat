@@ -1034,6 +1034,130 @@ func itoa(i int) string {
 	return strings.TrimSpace(strings.Repeat(" ", 0) + string(rune('0'+i)))
 }
 
+// fix#16: a declared conversation id (X-Sofmat-Conversation) keys the
+// conversation instead of the first message. A client that sends a sliding
+// window of history changes its first message every time the window's anchor
+// jumps, and the same conversation is born again for the gateway: no residency
+// credit, no learned slot, and the fix#15 gate never sees the overlap it exists
+// for (David's HUD, 2026-09-24 09:31: window of 16 advancing by 8; the real
+// overlap arrived under two keys and reprocessed 18k tokens, 19.6 s). With the
+// header, two bodies whose first messages differ share the key, the row says
+// where the key came from (ckey_src), and the gate catches the overlap.
+func TestConversationHeaderKeysTheConversation(t *testing.T) {
+	gw, _ := newTestGW(t, nil)
+	a := chatBody("sys", "primer mensaje de la ventana")
+	b := chatBody("sys", "otro primer mensaje: la ventana ha saltado")
+	// without the header: two keys, keyed on the first message
+	gw.Chat(Headers{}, a)
+	ra := lastRecord(t, gw)
+	gw.Chat(Headers{}, b)
+	rb := lastRecord(t, gw)
+	if ra["ckey"] == rb["ckey"] {
+		t.Fatal("test premise: different first messages must key differently without the header")
+	}
+	if ra["ckey_src"] != "first-message" || rb["ckey_src"] != "first-message" {
+		t.Fatalf("ckey_src must say the first message keyed it: %v / %v", ra["ckey_src"], rb["ckey_src"])
+	}
+	// with the header (canonical spelling, as the HTTP layer hands it over): one key
+	gw.Chat(Headers{"X-Sofmat-Conversation": "hud-conv-42"}, a)
+	ha := lastRecord(t, gw)
+	gw.Chat(Headers{"x-sofmat-conversation": "hud-conv-42"}, b)
+	hb := lastRecord(t, gw)
+	if ha["ckey"] != hb["ckey"] {
+		t.Fatalf("the declared conversation id must key both bodies alike: %v vs %v", ha["ckey"], hb["ckey"])
+	}
+	if ha["ckey_src"] != "header" || hb["ckey_src"] != "header" {
+		t.Fatalf("ckey_src must say the header keyed it: %v / %v", ha["ckey_src"], hb["ckey_src"])
+	}
+	if ha["ckey"] == ra["ckey"] {
+		t.Fatal("a declared id must not collide with the first-message key")
+	}
+	// and a different declared id is a different conversation, same first message
+	gw.Chat(Headers{"X-Sofmat-Conversation": "hud-conv-43"}, a)
+	if lastRecord(t, gw)["ckey"] == ha["ckey"] {
+		t.Fatal("different declared ids must key differently")
+	}
+}
+
+// With the header, the fix#15 gate catches an overlap whose bodies have
+// different first messages (the sliding-window case): the second waits.
+func TestConversationHeaderReachesTheGate(t *testing.T) {
+	var calls, inflight, overlaps int32
+	gw, _ := newTestGW(t, func(o *Options) {
+		o.ConvWait = 2 * time.Second
+		o.BackendCall = func(body Body, extra Headers) (Body, error) {
+			if atomic.AddInt32(&inflight, 1) > 1 {
+				atomic.AddInt32(&overlaps, 1)
+			}
+			defer atomic.AddInt32(&inflight, -1)
+			if atomic.AddInt32(&calls, 1) == 1 {
+				time.Sleep(300 * time.Millisecond)
+			}
+			r := okResp()
+			r["timings"] = map[string]any{"cache_n": 0.0, "prompt_n": 10.0, "predicted_n": 5.0}
+			return r, nil
+		}
+	})
+	h := Headers{"X-Sofmat-Conversation": "hud-conv-7"}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _, _ = gw.Chat(h, chatBody("sys", "ventana en un sitio")) }()
+	time.Sleep(50 * time.Millisecond)
+	if _, err := gw.Chat(h, chatBody("sys", "ventana en OTRO sitio: primer mensaje distinto")); err != nil {
+		t.Fatal(err)
+	}
+	rec := lastRecord(t, gw)
+	wg.Wait()
+	if w, _ := rec["wait_conv_ms"].(float64); w < 200 {
+		t.Fatalf("with the header the overlap must be gated although the first messages differ, wait_conv_ms=%v", rec["wait_conv_ms"])
+	}
+	if atomic.LoadInt32(&overlaps) != 0 {
+		t.Fatal("the two requests overlapped at the backend")
+	}
+}
+
+// seq_admit is the ARRIVAL order. The row id is assigned when the row is
+// written (at the end), so a slow request in flight makes the ids cross the
+// arrival order — pairings "by the previous id" then go wrong (a fleet
+// reviewer's finding of 2026-09-24 09:33: ids 49, 51, 50 by arrival).
+func TestSeqAdmitFollowsArrival(t *testing.T) {
+	// the FIRST backend call sleeps; a sync.Once would make the second caller
+	// wait for it too and turn the finishing order into a coin flip
+	var calls int32
+	gw, _ := newTestGW(t, func(o *Options) {
+		o.BackendCall = func(body Body, extra Headers) (Body, error) {
+			if atomic.AddInt32(&calls, 1) == 1 {
+				time.Sleep(300 * time.Millisecond)
+			}
+			return okResp(), nil
+		}
+	})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _, _ = gw.Chat(Headers{}, chatBody("sys", "lenta")) }()
+	time.Sleep(50 * time.Millisecond)
+	if _, err := gw.Chat(Headers{}, chatBody("sys", "rápida")); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	rows, _ := gw.Requests(Headers{}, 2)
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(rows))
+	}
+	fast, slow := rows[0], rows[1] // the fast one finished first: lower id
+	if fast["id"].(int) > slow["id"].(int) {
+		t.Fatalf("test premise: the fast request must have the lower id: %v %v", fast["id"], slow["id"])
+	}
+	fs, ok1 := fast["seq_admit"].(uint64)
+	ss, ok2 := slow["seq_admit"].(uint64)
+	if !ok1 || !ok2 {
+		t.Fatalf("seq_admit must be on every row: %v / %v", fast["seq_admit"], slow["seq_admit"])
+	}
+	if !(ss < fs) {
+		t.Fatalf("the slow request arrived first: its seq_admit must be lower (slow %d, fast %d)", ss, fs)
+	}
+}
+
 // fix#15: the requests of ONE conversation go to the decode one at a time.
 // With kv_unified an overlapping request of the same conversation lands in
 // another slot and reprocesses everything although its KV is in VRAM

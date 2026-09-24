@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,6 +36,30 @@ var ErrSkipHandoff = errors.New("handoff skipped")
 // admisión hasta quien elige motor, para que la decisión de capacidad no
 // dependa de una estimación por bytes cuyo error no se puede acotar.
 const ExactTokensHeader = "x-sofmat-exact-tokens"
+
+// ConversationHeader is the request header a client sets to a STABLE id of its
+// conversation (fix#16). When present it keys the conversation instead of the
+// first message, so residency credit, the learned slot and the per-conversation
+// gate survive a client that trims its history window. Optional: without it the
+// gateway keys on the first non-system message, as before.
+const ConversationHeader = "x-sofmat-conversation"
+
+// firstHeader reads a header whichever way the caller spelled it (the HTTP
+// layer hands over canonical keys, tests and internal callers lower-case).
+func firstHeader(h Headers, key string) string {
+	if h == nil {
+		return ""
+	}
+	if v := h[key]; v != "" {
+		return v
+	}
+	for k, v := range h {
+		if strings.EqualFold(k, key) && v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 type Headers map[string]string
 type Body map[string]any
@@ -124,6 +149,7 @@ type Gateway struct {
 	cost        *costModel     // measured pp / handoff EMAs for ModeAuto
 	convWait    time.Duration  // fix#15: how long a request waits for its conversation's in-flight request (0 = off)
 	convGate    *convGate
+	admitSeq    atomic.Uint64 // fix#16: arrival counter (seq_admit on every row)
 
 	// circuit breaker: after a prefill-side failure (tokenize, prefill, handoff)
 	// the prefill route is skipped without contacting the node for breakerFor,
@@ -628,10 +654,27 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	// turn is then measured against ANOTHER conversation's prompt: the cache the
 	// engine really holds becomes invisible and a 6 s turn is sent off to a 60 s
 	// prefill (measured 2026-09-07 with three VS Code clients, median 29.5 s).
-	ckey := pkey
+	ckey, ckeySrc := pkey, "prefix" // no first turn: the conversation IS the prefix
 	if seed := conversationSeed(body); seed != "" {
 		ckey = PrefixKey(systemPrompt+"\x00"+seed, tenant)
+		ckeySrc = "first-message"
 	}
+	// fix#16: a client that KNOWS its conversation says so. Keying on the first
+	// message breaks for a client that sends a sliding window of history: when
+	// the window's anchor jumps, the first message changes and the same
+	// conversation is born again for the gateway — no residency credit, no
+	// learned slot, no fix#15 gate (measured 2026-09-24 09:31 on David's HUD:
+	// window of 16 messages advancing by 8; the overlap the gate exists for
+	// arrived under two keys, 18k tokens reprocessed, 19.6 s). The header wins
+	// over the first message; ckey_src on the row says which one keyed it.
+	if conv := strings.TrimSpace(firstHeader(h, ConversationHeader)); conv != "" {
+		ckey = PrefixKey(systemPrompt+"\x00conv:"+conv, tenant)
+		ckeySrc = "header"
+	}
+	// seq_admit: the order requests ARRIVED. The row id is assigned when the
+	// row is written (at the end), so with a slow request in flight the ids
+	// cross the arrival order and pairings "by the previous id" go wrong.
+	seq := g.admitSeq.Add(1)
 	// slot affinity: reuse the slot this conversation's KV already lives in, so it
 	// does not rotate between turns (the ring only seeds it on the first turn).
 	slot := g.convSlot.get(ckey)
@@ -734,6 +777,8 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		// system prompt is the suspected cause of resident turns hitting prefill.
 		"pkey":              pkey,
 		"ckey":              ckey,
+		"ckey_src":          ckeySrc, // "header" (declared conversation id) | "first-message" | "prefix"
+		"seq_admit":         seq,     // arrival order; the id is assigned at the end of the request
 		"known_hot_tokens":  knownHot,
 		"hot_prefix_tokens": hotPrefix,
 		"resident_toks":     resident, // this conversation's tokens still in its slot (credited against est_new)
