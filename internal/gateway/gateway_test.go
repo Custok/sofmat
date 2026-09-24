@@ -189,6 +189,12 @@ func TestColdPrefixForgottenAfterEngineMiss(t *testing.T) {
 	if lastRecord(t, gw)["prefix_cold"] != true {
 		t.Fatalf("engine miss must be recorded: %v", lastRecord(t, gw))
 	}
+	// fix#19: the registry credited the catalogue as hot and the engine had
+	// lost it — the shared prefix was evicted. Said on the row as its own flag
+	// (a reader grouping cold turns needs it without crossing two columns).
+	if rec := lastRecord(t, gw); rec["catalog_evicted"] != true {
+		t.Fatalf("hot registry + engine miss must be flagged catalog_evicted: %v", rec)
+	}
 	// third request: the registry forgot the prefix → whole prompt counts → prefill again
 	gw.Chat(Headers{}, chatBody(bigPrompt, "tercera"))
 	if len(c.prefill) != 2 {
@@ -200,6 +206,40 @@ func TestColdPrefixForgottenAfterEngineMiss(t *testing.T) {
 	gw.Chat(Headers{}, chatBody(bigPrompt, "quinta"))
 	if len(c.prefill) != 2 {
 		t.Fatal("a real cache hit must keep the prefix hot")
+	}
+}
+
+// fix#19: pkey covers the tool catalogue. Two requests with the same system
+// prompt and first message but a different tools[] are the SAME conversation
+// (ckey) with a DIFFERENT prefix (pkey, prefix_toks): what the engine caches
+// ahead of the history is system + tools, and a key blind to the tools kept
+// the exact count and the hot registry at the old catalogue (2026-09-24, ids
+// 122/123: tools_n 76 → 78, same pkey, cache_n 0).
+func TestPrefixKeyCoversToolCatalogue(t *testing.T) {
+	gw, _ := newTestGW(t, nil)
+	tool := func(name string) any {
+		return map[string]any{"type": "function", "function": map[string]any{
+			"name": name, "description": strings.Repeat("d", 400),
+			"parameters": map[string]any{"type": "object"}}}
+	}
+	one := chatBody(bigPrompt, "hola")
+	one["tools"] = []any{tool("a")}
+	gw.Chat(Headers{}, one)
+	r1 := lastRecord(t, gw)
+	two := chatBody(bigPrompt, "hola")
+	two["tools"] = []any{tool("a"), tool("b")}
+	gw.Chat(Headers{}, two)
+	r2 := lastRecord(t, gw)
+	if r1["pkey"] == r2["pkey"] {
+		t.Fatalf("a catalogue change must change the prefix key: %v == %v", r1["pkey"], r2["pkey"])
+	}
+	if r1["ckey"] != r2["ckey"] {
+		t.Fatalf("a catalogue change must NOT change the conversation: %v != %v", r1["ckey"], r2["ckey"])
+	}
+	p1, _ := r1["prefix_toks"].(int)
+	p2, _ := r2["prefix_toks"].(int)
+	if p2 <= p1 {
+		t.Fatalf("prefix_toks must follow the catalogue: %d then %d", p1, p2)
 	}
 }
 
@@ -238,10 +278,10 @@ func TestDecodeDirectTurnsKeepPrefixWarm(t *testing.T) {
 		}
 		return Body{"messages": msgs}
 	}
-	// turn 1: decode-direct (small-new-prefill), so Prepare does NOT tokenize.
+	// turn 1: decode-direct (small-new-decode), so Prepare does NOT tokenize.
 	// Its Finish must tokenize + remember g.last so the next turn can recognise it.
 	gw.Chat(Headers{}, conv(""))
-	if a, _ := lastRecord(t, gw)["admission"].(string); a != "small-new-prefill" && a != "prefix-hot" {
+	if a, _ := lastRecord(t, gw)["admission"].(string); a != "small-new-decode" && a != "prefix-hot" {
 		t.Fatalf("test premise: turn 1 must be decode-direct (got %q)", a)
 	}
 	pBefore := len(c.prefill)

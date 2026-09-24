@@ -813,7 +813,7 @@ func TestPrefillThresholdFromConfig(t *testing.T) {
 		t.Fatal("chat failed")
 	}
 	rec := lastRequestRecord(t, r.gateway.URL)
-	if rec["admitted_via"] != "decode" || rec["admission"] != "small-new-prefill" {
+	if rec["admitted_via"] != "decode" || rec["admission"] != "small-new-decode" {
 		t.Fatalf("an 11k prompt under a 40k threshold must stay decode-direct: %v", rec)
 	}
 	r.prefill.mu.Lock()

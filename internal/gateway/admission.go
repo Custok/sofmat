@@ -180,5 +180,8 @@ func ClassifyAdmission(in AdmissionInput) AdmissionDecision {
 	if in.HotPrefixTokens > 0 && in.PrefixTokens <= in.HotPrefixTokens+threshold {
 		return AdmissionDecision{"decode", "prefix-hot", newTokens}
 	}
-	return AdmissionDecision{"decode", "small-new-prefill", newTokens}
+	// "small-new-decode": the new part is small, so no prefill — decode direct.
+	// (Was "small-new-prefill" until fix#19: the name read as the opposite of
+	// what it did and misled a reader of the rows on 2026-09-24.)
+	return AdmissionDecision{"decode", "small-new-decode", newTokens}
 }

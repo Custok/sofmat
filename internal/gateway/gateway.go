@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -513,6 +514,22 @@ func (g *Gateway) prefixTokens(pkey string, body Body) (int, bool) {
 	return n, true
 }
 
+// numberOf reads a record field that may hold any numeric type (ints from the
+// gateway, float64 after a JSON round trip) as a float64; anything else is 0.
+func numberOf(v any) float64 {
+	switch n := v.(type) {
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	}
+	return 0
+}
+
 // convTurn is what a conversation's last turn left in its decode slot, plus the
 // shape of the prompt that built it (estimated prefix and tail), so the next
 // turn is credited only when it continues THAT prompt.
@@ -681,7 +698,16 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 	// last-prompt record, so a request was judged "cache-hot" against ANOTHER
 	// conversation's prompt and the decode then reprocessed everything
 	// (measured 2026-09-07: admission cache-hot with prompt_n = 73 536, 67.6 s).
-	pkey := PrefixKey(systemPrompt, tenant)
+	// fix#19: the key covers the WHOLE prefix the engine caches — system prompt
+	// AND tool catalogue — not the system prompt alone. Keyed on the system
+	// prompt, a catalogue change (the HUD adding tools mid-conversation, 75 →
+	// 76 → 78) kept the same pkey: the exact prefix count stayed cached at the
+	// old size (prefix_exact:true over a prefix that had changed), the hot
+	// registry credited a catalogue the engine no longer held, and est_new was
+	// computed against a stale size. Measured 2026-09-24 ids 122/123: tools_n
+	// 76 → 78, same pkey, cache_n 0, 11.8 s. Each catalogue change costs one
+	// cold turn (that is the engine's cache, not ours); the row must SAY so.
+	pkey := PrefixKey(prefixTextOf(body), tenant)
 	// ckey identifies the CONVERSATION, not just the shared system prompt.
 	// Several clients of the same product send byte-identical system prompts, so
 	// under pkey alone they overwrite each other's last-prompt record and every
@@ -1179,6 +1205,16 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 		// record lets the next turn recognise the continuation and serve decode-direct;
 		// if the KV really is gone the engine content-matches and reprocesses honestly.
 		p.fields["prefix_cold"] = true
+		// fix#19 alarm: the registry credited the catalogue as hot and the engine
+		// had lost it — the SHARED prefix was evicted, and the next request of
+		// anyone on this catalogue pays it whole (15 267 tokens on the HUD's).
+		// Seen twice in four hours on 2026-09-24 and nobody knew. Its own flag on
+		// the row, and a line on stderr where it is watched.
+		if hot, _ := p.fields["hot_prefix_tokens"].(int); hot > 0 {
+			p.fields["catalog_evicted"] = true
+			log.Printf("ALARMA catálogo desalojado: ckey=%.8s hot_prefix=%d cache_n=%d prompt_n=%v (registro invalidado; el siguiente turno cuenta el prompt entero)",
+				p.ckey, hot, cn, p.fields["prompt_n"])
+		}
 	}
 	// Keep g.last fresh across DECODE-DIRECT turns too. Prepare only records g.last
 	// when it tokenized (the prefill route); a run of decode-direct turns
@@ -1253,6 +1289,16 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 	// (streaming path) or as x-sofmat-t-* entries in the decode headers.
 	if _, ok := p.fields["wait_budget_ms"]; !ok {
 		p.fields["wait_budget_ms"] = headerMs(p.Headers, "x-sofmat-t-wait-budget-ms", 0)
+	}
+	// fix#19 alarm: a conversational turn that waited more than 10 s for KV
+	// budget is broken for the user even though the system calls it a success
+	// (41.3 s measured on David's turn, 2026-09-24, pool at 78 %; the cap is
+	// 240 s). Flag on the row + a line on stderr, so it is not only found by
+	// someone happening to read the rows.
+	if wb := numberOf(p.fields["wait_budget_ms"]); wb > 10000 {
+		p.fields["wait_budget_slow"] = true
+		log.Printf("ALARMA espera de presupuesto: %.0f ms ckey=%.8s pool_held_at_admit=%v prompt_n=%v",
+			wb, p.ckey, p.fields["pool_held_at_admit"], p.fields["prompt_n"])
 	}
 	if _, ok := p.fields["first_byte_ms"]; !ok {
 		p.fields["first_byte_ms"] = headerMs(p.Headers, "x-sofmat-t-first-byte-ms", -1)

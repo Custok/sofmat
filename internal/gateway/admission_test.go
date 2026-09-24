@@ -66,7 +66,7 @@ func TestClassifyAdmission(t *testing.T) {
 	}
 	d = ClassifyAdmission(AdmissionInput{PrefixTokens: 200, TailTokens: 100,
 		PrefillAvailable: true})
-	if d.Route != "decode" || d.Reason != "small-new-prefill" {
+	if d.Route != "decode" || d.Reason != "small-new-decode" {
 		t.Fatalf("small: %+v", d)
 	}
 	d = ClassifyAdmission(AdmissionInput{PrefixTokens: 5000, TailTokens: 300,
