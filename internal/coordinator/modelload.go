@@ -490,9 +490,17 @@ func (s *Server) modelsEject(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "endpoint requerido"})
 		return
 	}
-	ip := hostOf(req.Endpoint)
+	s.ejectEndpoint(req.Endpoint)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ejectEndpoint stops the llama-server behind an endpoint — in-process on this
+// host, through the host's control plane elsewhere — and forgets it as a loaded
+// model. Shared by the panel's eject and the training transaction's `parar`.
+func (s *Server) ejectEndpoint(endpoint string) {
+	ip := hostOf(endpoint)
 	port := ""
-	if hp := hostPort(req.Endpoint); hp != "" {
+	if hp := hostPort(endpoint); hp != "" {
 		if i := strings.LastIndex(hp, ":"); i >= 0 {
 			port = hp[i+1:]
 		}
@@ -507,8 +515,7 @@ func (s *Server) modelsEject(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	dropLoaded(req.Endpoint)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	dropLoaded(endpoint)
 }
 
 // modelsProbe checks whether a just-loaded model's endpoint answers /health yet,

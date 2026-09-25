@@ -98,6 +98,12 @@ type decodeNode struct {
 	held      int
 	heldAt    time.Time
 	occupancy func(url string) int
+
+	// excluded fences the engine out of the spread while a training transaction
+	// is stopping it (train.go): no new conversation lands on it, a pinned one
+	// moves on its next turn, and with every engine fenced a request is refused
+	// with ErrDecodeTraining instead of waiting on a process that is going away.
+	excluded atomic.Bool
 }
 
 // budgetTokens is the engine's context size (see the field's comment).
@@ -219,7 +225,7 @@ func (b *decodeBalancer) otherThan(n *decodeNode) *decodeNode {
 	var best *decodeNode
 	bestHeld := 0
 	for _, c := range b.nodes {
-		if c == n {
+		if c == n || c.excluded.Load() {
 			continue
 		}
 		h := c.heldTokens()
@@ -239,6 +245,19 @@ func (b *decodeBalancer) nodeByURL(url string) *decodeNode {
 		}
 	}
 	return nil
+}
+
+// setExcluded fences an engine out of the spread (a training transaction is
+// stopping it) or lets it back in. Reports whether the endpoint is a known
+// engine. Conversations pinned to a fenced engine are re-spread on their next
+// turn: chooseNode ignores a sticky entry that points at it.
+func (b *decodeBalancer) setExcluded(url string, on bool) bool {
+	n := b.nodeByURL(url)
+	if n == nil {
+		return false
+	}
+	n.excluded.Store(on)
+	return true
 }
 
 // setOccupancy gives every engine the probe that reads what its slots hold.
@@ -337,6 +356,11 @@ func (b *decodeBalancer) pick(key string, estTokens int) (*decodeNode, func(), e
 			ErrEngineFull, estTokens, big.name, room, big.budgetTokens(), estTokens-room)
 	}
 	n := b.chooseNode(key, estTokens)
+	if n == nil {
+		// every engine is fenced by a training transaction: say so at once —
+		// waiting would only hold the client against a process that is stopping.
+		return nil, func() {}, ErrDecodeTraining
+	}
 	deadline := time.Now().Add(waitBudgetForTest)
 	for !n.fits(estTokens) && time.Now().Before(deadline) {
 		// another engine with room right now beats waiting for this one
@@ -365,6 +389,11 @@ func (b *decodeBalancer) pick(key string, estTokens int) (*decodeNode, func(), e
 // waitBudget. Refusing one request keeps the engine serving everyone else.
 var ErrEngineFull = errors.New("motor de decode sin contexto disponible")
 
+// ErrDecodeTraining says every decode engine is fenced by a training
+// transaction (train.go): there is nothing to route to until the runner closes
+// it, and the client is told that instead of being queued.
+var ErrDecodeTraining = errors.New("motor de decode en entrenamiento: sin decode disponible hasta que el runner cierre la transacción (/api/train)")
+
 // waitBudgetForTest is the live queue deadline (a var so the tests can shorten it).
 var waitBudgetForTest = waitBudget
 
@@ -372,23 +401,41 @@ var waitBudgetForTest = waitBudget
 func (b *decodeBalancer) chooseNode(key string, estTokens int) *decodeNode {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if i, ok := b.sticky[key]; ok && i < len(b.nodes) {
+	if i, ok := b.sticky[key]; ok && i < len(b.nodes) && !b.nodes[i].excluded.Load() {
 		b.touchLocked(key)
 		return b.nodes[i]
 	}
-	best, bestIdx := b.nodes[0], 0
-	bi, bt := best.load()
-	for i := 1; i < len(b.nodes); i++ {
-		ni, nt := b.nodes[i].load()
-		if nt < bt || (nt == bt && ni < bi) {
-			best, bestIdx, bi, bt = b.nodes[i], i, ni, nt
+	// least loaded among the engines that are not fenced (nil when all are)
+	var best *decodeNode
+	bestIdx, bi, bt, avail := -1, 0, 0, 0
+	for i, n := range b.nodes {
+		if n.excluded.Load() {
+			continue
+		}
+		avail++
+		ni, nt := n.load()
+		if best == nil || nt < bt || (nt == bt && ni < bi) {
+			best, bestIdx, bi, bt = n, i, ni, nt
 		}
 	}
-	// perfect tie (both idle): alternate, so two new sessions do not stack up
-	if bt == 0 && bi == 0 {
-		bestIdx = b.rr % len(b.nodes)
-		best = b.nodes[bestIdx]
+	if best == nil {
+		return nil
+	}
+	// perfect tie (all idle): alternate among the available engines, so two new
+	// sessions do not stack up
+	if bt == 0 && bi == 0 && avail > 1 {
+		k := b.rr % avail
 		b.rr++
+		for i, n := range b.nodes {
+			if n.excluded.Load() {
+				continue
+			}
+			if k == 0 {
+				best, bestIdx = n, i
+				break
+			}
+			k--
+		}
 	}
 	b.setLocked(key, bestIdx)
 	return best
@@ -405,6 +452,9 @@ func (b *decodeBalancer) tooBigForEveryEngine(tok int) (big *decodeNode, room in
 	}
 	best := -1
 	for _, n := range b.nodes {
+		if n.excluded.Load() {
+			continue
+		}
 		bt := n.budgetTokens()
 		if bt <= 0 {
 			return nil, 0, false // unknown budget: let the normal path decide
@@ -422,6 +472,9 @@ func (b *decodeBalancer) tooBigForEveryEngine(tok int) (big *decodeNode, room in
 // freeNode returns an engine with room for tok right now, or nil.
 func (b *decodeBalancer) freeNode(tok int) *decodeNode {
 	for _, n := range b.nodes {
+		if n.excluded.Load() {
+			continue
+		}
 		if n.fits(tok) {
 			return n
 		}
@@ -499,7 +552,7 @@ func (b *decodeBalancer) stats() []map[string]any {
 		out = append(out, map[string]any{
 			"name": n.name, "url": n.url, "budget": n.budgetTokens(),
 			"inflight": i, "tokens_inflight": t, "tokens_held": n.heldTokens(),
-			"sessions": b.sessionsOn(idx),
+			"sessions": b.sessionsOn(idx), "training": n.excluded.Load(),
 		})
 	}
 	return out

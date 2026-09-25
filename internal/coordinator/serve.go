@@ -357,6 +357,11 @@ func (s *Server) pickDecode(body gateway.Body, extra gateway.Headers) (*decodeNo
 				n = m
 			}
 		}
+		if n == nil || n.excluded.Load() {
+			// the engine its state lives in is fenced for training: refuse now
+			// rather than pin the turn to a process that is stopping.
+			return nil, func() {}, ErrDecodeTraining
+		}
 		est := bodyTokens(body, extra)
 		n.claim(est)
 		s.bal.remember(sessionKey(body), n)
@@ -789,6 +794,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/load", s.mut(s.adminLoad))
 	mux.HandleFunc("/api/apply", s.mut(s.configApply))
 	mux.HandleFunc("/api/apply-union", s.mut(s.configApplyUnion)) // one click raises the whole decode+prefill group (idempotent)
+	// Training transaction (train.go): a node's runner fences the instances it is
+	// about to stop for a fine-tune and closes the transaction when they answer
+	// again. Listing is read-only like /api/status.
+	mux.HandleFunc("/api/train", s.trainList)
+	mux.HandleFunc("/api/train/begin", s.mut(s.trainBegin))
+	mux.HandleFunc("/api/train/end", s.mut(s.trainEnd))
 	// guard(): minting a key REPLACES the live one, so it is a mutating action
 	// like eject or delete. On a node with no key yet authOK passes anyway, so
 	// a fresh install can still mint its first one.

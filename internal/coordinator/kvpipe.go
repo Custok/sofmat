@@ -33,6 +33,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Custok/sofmat/internal/gateway"
@@ -103,6 +104,11 @@ type kvPipe struct {
 	decodeCtl  string // soflink on the decode node (POST /control/kv-fetch)
 	client     *http.Client
 
+	// disabled takes the prefill out of the handoff while a training
+	// transaction has fenced it (train.go): routeFor then tells the gateway to
+	// serve decode-direct, the same path it takes when the prefill is down.
+	disabled atomic.Bool
+
 	// An engine ingests several prompts at once, bounded by its slots AND by its
 	// unified KV budget: serializing everything (the first design) made three
 	// cold prompts queue 25 s each while 3 of its 4 slots idled.
@@ -164,6 +170,9 @@ func (k *kvPipe) defaultRoute() kvRoute {
 // prompt would be "handed off" to the very engine that is going to serve it, so
 // the caller is told to serve it direct instead.
 func (k *kvPipe) routeFor(body gateway.Body) (kvRoute, error) {
+	if k.disabled.Load() {
+		return kvRoute{}, fmt.Errorf("%w: prefill en entrenamiento", gateway.ErrSkipHandoff)
+	}
 	rt := k.defaultRoute()
 	if k.resolve != nil {
 		if r, ok := k.resolve(body); ok {
@@ -190,6 +199,21 @@ func (k *kvPipe) poolOf(url string) *enginePool {
 		k.pools[url] = p
 	}
 	return p
+}
+
+// setDisabled fences the prefill out of the handoff (a training transaction is
+// stopping it) or lets it back in.
+func (k *kvPipe) setDisabled(on bool) { k.disabled.Store(on) }
+
+// inflightOf is the prefill load the coordinator still has in flight on an
+// engine (tokens being ingested), what a training drain waits to reach zero.
+func (k *kvPipe) inflightOf(url string) int {
+	k.slotMu.Lock()
+	defer k.slotMu.Unlock()
+	if p := k.pools[strings.TrimRight(url, "/")]; p != nil {
+		return p.inflight
+	}
+	return 0
 }
 
 // noteRoute remembers which route produced a state, so the handoff and the

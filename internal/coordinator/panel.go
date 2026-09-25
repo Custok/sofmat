@@ -872,6 +872,40 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 		instances = append(instances, s.instance("loaded:"+lm.Endpoint, "descargado · "+lm.Node+" · "+lm.Mode, lm.Model, selected, lpipe, tokps, conn))
 	}
 
+	// Instances fenced by a training transaction (train.go): a live one keeps
+	// its card and is labelled; a stopped one gets a card of its own instead of
+	// vanishing — the operator must see WHY the decode is gone and until when.
+	for _, tx := range openTrainTxs() {
+		for _, key := range tx.Instances {
+			label := trainLabel(tx)
+			until := tx.Deadline.Local().Format("15:04")
+			found := false
+			for _, ic := range instances {
+				if ic["key"] == key {
+					ic["training"], ic["training_job"], ic["training_until"] = true, tx.Job, until
+					ic["func"], ic["role"] = label, label
+					found = true
+				}
+			}
+			if found {
+				continue
+			}
+			inst, ok := s.cfg.Instance(key)
+			if !ok {
+				continue
+			}
+			pl := s.pipelineFromInstance(inst)
+			if pl == nil {
+				pl = map[string]any{"stages": []map[string]any{{"node": inst.Main, "layers": 0, "gpus": 1}}, "total_layers": 0}
+			}
+			card := s.instance(key, label, s.instanceModel(key, trainModelName(inst.Model)), selected, pl, tokps,
+				connInfo{endpoint: inst.Endpoint, modelPath: inst.Model, apiKey: apiKey, apiKeyEnabled: apiKey != ""})
+			card["up"], card["activity"] = false, nil
+			card["training"], card["training_job"], card["training_until"] = true, tx.Job, until
+			instances = append(instances, card)
+		}
+	}
+
 	// configs for the picker + nodes modal.
 	configs := make([]map[string]any, 0, len(s.cfg.Presets))
 	for i := range s.cfg.Presets {

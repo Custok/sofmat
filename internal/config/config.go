@@ -33,6 +33,12 @@ type Config struct {
 	// every chat so the answer is measured before the switch is flipped.
 	RequireAPIKey bool `json:"require_api_key,omitempty"`
 
+	// Alerts is where the training watchdog (coordinator/train.go) reports a
+	// production instance still down at its reload deadline. WhatsApp goes
+	// through the openclaw gateway container on this host; an empty target
+	// means log only. Real numbers live only in config.local.json (gitignored).
+	Alerts Alerts `json:"alerts,omitempty"`
+
 	// AutoStart, when true, means the operator asked soflink to launch on boot (the
 	// panel's "Arrancar al inicio" check) AND auto-bring-up the configured unión,
 	// so the fleet self-recovers after a reboot without anyone clicking. Persisted
@@ -138,6 +144,13 @@ type Config struct {
 	// it's 5000 req/h, so the fleet never loses its update channel. Lives ONLY in
 	// config.local.json (gitignored) — never committed. Empty = anonymous.
 	GitHubToken string `json:"github_token"`
+}
+
+// Alerts configures the out-of-band notice of the training watchdog.
+type Alerts struct {
+	WhatsAppTarget    string `json:"whatsapp_target,omitempty"`    // E.164 number of the operator
+	WhatsAppContainer string `json:"whatsapp_container,omitempty"` // openclaw gateway container (default openclaw-openclaw-gateway-1)
+	DockerExe         string `json:"docker_exe,omitempty"`         // docker CLI (default "docker" on PATH)
 }
 
 // Node is one host in the pool.
