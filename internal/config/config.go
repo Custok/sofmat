@@ -193,6 +193,12 @@ type Instance struct {
 	ModelName string `json:"model_name"`
 	Model     string `json:"model"`
 
+	// Label is the card's function text for a role "solo" instance (what the
+	// engine is for, e.g. "router de tools · memoria · frases de espera"). Empty =
+	// "solo · <main> · fuera del pool". Ignored for decode/prefill, whose labels
+	// are fixed.
+	Label string `json:"label,omitempty"`
+
 	// KVUnified says whether the engine's KV cache is ONE pool shared by all its
 	// slots (llama-server's default, --kv-unified) or split per slot
 	// (--no-kv-unified: each slot owns n_ctx/n_parallel and /props reports that

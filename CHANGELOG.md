@@ -2,6 +2,9 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202609251820solo (2026-09-25)
+Rol de instancia `solo` en `config.local.json`: un motor declarado que sirve por su cuenta (sus clientes lo llaman directamente) y que **no entra en el pool de decode ni en el traspaso de KV** — el balanceador solo considera `role: decode`/`key: decode*` y la tubería solo las claves `decode`/`prefill`. El panel lo enseña como tarjeta propia (salud, modelo, topología, `solo · <nodo> · fuera del pool`); si el motor no responde a `/health`, la tarjeta se oculta, igual que un modelo cargado desde el panel. Caso: el UD-Q4_K_M del router de tools en el nodo de 1 GPU, que el panel no mostraba porque `instances[]` solo sabía de decode/prefill.
+
 ## v202609101226 (2026-09-10)
 `installed` se escribe TAMBIEN al arrancar. Hallazgo del revisor de la flota, medido en `.51` a los cuatro minutos de publicarse la anterior: cogio `1217` y `soflink-update-state.json` **no tenia `installed`**. Por que: `noteInstalled` corre dentro de `applyUpdate`, en el binario VIEJO que hace la instalacion — y el viejo no tenia la funcion. **El primer binario con la feature llega sin ella**, asi que el lanzador que lee `installed.sha` no tenia nada que leer y `.63` seguia expuesto al no-arranque tras apagon. Ahora `bootstrapInstalled()` en el arranque: version compilada + sha de si mismo. Idempotente; no pisa un estado corrupto (fail-closed). Cuatro pruebas con controles; sabotaje que tumba dos.
 

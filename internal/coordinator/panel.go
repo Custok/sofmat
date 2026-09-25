@@ -836,6 +836,29 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request) {
 	if prefillUp {
 		instances = append(instances, s.instance("prefill", "prefill · procesa el prompt", s.instanceModel("prefill", model), selected, instPipe("prefill"), tokps, instConn("prefill", s.bc.PrefillURL)))
 	}
+	// Role "solo": an engine declared in the config that serves on its own (its
+	// clients call it directly) and must stay OUT of the decode pool and of the KV
+	// handoff — the balancer only sees role "decode"/key "decode*", and the pipe
+	// only keys "decode"/"prefill". The card shows its health, model and topology;
+	// like a loaded model, a solo engine that is down is hidden.
+	for _, in := range s.cfg.Instances {
+		if in.Role != "solo" || in.Endpoint == "" {
+			continue
+		}
+		if s.getJSONFrom(in.Endpoint, "/health") == nil {
+			continue
+		}
+		pl := s.pipelineFromInstance(in)
+		if pl == nil {
+			pl = map[string]any{"stages": []map[string]any{{"node": in.Main, "layers": 0, "gpus": 1}}, "total_layers": 0}
+		}
+		conn := connInfo{endpoint: in.Endpoint, modelPath: in.Model, apiKey: apiKey, apiKeyEnabled: apiKey != ""}
+		label := in.Label
+		if label == "" {
+			label = "solo · " + in.Main + " · fuera del pool"
+		}
+		instances = append(instances, s.instance(in.Key, label, s.instanceModel(in.Key, strings.TrimSuffix(in.Model, ".gguf")), selected, pl, tokps, conn))
+	}
 	// Models launched via the panel show as their OWN instances (served on their
 	// own endpoint), separate from the config roles — so "load a downloaded model"
 	// appears as an extra instance without touching the HUD's decode.
