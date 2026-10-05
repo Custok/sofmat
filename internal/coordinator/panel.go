@@ -371,9 +371,27 @@ func (s *Server) instanceEndpoint(key string) string {
 	switch key {
 	case "prefill":
 		return s.bc.PrefillURL
-	default:
-		return s.bc.DecodeEntryURL
 	}
+	if ep := s.ownEndpoint(key); ep != "" {
+		return ep
+	}
+	return s.bc.DecodeEntryURL
+}
+
+// ownEndpoint is the endpoint a config instance other than the decode/prefill
+// pair answers on (e.g. a role "solo" router). Those two keep their gateway
+// URLs; anything else selected on the panel must be read, measured and chatted
+// with on ITS endpoint — falling back to decode made the SERVED MODEL card,
+// "Medir" and the panel chat show and hit the decode while the router was
+// selected. Empty when the key is not such an instance.
+func (s *Server) ownEndpoint(key string) string {
+	if key == "decode" || key == "prefill" {
+		return ""
+	}
+	if inst, ok := s.cfg.Instance(key); ok {
+		return inst.Endpoint
+	}
+	return ""
 }
 
 // instanceModel is the display model name for an instance card: the config's
@@ -435,6 +453,9 @@ func (s *Server) selectedBase(selected string) string {
 	}
 	if selected == "prefill" && s.bc.PrefillURL != "" {
 		return s.bc.PrefillURL
+	}
+	if ep := s.ownEndpoint(selected); ep != "" {
+		return ep
 	}
 	return s.bc.DecodeEntryURL
 }
