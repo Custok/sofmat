@@ -656,6 +656,50 @@ func (k *kvPipe) tokens(body gateway.Body) ([]int, error) {
 	return ids, nil
 }
 
+// minCkptPrefix / minCkptTail: the two-pass prefill only pays off when the
+// stable part is big enough to be worth keeping and something is left after it.
+const (
+	minCkptPrefix = 1024
+	minCkptTail   = 256
+)
+
+// prefixLen is how many leading ids of the prompt are the stable part: the
+// system message(s) and the tool catalogue, up to where the conversation
+// starts. Measured, not estimated: the template is rendered for the same
+// system + tools with a placeholder user turn (the templates refuse a prompt
+// without one) and the answer is the common prefix with the real prompt, so it
+// stops exactly where the first real message begins. Cached per stable part.
+// 0 = unknown.
+func (k *kvPipe) prefixLen(body gateway.Body, ids []int) int {
+	msgs, _ := body["messages"].([]any)
+	var head []any
+	for _, m := range msgs {
+		mm, _ := m.(map[string]any)
+		if mm == nil || mm["role"] != "system" {
+			break
+		}
+		head = append(head, m)
+	}
+	if len(head) == 0 {
+		return 0
+	}
+	pb := gateway.Body{}
+	for key, v := range body {
+		pb[key] = v
+	}
+	pb["messages"] = append(head, map[string]any{"role": "user", "content": "·"})
+	pids, err := k.tokens(pb)
+	if err != nil {
+		log.Printf("kvpipe: prefijo estable no medido: %v", err)
+		return 0
+	}
+	n := 0
+	for n < len(pids) && n < len(ids) && pids[n] == ids[n] {
+		n++
+	}
+	return n
+}
+
 // decodeSlots reads the decode engine's /slots (nil on any failure).
 func (k *kvPipe) decodeSlots() []map[string]any { return k.slotsAt(k.decodeURL) }
 
@@ -968,6 +1012,28 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 	if _, err := k.postJSON(slotURL+"?action=erase", map[string]any{}, 30*time.Second); err != nil {
 		log.Printf("kvpipe: erase previo al prefill (slot %d): %v", slot, err)
 	}
+	// (2026-10-16) Two passes: the stable part first (system + tools), then the
+	// rest. The hybrid model can only go back to a context checkpoint, and the
+	// engine takes one where each processed span BEGINS; a prompt prefilled in
+	// one go carries none in between. The decode builds them up turn after turn
+	// (one at the start of the history), but a restored state has only what the
+	// prefill made — so the next turn that diverged inside the history went back
+	// to 0 and reprocessed everything (22 673 tokens, 9 s, ring id 2 of
+	// 2026-10-16). Measured on node-c with the same prompt: one pass → the
+	// diverging turn reused 0 of 16 299; two passes → 8 223, the same as a slot
+	// that never travelled — the checkpoint survives save + restore (the state
+	// file grows ~300 MB). Best-effort: if the stable part cannot be measured or
+	// the first pass fails, the prefill goes on in one pass as before.
+	prefixCkpt := 0
+	if pl := k.prefixLen(body, ids); pl >= minCkptPrefix && pl < len(ids)-1-minCkptTail {
+		if _, err := k.postJSON(rt.prefillURL+"/completion", map[string]any{
+			"prompt": ids[:pl], "n_predict": 0, "id_slot": slot, "cache_prompt": true,
+		}, 0); err != nil {
+			log.Printf("kvpipe: primer paso del prefill (prefijo %d): %v", pl, err)
+		} else {
+			prefixCkpt = pl
+		}
+	}
 	comp, err := k.postJSON(rt.prefillURL+"/completion", map[string]any{
 		"prompt": ids[:len(ids)-1], "n_predict": 0, "id_slot": slot, "cache_prompt": true,
 	}, 0)
@@ -976,6 +1042,9 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 	}
 	prefillMS := msSince(t0)
 	out := gateway.Body{"handoff_id": name, "tokens": len(ids), "prefill_ms": prefillMS}
+	if prefixCkpt > 0 {
+		out["prefix_ckpt"] = prefixCkpt // where the extra checkpoint sits, in tokens
+	}
 	if tm, _ := comp["timings"].(map[string]any); tm != nil {
 		if v, ok := tm["prompt_per_second"].(float64); ok {
 			out["prefill_pp"] = v

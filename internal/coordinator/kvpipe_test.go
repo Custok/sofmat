@@ -1531,3 +1531,43 @@ func TestRestoreRealFailureStillTripsBreaker(t *testing.T) {
 		t.Fatalf("the cause must survive: %v", rec)
 	}
 }
+
+// (2026-10-16) The prefill goes in two passes when there is a big stable part
+// (system + tools): first exactly up to where the conversation starts, then the
+// whole prompt. The engine takes a context checkpoint where each pass begins,
+// and that checkpoint travels in the saved state — so the turn after a handoff
+// that diverges inside the history goes back to the stable part, not to 0.
+func TestKVPipePrefillCheckpointsTheStablePart(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	sys := strings.Repeat("Reglas fijas del asistente de la casa, iguales en cada turno. ", 120) // ~1.9k fake tokens
+	code, _ := postChat(t, r.gateway.URL, map[string]any{
+		"messages": []any{
+			map[string]any{"role": "system", "content": sys},
+			map[string]any{"role": "user", "content": longUser},
+		},
+	})
+	if code != 200 {
+		t.Fatalf("chat: %d", code)
+	}
+	rec := lastRequestRecord(t, r.gateway.URL)
+	if rec["admitted_via"] != "prefill" {
+		t.Fatalf("expected a handoff: %v", rec)
+	}
+	r.prefill.mu.Lock()
+	comps := append([]int(nil), r.prefill.completions...)
+	r.prefill.mu.Unlock()
+	if len(comps) != 2 {
+		t.Fatalf("want 2 prefill passes (stable part, then all), got %v", comps)
+	}
+	// the stable part ends where the user turn's content begins
+	stable := len("<|im_start|>system\n"+sys+"<|im_end|>\n<|im_start|>user\n") / 4
+	if comps[0] < stable-2 || comps[0] > stable+1 {
+		t.Fatalf("first pass must stop at the start of the conversation (~%d tokens), got %d", stable, comps[0])
+	}
+	if comps[1] <= comps[0] {
+		t.Fatalf("second pass must be the whole prompt, got %v", comps)
+	}
+	if got, _ := rec["prefix_ckpt"].(float64); int(got) != comps[0] {
+		t.Fatalf("the row must say where the checkpoint sits: prefix_ckpt=%v, first pass %d", rec["prefix_ckpt"], comps[0])
+	}
+}
