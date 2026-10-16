@@ -577,6 +577,7 @@ func kvPipeFrom(cfg *config.Config, bc gateway.BackendConfig) *kvPipe {
 			kp.setEngineSplit(in.Endpoint, true)
 		}
 	}
+	kp.startJanitor(kvPendingPath())
 	return kp
 }
 

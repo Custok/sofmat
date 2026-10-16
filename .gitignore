@@ -54,6 +54,7 @@ dist/*.AppImage
 *.log
 *.log.err
 renames.local.json
+kvpending.local.json
 .relver
 dist/VERSION.txt
 node-agent.exe

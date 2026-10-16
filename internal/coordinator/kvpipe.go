@@ -140,6 +140,13 @@ type kvPipe struct {
 	// file (#26004 + pending-h-mtp), so asking soflink for a .dft that does not
 	// exist is a wasted round trip. Unknown names keep the old behaviour.
 	noDft map[string]bool
+
+	// gc is every state that may still exist on a node, kept until each node
+	// confirms the delete (kvjanitor.go). gcPath persists it across restarts.
+	gcMu     sync.Mutex
+	gc       map[string]kvPending
+	gcPath   string
+	gcClient *http.Client // nil = client (tests shorten it)
 }
 
 type tokEntry struct {
@@ -978,8 +985,12 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 		}
 	}
 	t1 := time.Now()
+	// written down BEFORE the file can exist: a save that times out may still
+	// land, and only the janitor would ever find it then.
+	k.track(name, rt.prefillCtl, rt.decodeCtl)
 	sv, err := k.postJSON(slotURL+"?action=save", map[string]any{"filename": name}, 120*time.Second)
 	if err != nil {
+		k.cleanup(name)
 		return nil, fmt.Errorf("prefill save: %w", err)
 	}
 	out["save_ms"] = msSince(t1)
@@ -1125,23 +1136,12 @@ func engineOutOfRoom(err error) bool {
 	return false
 }
 
-// cleanup deletes the shipped state on both nodes (best-effort, async): the
-// restored KV lives in the decode slot now, the file has no further use.
+// cleanup deletes the shipped state on every node that may hold it (async):
+// the restored KV lives in the decode slot now, the file has no further use.
+// A node that does not confirm keeps the state on the janitor's list, which
+// retries it (kvjanitor.go) instead of forgetting it as the first design did.
 func (k *kvPipe) cleanup(hid string) {
-	go func() {
-		for _, base := range []string{k.decodeCtl, k.prefillCtl} {
-			for _, name := range []string{hid, hid + ".dft"} {
-				req, err := http.NewRequest(http.MethodDelete, base+"/kv/"+name, nil)
-				if err != nil {
-					continue
-				}
-				if resp, err := k.client.Do(req); err == nil {
-					_, _ = io.Copy(io.Discard, resp.Body)
-					resp.Body.Close()
-				}
-			}
-		}
-	}()
+	go k.purge(hid)
 }
 
 func msSince(t time.Time) float64 {
