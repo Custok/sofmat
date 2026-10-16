@@ -1133,6 +1133,11 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 			if resp.StatusCode != http.StatusOK && len(head) > 0 {
 				plan.Note("engine_said", strings.TrimSpace(string(head)))
 			}
+			// a 200 stream that ended in an error event instead of the timings: its
+			// message is the engine's, not the model's answer, so it is recorded
+			if e := sseError(tail); e != "" {
+				plan.Note("engine_error", e)
+			}
 		}
 		// An engine that answers 200 and then sends NOTHING leaves the client
 		// with an empty stream, and every OpenAI-compatible client reports the

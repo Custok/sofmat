@@ -150,3 +150,19 @@ func TestJanitorNotFoundIsGone(t *testing.T) {
 		t.Fatal("404 on every node must count as gone")
 	}
 }
+
+// A stream that ends in an error event instead of the timings must say why on
+// the row (rows 1241/1287 of 2026-10-16 had no engine fields and no cause).
+func TestSSEErrorReadsTheEngineError(t *testing.T) {
+	tail := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hola\"}}]}\n\n" +
+		"data: {\"error\":{\"code\":500,\"message\":\"Failed to parse tool call\",\"type\":\"server_error\"}}\n\n")
+	if got := sseError(tail); got != "Failed to parse tool call" {
+		t.Fatalf("sseError = %q", got)
+	}
+	if got := sseError([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"\\\"error\\\" en el texto\"}}]}\n")); got != "" {
+		t.Fatalf("model text mentioning error must not count, got %q", got)
+	}
+	if sseTimings(tail) != nil {
+		t.Fatal("test premise: no timings in this tail")
+	}
+}

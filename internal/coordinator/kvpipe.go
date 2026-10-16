@@ -1242,3 +1242,35 @@ func sseTimings(tail []byte) map[string]any {
 	}
 	return found
 }
+
+// sseError returns the message of the last error event in an SSE tail, or "".
+// llama.cpp can answer 200, stream, and end with {"error":...} instead of the
+// timings chunk (2026-10-16, rows 1241/1287: tool_choice "required" and no tool
+// call) — the row then had no engine fields and no cause.
+func sseError(tail []byte) string {
+	msg := ""
+	for _, line := range bytes.Split(tail, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		var obj map[string]any
+		if json.Unmarshal(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:"))), &obj) != nil {
+			continue
+		}
+		switch e := obj["error"].(type) {
+		case string:
+			msg = e
+		case map[string]any:
+			if m, ok := e["message"].(string); ok {
+				msg = m
+			} else if b, err := json.Marshal(e); err == nil {
+				msg = string(b)
+			}
+		}
+	}
+	if len(msg) > 300 {
+		msg = msg[:300]
+	}
+	return msg
+}
