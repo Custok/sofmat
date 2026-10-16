@@ -2,6 +2,16 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202610161143 (2026-10-16)
+Primera release desde la v202609101226. Recoge también lo que llevaban las etiquetas `train`, `solo` y `rid` del 25-09 (ver sus entradas), que no llegaron a publicarse. Probado en producción en el coordinador del nodo main desde la madrugada del 16-10.
+- **Traspaso de KV con llama.cpp 2851b3b + `pending-h-mtp`:** el estado del borrador MTP viaja DENTRO del mismo fichero (#26004). Cuando el save no informa `n_written_dft`, no se pide el `.dft` aparte, y la fila del anillo lo marca con `dft_inline`.
+- **Un save vacío no es un traspaso.** Un `slots/N?action=save` que responde 200 con `n_saved` 0 (o con menos de la mitad del prompt) se rechaza y se limpia. Antes se restauraba "nada" y el decode reprocesaba todo, mientras la fila decía que el traspaso había funcionado.
+- **Los estados de traspaso ya no quedan huérfanos.** Cada estado se apunta ANTES del save en `kvpending.local.json` (junto a la config; se puede cambiar con `SOFMAT_KVPENDING`) y solo se olvida cuando cada nodo confirma el `DELETE /kv/<name>` (2xx o 404). Lo no confirmado se reintenta cada 10 min cuando tiene más de 1 h, y al arrancar se reintenta todo lo que dejó el proceso anterior. Ahora un save fallido también limpia, y los borrados van a los nodos de la ruta del propio estado. Causa: nueve ficheros (2,7 GB) abandonados desde septiembre en un nodo de prefill.
+- **La fila de `/api/requests` identifica a su cliente:** `client_ip` (RemoteAddr), `client_fwd` (el X-Forwarded-For que declare un proxy, aparte y sin darlo por bueno), `client_ua` y `route` con la ruta REAL. Antes `route` era la etiqueta fija `/api/chat` en todas las filas. Los pone el coordinador y pisa lo que mande el cliente con esos nombres. Causa: diez turnos de un agente sin identificar que no se pudieron atribuir.
+- `arranque_ms` en la fila: arranque del motor, separado de la espera de slot.
+- Panel: una instancia seleccionada que no es decode ni prefill (rol `solo`, por ejemplo el router) maneja con su propio endpoint la tarjeta del modelo servido, «Medir» y el chat del panel. Antes caía al decode.
+- Pruebas nuevas, todas comprobadas en rojo contra el código anterior: save vacío, `dft_inline`, borrado sin confirmar que se reintenta, recogida al arrancar, 404 = borrado, fila con cliente y sello que no se puede falsificar.
+
 ## v202609252154rid (2026-09-25)
 `/api/requests`: cada fila lleva ahora **`boot`** (arranque del proceso, UTC con milisegundos) y **`rid`** = `boot-id`, el nombre durable de una petición. `id` sigue siendo el contador por proceso que usa el panel, pero **vuelve a 1 en cada reinicio**: debian midió sobre 720 ficheros sellados (24 h, 4 reinicios) que el 67 % de los ids designaban más de una petición (`id 1` nombraba seis). Los informes que citen una petición deben usar `rid` o la hora (`t1_admit`); un `id` suelto es un puntero colgante. Sin cambio de comportamiento; dos pruebas (rid distinto entre dos vidas con el mismo id; etiqueta en UTC).
 
