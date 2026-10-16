@@ -661,6 +661,9 @@ func (k *kvPipe) tokens(body gateway.Body) ([]int, error) {
 const (
 	minCkptPrefix = 1024
 	minCkptTail   = 256
+	// replyHeaderToks: the template's reply header at the end of the prompt,
+	// <|im_start|>assistant\n<think>\n\n</think>\n\n (measured 2026-10-16)
+	replyHeaderToks = 7
 )
 
 // prefixLen is how many leading ids of the prompt are the stable part: the
@@ -1032,6 +1035,17 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 			log.Printf("kvpipe: primer paso del prefill (prefijo %d): %v", pl, err)
 		} else {
 			prefixCkpt = pl
+		}
+	}
+	// (2026-10-16 night) and a third stop at the end of the last message, before
+	// the 7 tokens of the reply header: the next turn rewrites this turn's reply,
+	// and without a checkpoint here it went back to prefixCkpt and reprocessed
+	// the whole history (see userckpt.go for the decode-direct twin).
+	if end := len(ids) - replyHeaderToks; end > prefixCkpt+minCkptTail {
+		if _, err := k.postJSON(rt.prefillURL+"/completion", map[string]any{
+			"prompt": ids[:end], "n_predict": 0, "id_slot": slot, "cache_prompt": true,
+		}, 0); err != nil {
+			log.Printf("kvpipe: paso al final del ultimo mensaje (%d): %v", end, err)
 		}
 	}
 	comp, err := k.postJSON(rt.prefillURL+"/completion", map[string]any{

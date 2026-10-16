@@ -1055,6 +1055,9 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, plan *gatewa
 		writeJSON(w, http.StatusInternalServerError, gateway.Body{"error": "streaming unsupported by server"})
 		return
 	}
+	if plan.Headers["x-sofmat-kv-handoff"] == "" {
+		s.checkpointUserTurn(r.Context(), decodeURL, plan)
+	}
 	raw, err := json.Marshal(plan.Body)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, gateway.Body{"error": err.Error()})

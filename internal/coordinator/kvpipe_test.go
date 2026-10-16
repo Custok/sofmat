@@ -489,13 +489,13 @@ func TestHandoffEndToEnd(t *testing.T) {
 	// and the slot's leftover cells would count against this prompt (the engine
 	// answers HTTP 500 "Context size has been exceeded"), and AFTER the save so
 	// the sequence does not linger in the budget.
-	if len(pre.completions) != 1 || len(pre.saved) != 1 || pre.erased != 2 {
-		t.Fatalf("prefill must run exactly one completion + save + erase: %+v", pre)
+	if len(pre.completions) != 2 || len(pre.saved) != 1 || pre.erased != 2 {
+		t.Fatalf("prefill must run its passes (end of message, all) + one save + erase: %+v", pre)
 	}
 	// the last token is held back (recurrent cache can't be truncated)
 	wantTokens := (len(longUser) + len("<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n")) / 4
-	if pre.completions[0] != wantTokens-1 {
-		t.Fatalf("prefill must process tokens[:-1]: got %d, want %d", pre.completions[0], wantTokens-1)
+	if last := pre.completions[len(pre.completions)-1]; last != wantTokens-1 {
+		t.Fatalf("prefill must process tokens[:-1]: got %d, want %d", last, wantTokens-1)
 	}
 	if len(dec.restored) != 1 || dec.restored[0] != pre.saved[0] {
 		t.Fatalf("decode must restore the saved state: %+v vs %+v", dec.restored, pre.saved)
@@ -578,7 +578,7 @@ func TestIdleDecodeStaysDirectUnlessAlways(t *testing.T) {
 		"messages": []any{map[string]any{"role": "user", "content": longUser}},
 	})
 	always.prefill.mu.Lock()
-	n = len(always.prefill.completions)
+	n = len(always.prefill.saved)
 	always.prefill.mu.Unlock()
 	if n != 1 {
 		t.Fatal("kv_handoff=always must offload even on an idle decode")
@@ -677,7 +677,7 @@ func TestAutoModeCostAndCacheAware(t *testing.T) {
 		t.Fatalf("cold 51k on an idle decode must go through the prefill (cheaper end-to-end): %v", rec)
 	}
 	r.prefill.mu.Lock()
-	n := len(r.prefill.completions)
+	n := len(r.prefill.saved)
 	r.prefill.mu.Unlock()
 	if n != 1 {
 		t.Fatalf("prefill must have run once: %d", n)
@@ -699,7 +699,7 @@ func TestAutoModeCostAndCacheAware(t *testing.T) {
 		t.Fatalf("new_tokens must be the delta only: %v", rec["new_tokens"])
 	}
 	r.prefill.mu.Lock()
-	n = len(r.prefill.completions)
+	n = len(r.prefill.saved)
 	r.prefill.mu.Unlock()
 	if n != 1 {
 		t.Fatalf("no second prefill for a cache-hot turn: %d", n)
@@ -1556,9 +1556,16 @@ func TestKVPipePrefillCheckpointsTheStablePart(t *testing.T) {
 	r.prefill.mu.Lock()
 	comps := append([]int(nil), r.prefill.completions...)
 	r.prefill.mu.Unlock()
-	if len(comps) != 2 {
-		t.Fatalf("want 2 prefill passes (stable part, then all), got %v", comps)
+	// stable part, end of the last message (before the reply header), then all:
+	// the middle stop is the checkpoint the next turn goes back to when it
+	// rewrites this turn's reply (2026-10-16 night)
+	if len(comps) != 3 {
+		t.Fatalf("want 3 prefill passes (stable part, end of message, all), got %v", comps)
 	}
+	if comps[2]-comps[1] != replyHeaderToks-1 {
+		t.Fatalf("the middle pass must stop just before the reply header: %v", comps)
+	}
+	comps = []int{comps[0], comps[2]}
 	// the stable part ends where the user turn's content begins
 	stable := len("<|im_start|>system\n"+sys+"<|im_end|>\n<|im_start|>user\n") / 4
 	if comps[0] < stable-2 || comps[0] > stable+1 {
