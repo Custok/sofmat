@@ -1349,6 +1349,13 @@ func (g *Gateway) Finish(p *Plan, resp Body) {
 			}
 			p.fields["wait_slot_ms"] = ws
 			p.fields["wait_slot_src"] = src
+			// (2026-10-16) arranque_ms = the same number under an honest name. With
+			// one conversation it is NOT a queue: first_token - prompt_ms is the
+			// engine's per-request start-up (measured on the fleet: ~102-112 ms with
+			// the prompt fully cached; tokenizing ~21k tokens is 20 ms of it and the
+			// LAN 1 ms). "wait_slot" invited adding slots, which does not touch it;
+			// only fewer engine calls do. wait_slot_ms stays for the existing readers.
+			p.fields["arranque_ms"] = ws
 		}
 	}
 	p.fields["finish_ms"] = msSince(finishStart)

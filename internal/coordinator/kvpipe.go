@@ -133,6 +133,13 @@ type kvPipe struct {
 	tokMu sync.Mutex
 	toks  map[string]tokEntry // body hash → prompt token ids (Count → Prefill reuse)
 	pend  map[string]int      // handoff_id → tokens of the saved state (room to free)
+
+	// noDft marks states whose save reported no draft sidecar. The engine patched
+	// with llama-a3b1eff-slot-save-dft answers n_written_dft and writes
+	// <name>.dft; llama.cpp from 2851b3b on keeps the draft state INSIDE the same
+	// file (#26004 + pending-h-mtp), so asking soflink for a .dft that does not
+	// exist is a wasted round trip. Unknown names keep the old behaviour.
+	noDft map[string]bool
 }
 
 type tokEntry struct {
@@ -149,6 +156,7 @@ func newKVPipe(prefillURL, decodeURL, prefillCtl, decodeCtl string) *kvPipe {
 		client:     &http.Client{Timeout: 600 * time.Second, Transport: kvTransport},
 		toks:       map[string]tokEntry{},
 		pend:       map[string]int{},
+		noDft:      map[string]bool{},
 		pools:      map[string]*enginePool{},
 		routes:     map[string]kvRoute{},
 		pHeld:      map[string]int{},
@@ -980,7 +988,25 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 	}
 	if v, ok := sv["n_saved"].(float64); ok {
 		out["n_saved"] = int(v)
+		// (2026-10-16) an HTTP 200 is not a saved state. A save of a slot that does
+		// not hold the prompt answers 200 with n_saved 0 and a 1 200-byte header
+		// (measured on .51 the same night, with a test that forgot id_slot). Handing
+		// that "state" off would restore nothing and the decode would reprocess the
+		// whole prompt while the record says the handoff worked. The prompt went in
+		// as ids[:len(ids)-1], so a real save holds about that many tokens.
+		if want := len(ids) - 1; int(v) <= 0 || int(v) < want/2 {
+			k.cleanup(name)
+			return nil, fmt.Errorf("prefill save vacio: n_saved %d de %d tokens (slot %d)", int(v), want, slot)
+		}
 	}
+	k.slotMu.Lock()
+	if len(k.noDft) > 64 {
+		k.noDft = map[string]bool{}
+	}
+	if v, _ := sv["n_written_dft"].(float64); v <= 0 {
+		k.noDft[name] = true
+	}
+	k.slotMu.Unlock()
 	k.noteRoute(name, rt, len(ids))
 	return out, nil
 }
@@ -1011,8 +1037,17 @@ func (k *kvPipe) Handoff(hid, slot string) (gateway.Body, error) {
 	// draft-context sidecar (engine patched with docs/patches/llama-*-slot-save-dft):
 	// best-effort — an unpatched prefill has none and the decode then drafts cold,
 	// exactly as before. Recorded so the request log shows whether it travelled.
+	// From llama.cpp 2851b3b (+pending-h-mtp) the draft state travels inside the
+	// state file itself: the save says so by not reporting n_written_dft, and the
+	// sidecar is not asked for (dft_inline in the record).
 	out["dft"] = false
-	if sd, err := k.postJSON(rt.decodeCtl+"/control/kv-fetch",
+	k.slotMu.Lock()
+	inline := k.noDft[hid]
+	delete(k.noDft, hid)
+	k.slotMu.Unlock()
+	if inline {
+		out["dft_inline"] = true
+	} else if sd, err := k.postJSON(rt.decodeCtl+"/control/kv-fetch",
 		map[string]any{"url": src + ".dft", "name": hid + ".dft"}, 120*time.Second); err == nil {
 		out["dft"] = true
 		if v, ok := sd["bytes"].(float64); ok {

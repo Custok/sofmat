@@ -29,6 +29,7 @@ type fakeEngine struct {
 	dir         string // its --slot-save-path
 	busy        bool   // what GET /slots reports (is_processing)
 	sidecar     bool   // save also writes <name>.dft (patched engine)
+	emptySave   bool   // save answers 200 with n_saved 0 (a slot without the prompt)
 	completions []int  // prompt token counts received by /completion
 	saved       []string
 	erased      int
@@ -167,8 +168,21 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 			e.mu.Lock()
 			e.saved = append(e.saved, name)
 			e.mu.Unlock()
-			writeTestJSON(w, 200, map[string]any{"id_slot": id, "filename": name, "n_saved": 8000, "n_written": 304087040,
-				"timings": map[string]any{"save_ms": 199.0}})
+			nSaved := 8000 // a real save holds what the slot ingested: the last prompt sent to it
+			e.mu.Lock()
+			if len(e.completions) > 0 {
+				nSaved = e.completions[len(e.completions)-1]
+			}
+			e.mu.Unlock()
+			resp := map[string]any{"id_slot": id, "filename": name, "n_saved": nSaved, "n_written": 304087040,
+				"timings": map[string]any{"save_ms": 199.0}}
+			if e.sidecar { // the a3b1eff-dft patch reports the sidecar it wrote
+				resp["n_written_dft"] = 20520
+			}
+			if e.emptySave {
+				resp["n_saved"], resp["n_written"] = 0, 1200
+			}
+			writeTestJSON(w, 200, resp)
 		case "erase":
 			e.mu.Lock()
 			e.erased++
@@ -611,8 +625,28 @@ func TestDraftSidecarTravelsWhenPresent(t *testing.T) {
 	postChat(t, plain.gateway.URL, map[string]any{
 		"messages": []any{map[string]any{"role": "user", "content": longUser}},
 	})
-	if rec := lastRequestRecord(t, plain.gateway.URL); rec["admitted_via"] != "prefill" || rec["dft"] != false {
-		t.Fatalf("no sidecar must still hand off, recorded as dft=false: %v", rec)
+	if rec := lastRequestRecord(t, plain.gateway.URL); rec["admitted_via"] != "prefill" || rec["dft"] != false || rec["dft_inline"] != true {
+		t.Fatalf("no sidecar must still hand off, recorded as dft=false and dft_inline (draft inside the state file): %v", rec)
+	}
+}
+
+// An HTTP 200 is not a saved state: a save that holds no tokens (n_saved 0, the
+// 1 200-byte header of an empty slot) must NOT be handed off — the decode would
+// restore nothing and reprocess the whole prompt while the record said
+// "prefill". The request must still be served, decode-direct.
+func TestKVPipeEmptySaveIsNotAHandoff(t *testing.T) {
+	r := newRig(t, func(e *fakeEngine) string { return e.dir })
+	r.prefill.mu.Lock()
+	r.prefill.emptySave = true
+	r.prefill.mu.Unlock()
+	code, _ := postChat(t, r.gateway.URL, map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": longUser}},
+	})
+	if code != 200 {
+		t.Fatalf("an empty save must fall back, not fail the request: %d", code)
+	}
+	if rec := lastRequestRecord(t, r.gateway.URL); rec["admitted_via"] == "prefill" {
+		t.Fatalf("an empty save must not count as a handoff: %v", rec)
 	}
 }
 
