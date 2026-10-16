@@ -63,6 +63,16 @@ func firstHeader(h Headers, key string) string {
 }
 
 type Headers map[string]string
+
+// Who sent a request, stamped by the coordinator's HTTP handler (never taken
+// from the client) and written into the request record. Absent = an in-process
+// caller, which records the path it always had.
+const (
+	ClientIPHeader  = "X-Sofmat-Client-Ip"
+	ClientFwdHeader = "X-Sofmat-Client-Fwd"
+	ClientUAHeader  = "X-Sofmat-Client-Ua"
+	RouteHeader     = "X-Sofmat-Route"
+)
 type Body map[string]any
 
 // Verify authenticates a request from its headers.
@@ -834,8 +844,15 @@ func (g *Gateway) Prepare(h Headers, body Body) (*Plan, error) {
 		merged[SpeculativeNMaxKey] = nMax
 	}
 
+	route := firstHeader(h, RouteHeader)
+	if route == "" {
+		route = "/api/chat"
+	}
 	fields := Record{
-		"route":          "/api/chat",
+		"route":          route,
+		"client_ip":      firstHeader(h, ClientIPHeader),
+		"client_fwd":     firstHeader(h, ClientFwdHeader),
+		"client_ua":      clip(firstHeader(h, ClientUAHeader), 160),
 		"tenant":         tenant,
 		"slot":           slot,
 		"slot_src":       slotSrc, // "learned" (seen on a previous turn) | "ring" (seed by prefix: no information)
@@ -1713,4 +1730,12 @@ func timingFloat(resp Body, key string) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// clip bounds a free-text field of the record (a User-Agent can be anything).
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }

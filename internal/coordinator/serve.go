@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -941,6 +942,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	for k := range r.Header {
 		h[k] = r.Header.Get(k)
 	}
+	stampClient(h, r)
 	// Streaming (SSE) can't go through gateway.Chat — it json.Unmarshals the
 	// whole reply, which chokes on the upstream's "data: {...}" event stream.
 	// It shares the gateway's two halves instead: Prepare (admission, prefill +
@@ -1262,4 +1264,29 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// stampClient writes who sent a chat request into the headers the gateway
+// records, so /api/requests can name the client. On 2026-10-16 ten turns of an
+// agent nobody owned (11:22, tools_n 18) could not be traced: the record had
+// no address and its "route" was a fixed label. The values are set HERE and
+// overwrite anything the request carried under the same names, so a client
+// cannot pass itself off as another. RemoteAddr is the evidence; the
+// X-Forwarded-For a proxy (the HUD) adds is kept apart, as reported.
+func stampClient(h gateway.Headers, r *http.Request) {
+	for k := range h {
+		switch strings.ToLower(k) {
+		case strings.ToLower(gateway.ClientIPHeader), strings.ToLower(gateway.ClientFwdHeader),
+			strings.ToLower(gateway.ClientUAHeader), strings.ToLower(gateway.RouteHeader):
+			delete(h, k)
+		}
+	}
+	ip := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+	h[gateway.ClientIPHeader] = ip
+	h[gateway.ClientFwdHeader] = r.Header.Get("X-Forwarded-For")
+	h[gateway.ClientUAHeader] = r.Header.Get("User-Agent")
+	h[gateway.RouteHeader] = r.URL.Path
 }

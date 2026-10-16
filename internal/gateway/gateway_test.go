@@ -1401,3 +1401,27 @@ func TestConversationRequestsAreSerialised(t *testing.T) {
 		t.Fatalf("off must not serialise (control), overlaps=%d", atomic.LoadInt32(overlaps))
 	}
 }
+
+// The record names its client (2026-10-16: ten turns of an unknown agent could
+// not be traced because the record had no address and a fixed "route").
+func TestRecordNamesItsClient(t *testing.T) {
+	gw, _ := newTestGW(t, nil)
+	h := Headers{ClientIPHeader: "192.0.2.7", ClientFwdHeader: "198.51.100.1",
+		ClientUAHeader: "agente/1.0", RouteHeader: "/v1/chat/completions"}
+	if _, err := gw.Chat(h, chatBody("s", "u")); err != nil {
+		t.Fatal(err)
+	}
+	r := lastRecord(t, gw)
+	if r["client_ip"] != "192.0.2.7" || r["client_fwd"] != "198.51.100.1" ||
+		r["client_ua"] != "agente/1.0" || r["route"] != "/v1/chat/completions" {
+		t.Fatalf("record does not name its client: ip=%v fwd=%v ua=%v route=%v",
+			r["client_ip"], r["client_fwd"], r["client_ua"], r["route"])
+	}
+	// an in-process caller (no stamp) keeps the path it always recorded
+	if _, err := gw.Chat(Headers{}, chatBody("s", "u2")); err != nil {
+		t.Fatal(err)
+	}
+	if r := lastRecord(t, gw); r["route"] != "/api/chat" || r["client_ip"] != "" {
+		t.Fatalf("unstamped caller: route=%v ip=%v", r["route"], r["client_ip"])
+	}
+}
