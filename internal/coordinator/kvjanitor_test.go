@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Custok/sofmat/internal/gateway"
 )
 
 // TestMain keeps the janitor's list of every coordinator built by the tests out
@@ -164,5 +166,23 @@ func TestSSEErrorReadsTheEngineError(t *testing.T) {
 	}
 	if sseTimings(tail) != nil {
 		t.Fatal("test premise: no timings in this tail")
+	}
+}
+
+// A prefill engine that accepts and never answers must not hold a turn for a
+// minute: tokens() runs in Finish, before the stream closes (2026-10-16 night,
+// fin 60 007 ms per turn with .51 hung). RED with the old 60 s / 120 s timeouts.
+func TestTokensGivesUpFastOnAHungEngine(t *testing.T) {
+	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(8 * time.Second)
+	}))
+	defer hung.Close()
+	k := newKVPipe(hung.URL, "http://d", hung.URL, hung.URL)
+	t0 := time.Now()
+	if _, err := k.tokens(gateway.Body{"messages": []any{map[string]any{"role": "user", "content": "hola"}}}); err == nil {
+		t.Fatal("a hung engine must give an error")
+	}
+	if d := time.Since(t0); d > 4*time.Second {
+		t.Fatalf("tokens() waited %v on a hung engine", d)
 	}
 }

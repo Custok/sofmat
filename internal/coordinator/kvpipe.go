@@ -617,7 +617,11 @@ func (k *kvPipe) tokens(body gateway.Body) ([]int, error) {
 	}
 	k.tokMu.Unlock()
 
-	tpl, err := k.postJSON(k.prefillURL+"/apply-template", templateBody(body), 60*time.Second)
+	// (2026-10-16 night) 2 s, not 60: this runs in Finish after every reply, the
+	// handler does not close the stream until Finish returns, and a prefill engine
+	// that accepts and never answers made David wait 60.007 ms per turn with the
+	// answer already on screen. On timeout the row only loses its annotation.
+	tpl, err := k.postJSON(k.prefillURL+"/apply-template", templateBody(body), tokTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("apply-template: %w", err)
 	}
@@ -626,7 +630,7 @@ func (k *kvPipe) tokens(body gateway.Body) ([]int, error) {
 		return nil, fmt.Errorf("apply-template: empty prompt")
 	}
 	tk, err := k.postJSON(k.prefillURL+"/tokenize", map[string]any{
-		"content": prompt, "add_special": true, "with_pieces": false}, 120*time.Second)
+		"content": prompt, "add_special": true, "with_pieces": false}, tokTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("tokenize: %w", err)
 	}
@@ -658,6 +662,9 @@ func (k *kvPipe) tokens(body gateway.Body) ([]int, error) {
 
 // minCkptPrefix / minCkptTail: the two-pass prefill only pays off when the
 // stable part is big enough to be worth keeping and something is left after it.
+// tokTimeout bounds each trip of tokens() (apply-template, tokenize).
+const tokTimeout = 2 * time.Second
+
 const (
 	minCkptPrefix = 1024
 	minCkptTail   = 256
