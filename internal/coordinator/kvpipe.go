@@ -1028,13 +1028,23 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 	// file grows ~300 MB). Best-effort: if the stable part cannot be measured or
 	// the first pass fails, the prefill goes on in one pass as before.
 	prefixCkpt := 0
+	// The prefill rate the cost model learns is the rate of the WHOLE prefill:
+	// tokens and time summed over every pass. Until 2026-11-12 it was the last
+	// pass's own prompt_per_second, and the last pass only processes the few
+	// tokens left after the stop at the end of the last message — a handful of
+	// tokens over a fixed cost. Ring row 10368: 46.5 tok/s recorded for a prefill
+	// that ran at ~2400. That number replaced the default and told admission the
+	// prefill was fifty times slower than it is.
+	var passes []map[string]any
+	addPass := func(resp map[string]any) { passes = append(passes, resp) }
 	if pl := k.prefixLen(body, ids); pl >= minCkptPrefix && pl < len(ids)-1-minCkptTail {
-		if _, err := k.postJSON(rt.prefillURL+"/completion", map[string]any{
+		if resp, err := k.postJSON(rt.prefillURL+"/completion", map[string]any{
 			"prompt": ids[:pl], "n_predict": 0, "id_slot": slot, "cache_prompt": true,
 		}, 0); err != nil {
 			log.Printf("kvpipe: primer paso del prefill (prefijo %d): %v", pl, err)
 		} else {
 			prefixCkpt = pl
+			addPass(resp)
 		}
 	}
 	// (2026-10-16 night) and a third stop at the end of the last message, before
@@ -1042,10 +1052,12 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 	// and without a checkpoint here it went back to prefixCkpt and reprocessed
 	// the whole history (see userckpt.go for the decode-direct twin).
 	if end := len(ids) - replyHeaderToks; end > prefixCkpt+minCkptTail {
-		if _, err := k.postJSON(rt.prefillURL+"/completion", map[string]any{
+		if resp, err := k.postJSON(rt.prefillURL+"/completion", map[string]any{
 			"prompt": ids[:end], "n_predict": 0, "id_slot": slot, "cache_prompt": true,
 		}, 0); err != nil {
 			log.Printf("kvpipe: paso al final del ultimo mensaje (%d): %v", end, err)
+		} else {
+			addPass(resp)
 		}
 	}
 	comp, err := k.postJSON(rt.prefillURL+"/completion", map[string]any{
@@ -1059,12 +1071,15 @@ func (k *kvPipe) Prefill(body gateway.Body, _ gateway.Headers) (gateway.Body, er
 	if prefixCkpt > 0 {
 		out["prefix_ckpt"] = prefixCkpt // where the extra checkpoint sits, in tokens
 	}
+	addPass(comp)
+	if pp, n := prefillRate(passes); pp > 0 {
+		out["prefill_pp"] = pp
+		out["prefill_n"] = n
+	}
 	if tm, _ := comp["timings"].(map[string]any); tm != nil {
+		// kept for the ring: what the last pass alone reported
 		if v, ok := tm["prompt_per_second"].(float64); ok {
-			out["prefill_pp"] = v
-		}
-		if v, ok := tm["prompt_n"].(float64); ok {
-			out["prefill_n"] = int(v)
+			out["prefill_pp_last"] = v
 		}
 	}
 	t1 := time.Now()
@@ -1287,4 +1302,40 @@ func sseError(tail []byte) string {
 		msg = msg[:300]
 	}
 	return msg
+}
+
+// passTimings reads how many prompt tokens one /completion pass processed and
+// how long it took. The engine reports prompt_n and prompt_ms; an engine (or a
+// test double) that only gives the rate still yields a time.
+func passTimings(resp map[string]any) (n, ms float64) {
+	tm, _ := resp["timings"].(map[string]any)
+	if tm == nil {
+		return 0, 0
+	}
+	n, _ = tm["prompt_n"].(float64)
+	if n <= 0 {
+		return 0, 0
+	}
+	if v, ok := tm["prompt_ms"].(float64); ok && v > 0 {
+		return n, v
+	}
+	if pps, ok := tm["prompt_per_second"].(float64); ok && pps > 0 {
+		return n, n / pps * 1000
+	}
+	return 0, 0
+}
+
+// prefillRate is the prompt rate of a whole prefill: every pass's tokens over
+// every pass's time. Zero when no pass reported usable timings.
+func prefillRate(passes []map[string]any) (pp float64, n int) {
+	var sumN, sumMS float64
+	for _, r := range passes {
+		pn, ms := passTimings(r)
+		sumN += pn
+		sumMS += ms
+	}
+	if sumN <= 0 || sumMS <= 0 {
+		return 0, 0
+	}
+	return sumN / (sumMS / 1000), int(sumN)
 }
