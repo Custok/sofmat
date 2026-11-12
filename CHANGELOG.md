@@ -2,6 +2,15 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202611121846 (2026-11-12)
+Tres cambios del coordinador que llevaban semanas en uso en el nodo principal y no se habian publicado. No cambia nada mas.
+
+- **El prefill de traspaso se hace en dos pasadas.** El estado que se entrega al motor de decode lleva ahora un checkpoint al inicio de la conversacion. Antes, un cambio en el historial obligaba al decode a reprocesar el prompt entero aunque el catalogo siguiera intacto.
+- **Checkpoint al final de cada mensaje de usuario.** Cuando el ultimo mensaje es del usuario, el coordinador hace una primera pasada sin generar para que el motor deje un punto de retorno justo ahi. El turno siguiente arranca desde ese punto en vez de retroceder mas atras.
+- **El error del motor queda registrado.** Si un stream termina sin tiempos, la fila de `/api/requests` guarda el evento de error que mando el motor. Antes la fila quedaba vacia y no se podia saber por que habia fallado la peticion.
+
+No incluido: un limite de 2 s a la tokenizacion del cierre, que se probo y se revirtio.
+
 ## v202610161143 (2026-10-16)
 Primera release desde la v202609101226. Recoge también lo que llevaban las etiquetas `train`, `solo` y `rid` del 25-09 (ver sus entradas), que no llegaron a publicarse. Probado en producción en el coordinador del nodo main desde la madrugada del 16-10.
 - **Traspaso de KV con llama.cpp 2851b3b + `pending-h-mtp`:** el estado del borrador MTP viaja DENTRO del mismo fichero (#26004). Cuando el save no informa `n_written_dft`, no se pide el `.dft` aparte, y la fila del anillo lo marca con `dft_inline`.
