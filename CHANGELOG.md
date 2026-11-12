@@ -2,6 +2,12 @@
 
 Historial de versiones de soflink. Cada release publica 5 binarios (Windows / Linux x86_64+arm64 AppImage / macOS arm64+intel) con auto-update desde GitHub.
 
+## v202611122300 (2026-11-12)
+Un arreglo del coordinador.
+
+- **La velocidad del prefill que aprende el modelo de coste es la del prefill entero.** Se tomaba de la ultima de sus tres pasadas, que solo procesa los pocos tokens que quedan tras la parada al final del ultimo mensaje: una cifra de decenas de tokens por segundo para un prefill que va a miles. Ese numero sustituia al valor por defecto y la admision creia que el prefill era unas cincuenta veces mas lento de lo que es, asi que casi nunca lo elegia. Ahora se suman los tokens y el tiempo de todas las pasadas. La cifra de la ultima pasada sigue en la fila, como `prefill_pp_last`.
+- Dos pruebas nuevas, con la forma de un caso real y con campos ausentes.
+
 ## v202611121846 (2026-11-12)
 Tres cambios del coordinador que llevaban semanas en uso en el nodo principal y no se habian publicado. No cambia nada mas.
 
